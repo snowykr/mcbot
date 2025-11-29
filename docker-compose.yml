@@ -1,10 +1,27 @@
 services:
+  mcbot:
+    build:
+      context: ./mcbot
+      dockerfile: Dockerfile
+    container_name: mcbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MC_CONTAINER_NAME: stardew_create_forge_server
+      MCBOT_ROLE_NAME: 마크봇
+      READY_LOG_PATTERN: "Dedicated server took"
+      READY_TIMEOUT_SECONDS: "600"
+      STOP_TIMEOUT_SECONDS: "120"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
   mc-server:
     image: itzg/minecraft-server
     container_name: stardew_create_forge_server
     tty: true
     stdin_open: true
-    restart: unless-stopped
+    restart: "no"
     ports:
       - "25565:25565"
     environment:

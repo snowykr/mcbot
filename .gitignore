@@ -11,3 +11,10 @@
 
 # MineCraft
 /data
+
+# Environment
+.env
+
+# Go
+/mcbot/mcbot
+/mcbot/vendor/
