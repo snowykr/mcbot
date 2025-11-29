@@ -1,0 +1,26 @@
+services:
+  mc-server:
+    image: itzg/minecraft-server
+    container_name: stardew_create_forge_server
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+    ports:
+      - "25565:25565"
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.20.1"
+      TYPE: "FORGE"  # Forge로 변경
+      
+      # --- 성능 최적화 (M3 Pro) ---
+      MEMORY: "14G"
+      INIT_MEMORY: "6G"
+      USE_AIKAR_FLAGS: "true"
+      # --- 게임 설정 ---
+      view-distance: 10
+      simulation-distance: 10
+      MOTD: "Stardew x Create (Forge Server)"
+      
+    volumes:
+      - ./data:/data
+
