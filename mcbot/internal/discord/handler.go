@@ -31,13 +31,13 @@ func (h *Handler) HandleInteraction(s *discordgo.Session, i *discordgo.Interacti
 	}
 
 	if !h.hasRequiredRole(s, i) {
-		h.respondEmbed(s, i, EmbedPermissionDenied(h.cfg.McbotRoleName))
+		h.respondEmbed(s, i, EmbedPermissionDenied(h.cfg.McbotRoleName), false)
 		return
 	}
 
 	options := i.ApplicationCommandData().Options
 	if len(options) == 0 {
-		h.respondEmbed(s, i, EmbedError("오류", "action 옵션이 필요합니다."))
+		h.respondEmbed(s, i, EmbedError("오류", "action 옵션이 필요합니다."), false)
 		return
 	}
 
@@ -51,7 +51,7 @@ func (h *Handler) HandleInteraction(s *discordgo.Session, i *discordgo.Interacti
 	case ActionStatus:
 		h.handleStatus(s, i)
 	default:
-		h.respondEmbed(s, i, EmbedError("오류", "알 수 없는 action입니다."))
+		h.respondEmbed(s, i, EmbedError("오류", "알 수 없는 action입니다."), false)
 	}
 }
 
@@ -81,7 +81,7 @@ func (h *Handler) hasRequiredRole(s *discordgo.Session, i *discordgo.Interaction
 }
 
 func (h *Handler) handleStart(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	h.respondEmbed(s, i, EmbedStarting())
+	h.respondEmbed(s, i, EmbedStarting(), false)
 
 	ctx := context.Background()
 	resultCh := h.controller.Start(ctx)
@@ -102,7 +102,7 @@ func (h *Handler) handleStart(s *discordgo.Session, i *discordgo.InteractionCrea
 }
 
 func (h *Handler) handleStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	h.respondEmbed(s, i, EmbedStopping())
+	h.respondEmbed(s, i, EmbedStopping(), false)
 
 	ctx := context.Background()
 	resultCh := h.controller.Stop(ctx)
@@ -133,7 +133,7 @@ func (h *Handler) handleStatus(s *discordgo.Session, i *discordgo.InteractionCre
 		status.LastReadyDuration,
 	)
 
-	h.respondEmbed(s, i, embed)
+	h.respondEmbed(s, i, embed, true)
 }
 
 func (h *Handler) getUsername(i *discordgo.InteractionCreate) string {
@@ -149,11 +149,17 @@ func (h *Handler) getUsername(i *discordgo.InteractionCreate) string {
 	return "알 수 없음"
 }
 
-func (h *Handler) respondEmbed(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed) {
+func (h *Handler) respondEmbed(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed, ephemeral bool) {
+	var flags discordgo.MessageFlags
+	if ephemeral {
+		flags = discordgo.MessageFlagsEphemeral
+	}
+
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Embeds: []*discordgo.MessageEmbed{embed},
+			Flags:  flags,
 		},
 	})
 	if err != nil {
