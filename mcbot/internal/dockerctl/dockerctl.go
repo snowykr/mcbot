@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -76,7 +77,35 @@ func FollowLogs(ctx context.Context, containerName string, since time.Time) <-ch
 	ch := make(chan LogLine, 100)
 
 	go func() {
-		defer close(ch)
+		var wg sync.WaitGroup
+		var closeOnce sync.Once
+		closed := make(chan struct{})
+
+		safeSend := func(line LogLine) bool {
+			select {
+			case <-closed:
+				return false
+			default:
+			}
+			select {
+			case ch <- line:
+				return true
+			case <-closed:
+				return false
+			}
+		}
+
+		safeClose := func() {
+			closeOnce.Do(func() {
+				close(closed)
+			})
+		}
+
+		defer func() {
+			safeClose()
+			wg.Wait()
+			close(ch)
+		}()
 
 		sinceStr := since.Format(time.RFC3339)
 		cmd := exec.CommandContext(ctx, "docker", "logs",
@@ -84,67 +113,86 @@ func FollowLogs(ctx context.Context, containerName string, since time.Time) <-ch
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			ch <- LogLine{Err: fmt.Errorf("failed to get stdout pipe: %w", err)}
+			safeSend(LogLine{Err: fmt.Errorf("failed to get stdout pipe: %w", err)})
 			return
 		}
 
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
-			ch <- LogLine{Err: fmt.Errorf("failed to get stderr pipe: %w", err)}
+			safeSend(LogLine{Err: fmt.Errorf("failed to get stderr pipe: %w", err)})
 			return
 		}
 
 		if err := cmd.Start(); err != nil {
-			ch <- LogLine{Err: fmt.Errorf("failed to start docker logs: %w", err)}
+			safeSend(LogLine{Err: fmt.Errorf("failed to start docker logs: %w", err)})
 			return
 		}
 
-		done := make(chan struct{})
+		cmdDone := make(chan struct{})
+		ctxCancelled := make(chan struct{})
 
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			scanner := bufio.NewScanner(stdout)
 			for scanner.Scan() {
 				select {
-				case ch <- LogLine{Text: scanner.Text()}:
-				case <-ctx.Done():
+				case <-closed:
+					return
+				default:
+				}
+				if !safeSend(LogLine{Text: scanner.Text()}) {
 					return
 				}
 			}
 		}()
 
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			scanner := bufio.NewScanner(stderr)
 			for scanner.Scan() {
 				select {
-				case ch <- LogLine{Text: scanner.Text()}:
-				case <-ctx.Done():
+				case <-closed:
+					return
+				default:
+				}
+				if !safeSend(LogLine{Text: scanner.Text()}) {
 					return
 				}
 			}
 		}()
 
+		wg.Add(1)
 		go func() {
-			if err := cmd.Wait(); err != nil {
-				select {
-				case ch <- LogLine{Err: fmt.Errorf("docker logs process exited: %w", err)}:
-				case <-ctx.Done():
-				}
+			defer wg.Done()
+			defer close(cmdDone)
+
+			waitErr := cmd.Wait()
+
+			select {
+			case <-ctxCancelled:
+				return
+			default:
 			}
-			close(done)
+
+			if waitErr != nil {
+				safeSend(LogLine{Err: fmt.Errorf("docker logs process exited: %w", waitErr)})
+			}
 		}()
 
 		select {
 		case <-ctx.Done():
-			if err := cmd.Process.Kill(); err != nil {
-				select {
-				case ch <- LogLine{Err: fmt.Errorf("failed to kill docker logs process: %w", err)}:
-				default:
-				}
+			close(ctxCancelled)
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
 			}
-		case <-done:
+			<-cmdDone
+		case <-cmdDone:
 		}
+
+		safeClose()
 	}()
 
 	return ch
 }
-

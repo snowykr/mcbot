@@ -120,6 +120,8 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 				readyDuration := time.Since(startTime)
 				c.stateManager.SetRunning(readyDuration)
 
+				logCancel()
+
 				resultCh <- StartResult{
 					Success:     true,
 					LoadSeconds: loadSeconds,
