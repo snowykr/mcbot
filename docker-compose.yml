@@ -28,6 +28,8 @@ services:
       EULA: "TRUE"
       VERSION: "1.21.1"
       TYPE: "FABRIC"
+      DIFFICULTY: "peaceful"
+      KEEP_INVENTORY: "true"
       
       # --- 성능 최적화---
       MEMORY: "12G"
