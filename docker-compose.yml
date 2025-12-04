@@ -32,7 +32,7 @@ services:
       KEEP_INVENTORY: "true"
       
       # --- 성능 최적화---
-      MEMORY: "10G"
+      MEMORY: "6G"
       INIT_MEMORY: "4G"
       USE_AIKAR_FLAGS: "true"
       # --- 게임 설정 ---
