@@ -10,7 +10,7 @@ services:
     environment:
       MC_CONTAINER_NAME: cobblemon_fabric_server
       MCBOT_ROLE_NAME: 마크봇
-      READY_LOG_PATTERN: "Voice chat server started at port"
+      READY_LOG_PATTERN: "Done \\(([0-9.]+)s\\)! For help, type \"help\""
       READY_TIMEOUT_SECONDS: "600"
       STOP_TIMEOUT_SECONDS: "120"
     volumes:
@@ -32,8 +32,8 @@ services:
       KEEP_INVENTORY: "true"
       
       # --- 성능 최적화---
-      MEMORY: "12G"
-      INIT_MEMORY: "2G"
+      MEMORY: "10G"
+      INIT_MEMORY: "4G"
       USE_AIKAR_FLAGS: "true"
       # --- 게임 설정 ---
       view-distance: 10

@@ -44,7 +44,7 @@ docker compose create mc-server
 ### 3. 봇 실행
 
 ```bash
-docker compose up -d mcbot
+docker compose up --build -d mcbot
 ```
 
 이 명령은 **mcbot만 실행**합니다. mc-server는 자동으로 시작되지 않습니다.
