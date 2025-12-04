@@ -8,9 +8,9 @@ services:
     env_file:
       - .env
     environment:
-      MC_CONTAINER_NAME: stardew_create_forge_server
+      MC_CONTAINER_NAME: cobblemon_fabric_server
       MCBOT_ROLE_NAME: 마크봇
-      READY_LOG_PATTERN: "Dedicated server took"
+      READY_LOG_PATTERN: "Voice chat server started at port"
       READY_TIMEOUT_SECONDS: "600"
       STOP_TIMEOUT_SECONDS: "120"
     volumes:
@@ -18,7 +18,7 @@ services:
 
   mc-server:
     image: itzg/minecraft-server
-    container_name: stardew_create_forge_server
+    container_name: cobblemon_fabric_server
     tty: true
     stdin_open: true
     restart: "no"
@@ -26,17 +26,17 @@ services:
       - "25565:25565"
     environment:
       EULA: "TRUE"
-      VERSION: "1.20.1"
-      TYPE: "FORGE"  # Forge로 변경
+      VERSION: "1.21.1"
+      TYPE: "FABRIC"
       
-      # --- 성능 최적화 (M3 Pro) ---
-      MEMORY: "14G"
-      INIT_MEMORY: "6G"
+      # --- 성능 최적화---
+      MEMORY: "12G"
+      INIT_MEMORY: "2G"
       USE_AIKAR_FLAGS: "true"
       # --- 게임 설정 ---
       view-distance: 10
       simulation-distance: 10
-      MOTD: "Stardew x Create (Forge Server)"
+      MOTD: "Cobblemon(Fabric Server)"
       
     volumes:
       - ./data:/data
