@@ -40,7 +40,7 @@ type Controller struct {
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
-	pattern := regexp.MustCompile(cfg.ReadyLogPattern + `\s+([0-9.]+)\s+seconds`)
+	pattern := regexp.MustCompile(cfg.ReadyLogPattern)
 
 	return &Controller{
 		cfg:          cfg,
