@@ -4,6 +4,16 @@
 
 ## 기능
 
+### 상시 임베드 메시지
+- 지정된 채널에 서버 상태를 실시간으로 표시하는 고정 메시지
+- 서버 상태 표시: 🟢 열림 / 🟡 여는중 / 🔴 닫힘
+- 현재 접속 중인 플레이어 목록 실시간 업데이트
+- 버튼을 통한 서버 시작/종료 제어
+  - `서버 열기` - 서버가 닫혀있을 때 표시
+  - `서버 닫기` - 서버가 열려있을 때 표시
+  - `서버 여는중` - 서버 시작 중일 때 표시 (비활성화)
+
+### 슬래시 명령어
 - `/마크봇 action:켜기` - 마인크래프트 서버 시작
 - `/마크봇 action:끄기` - 마인크래프트 서버 종료 (graceful shutdown)
 - `/마크봇 action:상태` - 서버 상태 확인
@@ -20,6 +30,10 @@
    - 서버 설정 > 역할에서 `마크봇` 역할 생성
    - 봇을 사용할 멤버에게 해당 역할 부여
 
+3. 상시 임베드 메시지를 표시할 채널 ID 확인
+   - Discord 개발자 모드 활성화 (사용자 설정 > 고급 > 개발자 모드)
+   - 채널을 우클릭하여 "ID 복사"
+
 ## 설치 및 실행
 
 ### 1. 환경 변수 설정
@@ -28,7 +42,9 @@
 cp .env.example .env
 ```
 
-`.env` 파일을 열고 `DISCORD_TOKEN`에 봇 토큰을 입력합니다.
+`.env` 파일을 열고 다음 필수 항목을 입력합니다:
+- `DISCORD_TOKEN`: Discord 봇 토큰
+- `EMBED_CHANNEL_ID`: 상시 임베드 메시지를 표시할 채널 ID
 
 ### 2. 마인크래프트 서버 컨테이너 생성 (최초 1회)
 
@@ -83,11 +99,14 @@ docker compose up -d
 | 변수명 | 필수 | 기본값 | 설명 |
 |--------|------|--------|------|
 | `DISCORD_TOKEN` | ✅ | - | Discord 봇 토큰 |
+| `EMBED_CHANNEL_ID` | ✅ | - | 상시 임베드 메시지를 표시할 채널 ID |
 | `MC_CONTAINER_NAME` | ❌ | `stardew_create_forge_server` | MC 서버 컨테이너 이름 |
 | `MCBOT_ROLE_NAME` | ❌ | `마크봇` | 봇 사용 권한 역할 이름 |
 | `READY_LOG_PATTERN` | ❌ | `Dedicated server took` | 서버 준비 완료 로그 패턴 |
 | `READY_TIMEOUT_SECONDS` | ❌ | `600` | 서버 시작 타임아웃 (초) |
 | `STOP_TIMEOUT_SECONDS` | ❌ | `120` | 서버 종료 타임아웃 (초) |
+| `MC_JOIN_LOG_PATTERN` | ❌ | `]: (.+) joined the game` | 플레이어 접속 로그 패턴 (정규식) |
+| `MC_LEAVE_LOG_PATTERN` | ❌ | `]: (.+) left the game` | 플레이어 퇴장 로그 패턴 (정규식) |
 
 ## 프로젝트 구조
 

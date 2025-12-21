@@ -2,9 +2,12 @@ package discord
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/snowy/mcbot/internal/mcserver"
+	"github.com/snowy/mcbot/internal/state"
 )
 
 const (
@@ -12,6 +15,9 @@ const (
 	ColorError   = 0xFF0000
 	ColorInfo    = 0x0099FF
 	ColorWarning = 0xFFCC00
+
+	ComponentIDToggle = "mcserver_toggle"
+	EmbedMarkerFooter = "MCBOT_STATUS_PRESENCE"
 )
 
 func EmbedStarting() *discordgo.MessageEmbed {
@@ -130,6 +136,98 @@ func EmbedPermissionDenied(requiredRole string) *discordgo.MessageEmbed {
 		Description: fmt.Sprintf("이 명령어를 사용하려면 `%s` 역할이 필요합니다.", requiredRole),
 		Color:       ColorError,
 		Timestamp:   time.Now().Format(time.RFC3339),
+	}
+}
+
+func EmbedPersistentStatus(p mcserver.PresenceState) *discordgo.MessageEmbed {
+	var statusIcon, statusText string
+	var color int
+
+	switch p.ServerState {
+	case state.StateRunning:
+		statusIcon = "🟢"
+		statusText = "열림"
+		color = ColorSuccess
+	case state.StateStarting:
+		statusIcon = "🟡"
+		statusText = "여는중"
+		color = ColorWarning
+	case state.StateStopping:
+		statusIcon = "🟡"
+		statusText = "닫는중"
+		color = ColorWarning
+	default:
+		statusIcon = "🔴"
+		statusText = "닫힘"
+		color = ColorError
+	}
+
+	playersText := formatPlayers(p.Players)
+
+	embed := &discordgo.MessageEmbed{
+		Title:       "🎮 마인크래프트 서버 상태",
+		Description: fmt.Sprintf("%s **%s**", statusIcon, statusText),
+		Color:       color,
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:  "접속 현황",
+				Value: playersText,
+			},
+		},
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: EmbedMarkerFooter,
+		},
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	return embed
+}
+
+func formatPlayers(players []string) string {
+	if len(players) == 0 {
+		return "현재 접속자(0명)\n없음"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("현재 접속자(%d명)\n", len(players)))
+	for _, player := range players {
+		sb.WriteString(player)
+		sb.WriteString("\n")
+	}
+
+	result := sb.String()
+	return strings.TrimSuffix(result, "\n")
+}
+
+func BuildToggleButton(p mcserver.PresenceState) discordgo.Button {
+	var label string
+	var style discordgo.ButtonStyle
+	var disabled bool
+
+	switch p.ServerState {
+	case state.StateRunning:
+		label = "서버 닫기"
+		style = discordgo.DangerButton
+		disabled = false
+	case state.StateStarting:
+		label = "서버 여는중"
+		style = discordgo.SecondaryButton
+		disabled = true
+	case state.StateStopping:
+		label = "서버 닫는중"
+		style = discordgo.SecondaryButton
+		disabled = true
+	default:
+		label = "서버 열기"
+		style = discordgo.SuccessButton
+		disabled = false
+	}
+
+	return discordgo.Button{
+		Label:    label,
+		Style:    style,
+		CustomID: ComponentIDToggle,
+		Disabled: disabled,
 	}
 }
 

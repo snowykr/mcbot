@@ -14,6 +14,9 @@ type Config struct {
 	ReadyTimeout       time.Duration
 	McbotRoleName      string
 	StopTimeoutSeconds int
+	EmbedChannelID     string
+	MCJoinLogPattern   string
+	MCLeaveLogPattern  string
 }
 
 func Load() (*Config, error) {
@@ -23,6 +26,9 @@ func Load() (*Config, error) {
 		ReadyLogPattern:    getEnvOrDefault("READY_LOG_PATTERN", "Dedicated server took"),
 		McbotRoleName:      getEnvOrDefault("MCBOT_ROLE_NAME", "마크봇"),
 		StopTimeoutSeconds: getEnvIntOrDefault("STOP_TIMEOUT_SECONDS", 120),
+		EmbedChannelID:     os.Getenv("EMBED_CHANNEL_ID"),
+		MCJoinLogPattern:   getEnvOrDefault("MC_JOIN_LOG_PATTERN", `]: (.+) joined the game`),
+		MCLeaveLogPattern:  getEnvOrDefault("MC_LEAVE_LOG_PATTERN", `]: (.+) left the game`),
 	}
 
 	readyTimeoutSec := getEnvIntOrDefault("READY_TIMEOUT_SECONDS", 600)
@@ -47,6 +53,9 @@ func (c *Config) validate() error {
 	}
 	if c.McbotRoleName == "" {
 		return errors.New("MCBOT_ROLE_NAME is required")
+	}
+	if c.EmbedChannelID == "" {
+		return errors.New("EMBED_CHANNEL_ID is required")
 	}
 	return nil
 }

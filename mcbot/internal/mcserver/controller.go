@@ -31,21 +31,33 @@ type StatusResult struct {
 	LastStartTime     time.Time
 	LastReadyDuration time.Duration
 	LastError         error
+	Players           []string
 }
 
 type Controller struct {
-	cfg          *config.Config
-	stateManager *state.Manager
-	readyPattern *regexp.Regexp
+	cfg           *config.Config
+	stateManager  *state.Manager
+	readyPattern  *regexp.Regexp
+	logMux        *LogMultiplexer
+	playerTracker *PlayerTracker
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
 	pattern := regexp.MustCompile(cfg.ReadyLogPattern)
 
+	logMux := NewLogMultiplexer(cfg.MCContainerName)
+
+	playerTracker, err := NewPlayerTracker(logMux, cfg.MCJoinLogPattern, cfg.MCLeaveLogPattern)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create player tracker: %w", err)
+	}
+
 	return &Controller{
-		cfg:          cfg,
-		stateManager: stateManager,
-		readyPattern: pattern,
+		cfg:           cfg,
+		stateManager:  stateManager,
+		readyPattern:  pattern,
+		logMux:        logMux,
+		playerTracker: playerTracker,
 	}, nil
 }
 
@@ -103,10 +115,14 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 			return
 		}
 
+		c.playerTracker.Clear()
+
+		c.logMux.Start(startTime)
+
 		logCtx, logCancel := context.WithTimeout(ctx, c.cfg.ReadyTimeout)
 		defer logCancel()
 
-		logCh := dockerctl.FollowLogs(logCtx, c.cfg.MCContainerName, startTime)
+		logCh := c.logMux.Subscribe()
 
 		for logLine := range logCh {
 			if logLine.Err != nil {
@@ -128,24 +144,26 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 				}
 				return
 			}
-		}
 
-		if logCtx.Err() == context.DeadlineExceeded {
-			c.stateManager.SetError(fmt.Errorf("ready timeout exceeded"))
-			resultCh <- StartResult{
-				Success:      false,
-				ErrorMessage: fmt.Sprintf("서버 시작 시간이 %v을 초과했습니다. 서버 로그를 확인해주세요.", c.cfg.ReadyTimeout),
+			select {
+			case <-logCtx.Done():
+				if logCtx.Err() == context.DeadlineExceeded {
+					c.stateManager.SetError(fmt.Errorf("ready timeout exceeded"))
+					resultCh <- StartResult{
+						Success:      false,
+						ErrorMessage: fmt.Sprintf("서버 시작 시간이 %v을 초과했습니다. 서버 로그를 확인해주세요.", c.cfg.ReadyTimeout),
+					}
+					return
+				}
+			case <-ctx.Done():
+				c.stateManager.SetError(ctx.Err())
+				resultCh <- StartResult{
+					Success:      false,
+					ErrorMessage: "서버 시작이 취소되었습니다.",
+				}
+				return
+			default:
 			}
-			return
-		}
-
-		if ctx.Err() != nil {
-			c.stateManager.SetError(ctx.Err())
-			resultCh <- StartResult{
-				Success:      false,
-				ErrorMessage: "서버 시작이 취소되었습니다.",
-			}
-			return
 		}
 
 		c.stateManager.SetError(fmt.Errorf("log stream ended unexpectedly"))
@@ -240,6 +258,7 @@ func (c *Controller) Status(ctx context.Context) StatusResult {
 			LastStartTime:     info.LastStartTime,
 			LastReadyDuration: info.LastReadyDuration,
 			LastError:         err,
+			Players:           []string{},
 		}
 	}
 
@@ -258,7 +277,24 @@ func (c *Controller) Status(ctx context.Context) StatusResult {
 		LastStartTime:     info.LastStartTime,
 		LastReadyDuration: info.LastReadyDuration,
 		LastError:         info.LastError,
+		Players:           c.playerTracker.GetPlayers(),
 	}
+}
+
+func (c *Controller) Presence(ctx context.Context) PresenceState {
+	status := c.Status(ctx)
+
+	return PresenceState{
+		ServerState:       status.State,
+		ContainerRunning:  status.ContainerRunning,
+		Players:           status.Players,
+		LastStartTime:     status.LastStartTime,
+		LastReadyDuration: status.LastReadyDuration,
+	}
+}
+
+func (c *Controller) GetPlayerTracker() *PlayerTracker {
+	return c.playerTracker
 }
 
 func (c *Controller) SyncState(ctx context.Context) error {
