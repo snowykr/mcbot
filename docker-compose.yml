@@ -8,7 +8,7 @@ services:
     env_file:
       - .env
     environment:
-      MC_CONTAINER_NAME: cobblemon_fabric_server
+      MC_CONTAINER_NAME: krcraft-server
       MCBOT_ROLE_NAME: 마크봇
       READY_LOG_PATTERN: "Done \\(([0-9.]+)s\\)! For help, type \"help\""
       READY_TIMEOUT_SECONDS: "600"
@@ -18,7 +18,7 @@ services:
 
   mc-server:
     image: itzg/minecraft-server
-    container_name: cobblemon_fabric_server
+    container_name: krcraft-server
     tty: true
     stdin_open: true
     restart: "no"
@@ -26,19 +26,23 @@ services:
       - "25565:25565"
     environment:
       EULA: "TRUE"
-      VERSION: "1.21.1"
-      TYPE: "FABRIC"
-      DIFFICULTY: "peaceful"
-      KEEP_INVENTORY: "true"
+      UID: "1001"
+      GID: "1001"
+      VERSION: "1.20.1"
+      TYPE: "FORGE"
+      # DIFFICULTY: "peaceful"
+      # KEEP_INVENTORY: "true"
+      ENABLE_RCON: "true"
+      RCON_CMDS_STARTUP: "gamerule keepInventory true"
       
       # --- 성능 최적화---
-      MEMORY: "6G"
-      INIT_MEMORY: "4G"
+      MEMORY: "14G"
+      INIT_MEMORY: "14G"
       USE_AIKAR_FLAGS: "true"
       # --- 게임 설정 ---
-      view-distance: 10
-      simulation-distance: 10
-      MOTD: "Cobblemon(Fabric Server)"
+      view-distance: 8
+      simulation-distance: 8
+      MOTD: "SNOWY'S KRCRAFT SERVER"
       
     volumes:
       - ./data:/data
