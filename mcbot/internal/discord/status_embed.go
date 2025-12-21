@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/bwmarrin/discordgo"
@@ -102,6 +103,14 @@ func (m *StatusEmbedManager) createNewMessage(ctx context.Context) error {
 	return nil
 }
 
+func isUnknownMessageError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := strings.ToLower(err.Error())
+	return strings.Contains(errMsg, "unknown message") || strings.Contains(errMsg, "10008")
+}
+
 func (m *StatusEmbedManager) Update(ctx context.Context) error {
 	m.mu.RLock()
 	msgID := m.messageID
@@ -142,6 +151,21 @@ func (m *StatusEmbedManager) UpdateWithPresence(presence mcserver.PresenceState)
 	})
 
 	if err != nil {
+		if isUnknownMessageError(err) {
+			log.Printf("상시 임베드 메시지가 삭제되었습니다. 새 메시지를 생성합니다.")
+
+			m.mu.Lock()
+			m.messageID = ""
+			m.mu.Unlock()
+
+			ctx := context.Background()
+			if err := m.createNewMessage(ctx); err != nil {
+				return fmt.Errorf("삭제된 메시지 재생성 실패: %w", err)
+			}
+
+			return m.UpdateWithPresence(presence)
+		}
+
 		return fmt.Errorf("메시지 업데이트 실패: %w", err)
 	}
 

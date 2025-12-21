@@ -309,6 +309,8 @@ func (c *Controller) SyncState(ctx context.Context) error {
 		if currentState == state.StateStopped || currentState == state.StateError {
 			c.stateManager.SetState(state.StateRunning)
 		}
+
+		c.logMux.Start(containerState.StartedAt)
 	} else {
 		if currentState == state.StateRunning {
 			c.stateManager.SetStopped()

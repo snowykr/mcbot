@@ -8,6 +8,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/snowy/mcbot/internal/config"
 	"github.com/snowy/mcbot/internal/mcserver"
+	"github.com/snowy/mcbot/internal/state"
 )
 
 type Handler struct {
@@ -96,9 +97,9 @@ func (h *Handler) handleComponentInteraction(s *discordgo.Session, i *discordgo.
 	presence := h.controller.Presence(ctx)
 
 	switch presence.ServerState {
-	case 0, 3:
+	case state.StateStopped, state.StateError:
 		h.handleButtonStart(ctx, s, i)
-	case 2:
+	case state.StateRunning:
 		h.handleButtonStop(ctx, s, i)
 	default:
 		log.Printf("버튼 클릭 무시: 현재 상태 %v", presence.ServerState)
