@@ -31,7 +31,6 @@ services:
       VERSION: "1.20.1"
       TYPE: "FORGE"
       # DIFFICULTY: "peaceful"
-      # KEEP_INVENTORY: "true"
       ENABLE_RCON: "true"
       RCON_CMDS_STARTUP: "gamerule keepInventory true"
       
