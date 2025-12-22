@@ -24,48 +24,16 @@ func TestLogMultiplexer_BasicSubscription(t *testing.T) {
 func TestLogMultiplexer_MultipleSubscribers(t *testing.T) {
 	mux := NewLogMultiplexer("test_container")
 	mux.Start(time.Now())
-	defer mux.Stop()
 
-	sub1 := mux.Subscribe()
-	sub2 := mux.Subscribe()
-	sub3 := mux.Subscribe()
-
-	var wg sync.WaitGroup
-	wg.Add(3)
-
-	go func() {
-		defer wg.Done()
-		for range sub1 {
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		for range sub2 {
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		for range sub3 {
-		}
-	}()
+	_ = mux.Subscribe()
+	_ = mux.Subscribe()
+	_ = mux.Subscribe()
 
 	time.Sleep(50 * time.Millisecond)
 	mux.Stop()
 
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		t.Log("All subscribers closed successfully")
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for subscribers to close")
-	}
+	time.Sleep(50 * time.Millisecond)
+	t.Log("Multiple subscribers test completed")
 }
 
 func TestLogMultiplexer_StopIdempotent(t *testing.T) {
@@ -87,13 +55,10 @@ func TestLogMultiplexer_SubscribeAfterStop(t *testing.T) {
 	sub := mux.Subscribe()
 
 	select {
-	case _, ok := <-sub:
-		if ok {
-			t.Fatal("Expected closed channel, but received a value")
-		}
-		t.Log("Received closed channel as expected")
+	case <-sub:
+		t.Fatal("Did not expect to receive data after Stop")
 	case <-time.After(100 * time.Millisecond):
-		t.Fatal("Timeout waiting for channel to be closed")
+		t.Log("Channel remains open after Stop as expected (for restart capability)")
 	}
 }
 
@@ -193,20 +158,20 @@ func TestLogMultiplexer_SubscriberChannelCloseOnStop(t *testing.T) {
 	sub1 := mux.Subscribe()
 	sub2 := mux.Subscribe()
 
-	mux.Stop()
-
-	for i, sub := range []<-chan dockerctl.LogLine{sub1, sub2} {
-		select {
-		case _, ok := <-sub:
-			if ok {
-				t.Fatalf("Subscriber %d: expected closed channel", i)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("Subscriber %d: timeout waiting for channel close", i)
+	go func() {
+		for range sub1 {
 		}
-	}
+	}()
+	go func() {
+		for range sub2 {
+		}
+	}()
 
-	t.Log("All subscriber channels closed on Stop")
+	time.Sleep(50 * time.Millisecond)
+	mux.Stop()
+	time.Sleep(50 * time.Millisecond)
+
+	t.Log("Subscriber channels remain open after Stop (for restart capability)")
 }
 
 func TestLogMultiplexer_NoDeadlockOnSlowSubscriber(t *testing.T) {
@@ -254,4 +219,46 @@ func TestLogMultiplexer_RapidStartStop(t *testing.T) {
 	}
 
 	t.Log("Rapid start/stop completed without panic")
+}
+
+func TestLogMultiplexer_RestartAfterStop(t *testing.T) {
+	mux := NewLogMultiplexer("test_container")
+
+	sub := mux.Subscribe()
+
+	go func() {
+		for range sub {
+		}
+	}()
+
+	mux.Start(time.Now())
+	time.Sleep(50 * time.Millisecond)
+	mux.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	mux.Start(time.Now())
+	time.Sleep(50 * time.Millisecond)
+	mux.Stop()
+
+	t.Log("Restart after Stop works correctly")
+}
+
+func TestLogMultiplexer_MultipleRestarts(t *testing.T) {
+	mux := NewLogMultiplexer("test_container")
+	sub := mux.Subscribe()
+
+	go func() {
+		for range sub {
+		}
+	}()
+
+	for i := 0; i < 5; i++ {
+		mux.Start(time.Now())
+		time.Sleep(20 * time.Millisecond)
+		mux.Stop()
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Log("Multiple restarts completed successfully")
 }

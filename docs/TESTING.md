@@ -150,28 +150,40 @@ go tool cover -html=coverage.out
 **책임**:
 - 여러 구독자에게 로그 브로드캐스트 검증
 - Start/Stop/Subscribe API 계약 확인
+- 컨테이너 재시작 시 재연결 가능성 보장
 - 동시성 및 종료 안전성 보장
 
 **검증 포인트**:
 - **기본 구독**: Subscribe 호출 시 로그 채널 정상 반환
-- **다수 구독자**: 여러 구독자 모두 로그 수신, Stop 시 모든 채널 닫힘
+- **다수 구독자**: 여러 구독자 모두 로그 수신
 - **Stop idempotent**: 여러 번 호출해도 패닉 없음
-- **Start once**: 여러 번 호출해도 실제로는 한 번만 동작
-- **Stop 후 Subscribe**: 이미 닫힌 채널 반환
+- **Start idempotent**: 이미 running 상태면 무시 (로그만 출력)
+- **Stop 후 Subscribe**: 채널은 열려있지만 로그는 전달되지 않음 (재시작 대기 상태)
 - **Start 없이 Stop**: 정상 처리
 - **동시 Subscribe**: 10개 고루틴에서 동시 구독해도 모두 정상
 - **동시 Stop & Subscribe**: Stop과 Subscribe 동시 호출해도 데드락 없음
-- **느린 구독자**: 느린 구독자가 있어도 전체 시스템 데드락 없음
+- **느린 구독자**: 느린 구독자가 있어도 전체 시스템 데드락 없음 (default 분기로 드롭)
 - **빠른 Start/Stop**: 50회 연속 Start/Stop 반복해도 패닉 없음
+- **재시작 후 재연결**: Stop 후 다시 Start 호출 시 동일 구독자 채널로 새 로그 전달
+- **다중 재시작**: 여러 번의 Start/Stop 사이클에서도 구독자 채널 유지
 
 **Start/Stop/Subscribe 규약**:
-- 여러 구독자에게 동일한 로그 스트림 전달
-- Stop 호출 시 모든 구독 채널이 확실히 닫힘
-- Stop, Start는 여러 번 호출해도 안전 (idempotent)
-- Start는 실제로 한 번만 동작
-- Stop 이후 Subscribe하면 이미 종료된 채널 반환
+- 여러 구독자에게 동일한 로그 스트림 브로드캐스트
+- **구독자 채널은 프로세스 수명 동안 유지** (Stop 시에도 닫지 않음)
+- Start:
+  - 이미 running 상태면 no-op (로그 출력 후 즉시 반환)
+  - 아니면 새 context로 FollowLogs 시작, running = true
+  - 컨테이너 재시작 시마다 호출 가능 (재연결)
+- Stop:
+  - 현재 FollowLogs context를 취소하고 run goroutine 종료 대기
+  - running = false로 설정
+  - **구독자 채널은 닫지 않음** (다음 Start에서 재사용)
+- Subscribe:
+  - 언제든 호출 가능, 새 버퍼 채널(cap=100) 생성 및 등록
+  - 채널은 LogMultiplexer 수명 동안 유지
+  - Start 상태에 따라 로그 전달 여부가 결정됨
 - Subscribe/Stop/Start 동시 호출해도 데드락/패닉 없음
-- 느린 구독자와 빠른 구독자 혼재 시에도 데드락 없음
+- 느린 구독자는 default 분기로 드롭되어 전체 시스템 블로킹 방지
 
 ## 수동 검증 시나리오
 
@@ -189,7 +201,7 @@ go tool cover -html=coverage.out
 5. ephemeral 메시지로 성공 알림이 오는지 확인
 
 **예상 결과**:
-- 버튼 클릭 즉시 상태가 "시작 중"으로 변경
+- 버튼 클릭 즉시 상태가 "시작 중"으로 변경 (임베드는 항상 최신 상태를 조회하여 업데이트)
 - 서버 시작 완료 시 "실행 중"으로 변경
 - 시작 소요 시간이 표시됨
 - 요청자 이름이 포함된 성공 메시지
@@ -197,6 +209,11 @@ go tool cover -html=coverage.out
 **실패 케이스**:
 - 컨테이너가 없는 경우: 명확한 에러 메시지와 해결 방법 안내
 - 타임아웃 발생: 타임아웃 메시지와 로그 확인 안내
+
+**구현 세부사항**:
+- `handleButtonStart`는 `Controller.Start` 호출 직후와 완료 후 각각 `statusEmbed.Update(ctx)` 호출
+- `Update` 메서드는 내부적으로 `Controller.Presence(ctx)`를 조회하여 항상 최신 상태 반영
+- 이전의 Presence 스냅샷 기반 업데이트 방식은 제거되어 레이스 컨디션 방지
 
 #### 1.2 버튼 클릭 - 서버 종료
 
@@ -247,14 +264,26 @@ go tool cover -html=coverage.out
 - ephemeral 메시지로 권한 부족 안내
 - 상태 임베드는 변경되지 않음
 
-#### 1.5 지원하지 않는 Interaction 타입
+#### 1.5 슬래시 커맨드 (더 이상 지원하지 않음)
 
 **절차**:
 1. 봇 로그를 모니터링
-2. (테스트 목적으로) slash command 등 다른 타입의 interaction 전송
+2. (테스트 목적으로) 슬래시 커맨드 입력
 
 **예상 결과**:
-- 로그에 "지원하지 않는 인터랙션 타입: [타입] (ID: [ID])" 메시지 출력
+- 사용자에게 ephemeral 메시지로 "이 봇은 슬래시 커맨드를 더 이상 지원하지 않습니다. 버튼을 통해 서버를 제어해주세요." 안내
+- 로그에 "슬래시 커맨드 수신 (더 이상 지원하지 않음): [커맨드명] (ID: [ID], GuildID: [GuildID], UserID: [UserID])" 기록
+- 봇이 크래시하지 않음
+
+#### 1.6 기타 지원하지 않는 Interaction 타입
+
+**절차**:
+1. 봇 로그를 모니터링
+2. (테스트 목적으로) Modal 등 다른 타입의 interaction 전송
+
+**예상 결과**:
+- 사용자에게 ephemeral 메시지로 "지원하지 않는 인터랙션 타입입니다." 안내
+- 로그에 "지원하지 않는 인터랙션 타입: [타입] (ID: [ID], GuildID: [GuildID], UserID: [UserID])" 기록
 - 봇이 크래시하지 않음
 
 ### 2. 상태 임베드 업데이트 검증

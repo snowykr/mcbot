@@ -25,12 +25,51 @@ func NewHandler(cfg *config.Config, controller *mcserver.Controller, statusEmbed
 }
 
 func (h *Handler) HandleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type == discordgo.InteractionMessageComponent {
+	switch i.Type {
+	case discordgo.InteractionMessageComponent:
 		h.handleComponentInteraction(s, i)
 		return
-	}
 
-	log.Printf("지원하지 않는 인터랙션 타입: %v (ID: %s)", i.Type, i.ID)
+	case discordgo.InteractionApplicationCommand:
+		h.handleApplicationCommand(s, i)
+		return
+
+	default:
+		h.handleUnsupportedInteraction(s, i)
+	}
+}
+
+func (h *Handler) handleApplicationCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	commandName := i.ApplicationCommandData().Name
+	log.Printf("슬래시 커맨드 수신 (더 이상 지원하지 않음): %s (ID: %s, GuildID: %s, UserID: %s)",
+		commandName, i.ID, i.GuildID, i.User.ID)
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "이 봇은 슬래시 커맨드를 더 이상 지원하지 않습니다.\n버튼을 통해 서버를 제어해주세요.",
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+	if err != nil {
+		log.Printf("슬래시 커맨드 응답 실패: %v", err)
+	}
+}
+
+func (h *Handler) handleUnsupportedInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	log.Printf("지원하지 않는 인터랙션 타입: %v (ID: %s, GuildID: %s, UserID: %s)",
+		i.Type, i.ID, i.GuildID, i.User.ID)
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "지원하지 않는 인터랙션 타입입니다.",
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+	if err != nil {
+		log.Printf("인터랙션 응답 실패: %v", err)
+	}
 }
 
 func (h *Handler) handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -101,10 +140,9 @@ func (h *Handler) hasRequiredRole(s *discordgo.Session, i *discordgo.Interaction
 }
 
 func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
-	presence := h.controller.Presence(ctx)
 	resultCh := h.controller.Start(ctx)
 
-	if err := h.statusEmbed.UpdateWithPresence(presence); err != nil {
+	if err := h.statusEmbed.Update(ctx); err != nil {
 		log.Printf("상태 임베드 업데이트 실패: %v", err)
 	}
 
@@ -135,10 +173,9 @@ func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i
 }
 
 func (h *Handler) handleButtonStop(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
-	presence := h.controller.Presence(ctx)
 	resultCh := h.controller.Stop(ctx)
 
-	if err := h.statusEmbed.UpdateWithPresence(presence); err != nil {
+	if err := h.statusEmbed.Update(ctx); err != nil {
 		log.Printf("상태 임베드 업데이트 실패: %v", err)
 	}
 

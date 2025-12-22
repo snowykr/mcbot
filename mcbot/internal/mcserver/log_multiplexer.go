@@ -2,6 +2,7 @@ package mcserver
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
 
@@ -14,42 +15,42 @@ type LogMultiplexer struct {
 	mu            sync.RWMutex
 	ctx           context.Context
 	cancel        context.CancelFunc
-	started       bool
-	stopped       bool
-	startOnce     sync.Once
+	running       bool
 	wg            sync.WaitGroup
 }
 
 func NewLogMultiplexer(containerName string) *LogMultiplexer {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &LogMultiplexer{
 		containerName: containerName,
 		subscribers:   make([]chan dockerctl.LogLine, 0),
-		ctx:           ctx,
-		cancel:        cancel,
 	}
 }
 
 func (m *LogMultiplexer) Start(since time.Time) {
-	m.startOnce.Do(func() {
-		m.mu.Lock()
-		if m.stopped {
-			m.mu.Unlock()
-			return
-		}
-		m.started = true
-		m.mu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-		m.wg.Add(1)
-		go m.run(since)
-	})
+	if m.running {
+		log.Printf("LogMultiplexer: 이미 실행 중입니다. Start 호출 무시")
+		return
+	}
+
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.running = true
+
+	m.wg.Add(1)
+	go m.run(m.ctx, since)
 }
 
-func (m *LogMultiplexer) run(since time.Time) {
+func (m *LogMultiplexer) run(ctx context.Context, since time.Time) {
 	defer m.wg.Done()
-	defer m.closeAllSubscribers()
+	defer func() {
+		m.mu.Lock()
+		m.running = false
+		m.mu.Unlock()
+	}()
 
-	logCh := dockerctl.FollowLogs(m.ctx, m.containerName, since)
+	logCh := dockerctl.FollowLogs(ctx, m.containerName, since)
 
 	for logLine := range logCh {
 		m.mu.RLock()
@@ -60,7 +61,7 @@ func (m *LogMultiplexer) run(since time.Time) {
 		for _, sub := range subs {
 			select {
 			case sub <- logLine:
-			case <-m.ctx.Done():
+			case <-ctx.Done():
 				return
 			default:
 			}
@@ -73,35 +74,21 @@ func (m *LogMultiplexer) Subscribe() <-chan dockerctl.LogLine {
 	defer m.mu.Unlock()
 
 	ch := make(chan dockerctl.LogLine, 100)
-
-	if m.stopped {
-		close(ch)
-		return ch
-	}
-
 	m.subscribers = append(m.subscribers, ch)
 	return ch
 }
 
 func (m *LogMultiplexer) Stop() {
 	m.mu.Lock()
-	if m.stopped {
+	if !m.running {
 		m.mu.Unlock()
 		return
 	}
-	m.stopped = true
+	cancel := m.cancel
 	m.mu.Unlock()
 
-	m.cancel()
-	m.wg.Wait()
-}
-
-func (m *LogMultiplexer) closeAllSubscribers() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for _, sub := range m.subscribers {
-		close(sub)
+	if cancel != nil {
+		cancel()
 	}
-	m.subscribers = nil
+	m.wg.Wait()
 }

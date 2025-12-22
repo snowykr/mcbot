@@ -62,42 +62,41 @@ func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller
 	}, nil
 }
 
+func startErrorMessage(s state.ServerState) (string, bool) {
+	switch s {
+	case state.StateStarting:
+		return "서버가 이미 시작 중입니다.", true
+	case state.StateRunning:
+		return "서버가 이미 실행 중입니다.", true
+	case state.StateStopping:
+		return "서버가 종료 중입니다. 종료가 완료된 후 다시 시도해주세요.", true
+	case state.StateStopped, state.StateError:
+		return "", false
+	default:
+		return "서버 상태가 변경되었습니다. 다시 시도해주세요.", true
+	}
+}
+
 func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 	resultCh := make(chan StartResult, 1)
 
 	currentState := c.stateManager.GetState()
 
-	if currentState == state.StateStarting {
+	if errorMsg, hasError := startErrorMessage(currentState); hasError {
 		resultCh <- StartResult{
 			Success:      false,
-			ErrorMessage: "서버가 이미 시작 중입니다.",
-		}
-		close(resultCh)
-		return resultCh
-	}
-
-	if currentState == state.StateRunning {
-		resultCh <- StartResult{
-			Success:      false,
-			ErrorMessage: "서버가 이미 실행 중입니다.",
-		}
-		close(resultCh)
-		return resultCh
-	}
-
-	if currentState == state.StateStopping {
-		resultCh <- StartResult{
-			Success:      false,
-			ErrorMessage: "서버가 종료 중입니다. 종료가 완료된 후 다시 시도해주세요.",
+			ErrorMessage: errorMsg,
 		}
 		close(resultCh)
 		return resultCh
 	}
 
 	if !c.stateManager.SetStarting() {
+		currentState = c.stateManager.GetState()
+		errorMsg, _ := startErrorMessage(currentState)
 		resultCh <- StartResult{
 			Success:      false,
-			ErrorMessage: "서버 상태가 변경되었습니다. 다시 시도해주세요.",
+			ErrorMessage: errorMsg,
 		}
 		close(resultCh)
 		return resultCh
@@ -272,6 +271,7 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 		}
 
 		if !containerState.Exists || !containerState.Running {
+			c.logMux.Stop()
 			c.playerTracker.Clear()
 			c.stateManager.SetStopped()
 			resultCh <- StopResult{
@@ -290,6 +290,7 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 			return
 		}
 
+		c.logMux.Stop()
 		c.playerTracker.Clear()
 		c.stateManager.SetStopped()
 		resultCh <- StopResult{
@@ -368,6 +369,7 @@ func (c *Controller) SyncState(ctx context.Context) error {
 		c.logMux.Start(containerState.StartedAt)
 	} else {
 		if currentState == state.StateRunning {
+			c.logMux.Stop()
 			c.playerTracker.Clear()
 			c.stateManager.SetStopped()
 		}
