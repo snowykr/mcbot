@@ -64,17 +64,18 @@ func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller
 func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 	resultCh := make(chan StartResult, 1)
 
+	if !c.stateManager.SetStarting() {
+		currentState := c.stateManager.GetState()
+		resultCh <- StartResult{
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("서버를 시작할 수 없습니다. 현재 상태: %s", currentState.Korean()),
+		}
+		close(resultCh)
+		return resultCh
+	}
+
 	go func() {
 		defer close(resultCh)
-
-		if !c.stateManager.SetStarting() {
-			currentState := c.stateManager.GetState()
-			resultCh <- StartResult{
-				Success:      false,
-				ErrorMessage: fmt.Sprintf("서버를 시작할 수 없습니다. 현재 상태: %s", currentState.Korean()),
-			}
-			return
-		}
 
 		containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
 		if err != nil {
@@ -182,29 +183,50 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 	resultCh := make(chan StopResult, 1)
 
+	currentState := c.stateManager.GetState()
+
+	if currentState == state.StateStopping {
+		resultCh <- StopResult{
+			Success:      false,
+			ErrorMessage: "서버가 이미 종료 중입니다.",
+		}
+		close(resultCh)
+		return resultCh
+	}
+
+	if currentState == state.StateStopped {
+		resultCh <- StopResult{
+			Success:      false,
+			ErrorMessage: "서버가 이미 종료되어 있습니다.",
+		}
+		close(resultCh)
+		return resultCh
+	}
+
+	if currentState == state.StateStarting {
+		resultCh <- StopResult{
+			Success:      false,
+			ErrorMessage: "서버가 시작 중입니다. 시작이 완료된 후 다시 시도해주세요.",
+		}
+		close(resultCh)
+		return resultCh
+	}
+
+	if !c.stateManager.SetStopping() {
+		resultCh <- StopResult{
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("서버를 종료할 수 없습니다. 현재 상태: %s", currentState.Korean()),
+		}
+		close(resultCh)
+		return resultCh
+	}
+
 	go func() {
 		defer close(resultCh)
 
-		currentState := c.stateManager.GetState()
-
-		if currentState == state.StateStopping {
-			resultCh <- StopResult{
-				Success:      false,
-				ErrorMessage: "서버가 이미 종료 중입니다.",
-			}
-			return
-		}
-
-		if currentState == state.StateStopped {
-			resultCh <- StopResult{
-				Success:      false,
-				ErrorMessage: "서버가 이미 종료되어 있습니다.",
-			}
-			return
-		}
-
 		containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
 		if err != nil {
+			c.stateManager.SetError(err)
 			resultCh <- StopResult{
 				Success:      false,
 				ErrorMessage: fmt.Sprintf("컨테이너 상태 확인 실패: %v", err),
@@ -219,16 +241,6 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 				ErrorMessage: "서버가 이미 종료되어 있습니다.",
 			}
 			return
-		}
-
-		if !c.stateManager.SetStopping() {
-			if c.stateManager.GetState() == state.StateStarting {
-				resultCh <- StopResult{
-					Success:      false,
-					ErrorMessage: "서버가 시작 중입니다. 시작이 완료된 후 다시 시도해주세요.",
-				}
-				return
-			}
 		}
 
 		if err := dockerctl.StopContainer(ctx, c.cfg.MCContainerName, c.cfg.StopTimeoutSeconds); err != nil {

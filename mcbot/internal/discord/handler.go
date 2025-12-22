@@ -132,11 +132,11 @@ func (h *Handler) hasRequiredRole(s *discordgo.Session, i *discordgo.Interaction
 }
 
 func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
+	resultCh := h.controller.Start(ctx)
+
 	if err := h.statusEmbed.Update(ctx); err != nil {
 		log.Printf("상태 임베드 업데이트 실패: %v", err)
 	}
-
-	resultCh := h.controller.Start(ctx)
 
 	go func() {
 		result := <-resultCh
@@ -168,6 +168,10 @@ func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i
 
 func (h *Handler) handleButtonStop(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
 	resultCh := h.controller.Stop(ctx)
+
+	if err := h.statusEmbed.Update(ctx); err != nil {
+		log.Printf("상태 임베드 업데이트 실패: %v", err)
+	}
 
 	go func() {
 		result := <-resultCh
