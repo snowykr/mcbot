@@ -10,13 +10,23 @@ import (
 	"github.com/snowy/mcbot/internal/state"
 )
 
-type Handler struct {
-	cfg         *config.Config
-	controller  *mcserver.Controller
-	statusEmbed *StatusEmbedManager
+type ServerController interface {
+	Start(ctx context.Context) <-chan mcserver.StartResult
+	Stop(ctx context.Context) <-chan mcserver.StopResult
+	Presence(ctx context.Context) mcserver.PresenceState
 }
 
-func NewHandler(cfg *config.Config, controller *mcserver.Controller, statusEmbed *StatusEmbedManager) *Handler {
+type StatusEmbedUpdater interface {
+	Update(ctx context.Context) error
+}
+
+type Handler struct {
+	cfg         *config.Config
+	controller  ServerController
+	statusEmbed StatusEmbedUpdater
+}
+
+func NewHandler(cfg *config.Config, controller ServerController, statusEmbed StatusEmbedUpdater) *Handler {
 	return &Handler{
 		cfg:         cfg,
 		controller:  controller,
@@ -149,7 +159,10 @@ func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i
 	go func() {
 		result := <-resultCh
 
-		if err := h.statusEmbed.Update(ctx); err != nil {
+		updateCtx, updateCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
+		defer updateCancel()
+
+		if err := h.statusEmbed.Update(updateCtx); err != nil {
 			log.Printf("서버 시작 후 상태 임베드 업데이트 실패: %v", err)
 		}
 
@@ -182,7 +195,10 @@ func (h *Handler) handleButtonStop(ctx context.Context, s *discordgo.Session, i 
 	go func() {
 		result := <-resultCh
 
-		if err := h.statusEmbed.Update(ctx); err != nil {
+		updateCtx, updateCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
+		defer updateCancel()
+
+		if err := h.statusEmbed.Update(updateCtx); err != nil {
 			log.Printf("서버 종료 후 상태 임베드 업데이트 실패: %v", err)
 		}
 

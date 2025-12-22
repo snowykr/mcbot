@@ -192,8 +192,8 @@ func (m *StatusEmbedManager) UpdateWithPresence(presence mcserver.PresenceState)
 			m.messageID = ""
 			m.mu.Unlock()
 
-			ctx := context.Background()
-			if err := m.createNewMessage(ctx); err != nil {
+			recreateCtx := context.Background()
+			if err := m.createNewMessage(recreateCtx); err != nil {
 				return fmt.Errorf("삭제된 메시지 재생성 실패: %w", err)
 			}
 

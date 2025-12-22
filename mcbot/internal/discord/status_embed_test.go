@@ -57,10 +57,30 @@ func (m *mockDiscordSession) ChannelMessages(_ string, _ int, _, _, _ string) ([
 
 type mockController struct {
 	presence mcserver.PresenceState
+	startCh  chan mcserver.StartResult
+	stopCh   chan mcserver.StopResult
 }
 
 func (m *mockController) Presence(_ context.Context) mcserver.PresenceState {
 	return m.presence
+}
+
+func (m *mockController) Start(_ context.Context) <-chan mcserver.StartResult {
+	if m.startCh != nil {
+		return m.startCh
+	}
+	ch := make(chan mcserver.StartResult, 1)
+	close(ch)
+	return ch
+}
+
+func (m *mockController) Stop(_ context.Context) <-chan mcserver.StopResult {
+	if m.stopCh != nil {
+		return m.stopCh
+	}
+	ch := make(chan mcserver.StopResult, 1)
+	close(ch)
+	return ch
 }
 
 func newTestStatusEmbedManager(session discordSession, controller *mockController) *StatusEmbedManager {

@@ -17,6 +17,7 @@ type Config struct {
 	EmbedChannelID     string
 	MCJoinLogPattern   string
 	MCLeaveLogPattern  string
+	EmbedUpdateTimeout time.Duration
 }
 
 func Load() (*Config, error) {
@@ -33,6 +34,9 @@ func Load() (*Config, error) {
 
 	readyTimeoutSec := getEnvIntOrDefault("READY_TIMEOUT_SECONDS", 600)
 	cfg.ReadyTimeout = time.Duration(readyTimeoutSec) * time.Second
+
+	embedUpdateTimeoutSec := getEnvIntOrDefault("EMBED_UPDATE_TIMEOUT_SECONDS", 10)
+	cfg.EmbedUpdateTimeout = time.Duration(embedUpdateTimeoutSec) * time.Second
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
