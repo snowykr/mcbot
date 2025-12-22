@@ -38,7 +38,16 @@ func main() {
 		log.Fatalf("MC 서버 컨트롤러 생성 실패: %v", err)
 	}
 
-	handler := discord.NewHandler(cfg, controller)
+	statusEmbed := discord.NewStatusEmbedManager(session, cfg, controller)
+
+	handler := discord.NewHandler(cfg, controller, statusEmbed)
+
+	playerTracker := controller.GetPlayerTracker()
+	playerTracker.SetOnChange(func(players []string) {
+		if err := statusEmbed.Update(context.Background()); err != nil {
+			log.Printf("플레이어 변경 시 상태 임베드 업데이트 실패: %v", err)
+		}
+	})
 
 	session.AddHandler(handler.HandleInteraction)
 
@@ -51,23 +60,22 @@ func main() {
 		} else {
 			log.Printf("초기 상태 동기화 완료: %s", stateManager.GetState().Korean())
 		}
+
+		if err := statusEmbed.Init(ctx); err != nil {
+			log.Printf("상시 임베드 초기화 실패: %v", err)
+		} else {
+			log.Printf("상시 임베드 초기화 완료")
+		}
 	})
 
 	if err := session.Open(); err != nil {
 		log.Fatalf("Discord 연결 실패: %v", err)
 	}
-	defer session.Close()
-
-	log.Println("슬래시 명령어를 등록합니다...")
-	registeredCommands := make([]*discordgo.ApplicationCommand, len(discord.Commands))
-	for i, cmd := range discord.Commands {
-		registered, err := session.ApplicationCommandCreate(session.State.User.ID, "", cmd)
-		if err != nil {
-			log.Fatalf("슬래시 명령어 등록 실패 (%s): %v", cmd.Name, err)
+	defer func() {
+		if err := session.Close(); err != nil {
+			log.Printf("Discord 세션 종료 실패: %v", err)
 		}
-		registeredCommands[i] = registered
-		log.Printf("슬래시 명령어 등록 완료: /%s", cmd.Name)
-	}
+	}()
 
 	log.Println("마크봇이 실행 중입니다. 종료하려면 Ctrl+C를 누르세요.")
 
@@ -76,14 +84,6 @@ func main() {
 	<-stop
 
 	log.Println("마크봇을 종료합니다...")
-
-	for _, cmd := range registeredCommands {
-		if err := session.ApplicationCommandDelete(session.State.User.ID, "", cmd.ID); err != nil {
-			log.Printf("슬래시 명령어 삭제 실패 (%s): %v", cmd.Name, err)
-		} else {
-			log.Printf("슬래시 명령어 삭제 완료: /%s", cmd.Name)
-		}
-	}
-
+	controller.Shutdown()
 	log.Println("마크봇이 정상적으로 종료되었습니다.")
 }

@@ -8,7 +8,7 @@ services:
     env_file:
       - .env
     environment:
-      MC_CONTAINER_NAME: krcraft-server
+      MC_CONTAINER_NAME: mc-server
       MCBOT_ROLE_NAME: 마크봇
       READY_LOG_PATTERN: "Done \\(([0-9.]+)s\\)! For help, type \"help\""
       READY_TIMEOUT_SECONDS: "600"
@@ -18,7 +18,7 @@ services:
 
   mc-server:
     image: itzg/minecraft-server
-    container_name: krcraft-server
+    container_name: mc-server
     tty: true
     stdin_open: true
     restart: "no"
