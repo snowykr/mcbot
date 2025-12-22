@@ -62,7 +62,7 @@ func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller
 	}, nil
 }
 
-func (c *Controller) Start(ctx context.Context) <-chan StartResult {
+func (c *Controller) Start(_ context.Context) <-chan StartResult {
 	resultCh := make(chan StartResult, 1)
 
 	if err := c.stateManager.TryStartTransition(); err != nil {
@@ -77,7 +77,9 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 	go func() {
 		defer close(resultCh)
 
-		containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
+		opCtx := context.Background()
+
+		containerState, err := dockerctl.InspectContainer(opCtx, c.cfg.MCContainerName)
 		if err != nil {
 			c.stateManager.SetError(err)
 			resultCh <- StartResult{
@@ -117,7 +119,7 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 
 		startTime := time.Now()
 
-		if err := dockerctl.StartContainer(ctx, c.cfg.MCContainerName); err != nil {
+		if err := dockerctl.StartContainer(opCtx, c.cfg.MCContainerName); err != nil {
 			c.stateManager.SetError(err)
 			resultCh <- StartResult{
 				Success:      false,
@@ -130,7 +132,7 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 
 		c.logMux.Start(startTime)
 
-		logCtx, logCancel := context.WithTimeout(ctx, c.cfg.ReadyTimeout)
+		logCtx, logCancel := context.WithTimeout(context.Background(), c.cfg.ReadyTimeout)
 		defer logCancel()
 
 		logCh := c.logMux.Subscribe()
@@ -169,20 +171,10 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 				}
 
 			case <-logCtx.Done():
-				if logCtx.Err() == context.DeadlineExceeded {
-					c.stateManager.SetError(fmt.Errorf("ready timeout exceeded"))
-					resultCh <- StartResult{
-						Success:      false,
-						ErrorMessage: fmt.Sprintf("서버 시작 시간이 %v을 초과했습니다. 서버 로그를 확인해주세요.", c.cfg.ReadyTimeout),
-					}
-					return
-				}
-
-			case <-ctx.Done():
-				c.stateManager.SetError(ctx.Err())
+				c.stateManager.SetError(fmt.Errorf("ready timeout exceeded"))
 				resultCh <- StartResult{
 					Success:      false,
-					ErrorMessage: "서버 시작이 취소되었습니다.",
+					ErrorMessage: fmt.Sprintf("서버 시작 시간이 %v을 초과했습니다. 서버 로그를 확인해주세요.", c.cfg.ReadyTimeout),
 				}
 				return
 			}
@@ -192,7 +184,7 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 	return resultCh
 }
 
-func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
+func (c *Controller) Stop(_ context.Context) <-chan StopResult {
 	resultCh := make(chan StopResult, 1)
 
 	if err := c.stateManager.TryStopTransition(); err != nil {
@@ -207,27 +199,10 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 	go func() {
 		defer close(resultCh)
 
-		select {
-		case <-ctx.Done():
-			c.stateManager.SetError(ctx.Err())
-			resultCh <- StopResult{
-				Success:      false,
-				ErrorMessage: "서버 종료가 취소되었습니다.",
-			}
-			return
-		default:
-		}
+		opCtx := context.Background()
 
-		containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
+		containerState, err := dockerctl.InspectContainer(opCtx, c.cfg.MCContainerName)
 		if err != nil {
-			if ctx.Err() != nil {
-				c.stateManager.SetError(ctx.Err())
-				resultCh <- StopResult{
-					Success:      false,
-					ErrorMessage: "서버 종료가 취소되었습니다.",
-				}
-				return
-			}
 			c.stateManager.SetError(err)
 			resultCh <- StopResult{
 				Success:      false,
@@ -247,26 +222,7 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 			return
 		}
 
-		select {
-		case <-ctx.Done():
-			c.stateManager.SetError(ctx.Err())
-			resultCh <- StopResult{
-				Success:      false,
-				ErrorMessage: "서버 종료가 취소되었습니다.",
-			}
-			return
-		default:
-		}
-
-		if err := dockerctl.StopContainer(ctx, c.cfg.MCContainerName, c.cfg.StopTimeoutSeconds); err != nil {
-			if ctx.Err() != nil {
-				c.stateManager.SetError(ctx.Err())
-				resultCh <- StopResult{
-					Success:      false,
-					ErrorMessage: "서버 종료가 취소되었습니다.",
-				}
-				return
-			}
+		if err := dockerctl.StopContainer(opCtx, c.cfg.MCContainerName, c.cfg.StopTimeoutSeconds); err != nil {
 			c.stateManager.SetError(err)
 			resultCh <- StopResult{
 				Success:      false,
@@ -302,10 +258,7 @@ func (c *Controller) Status(ctx context.Context) StatusResult {
 		}
 	}
 
-	if containerState.Running && info.State == state.StateStopped {
-		c.stateManager.SetState(state.StateRunning)
-		info.State = state.StateRunning
-	} else if !containerState.Running && info.State == state.StateRunning {
+	if !containerState.Running && info.State == state.StateRunning {
 		c.playerTracker.Clear()
 		c.stateManager.SetStopped()
 		info.State = state.StateStopped

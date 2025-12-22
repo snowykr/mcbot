@@ -222,7 +222,7 @@ func TestControllerStart_ContextCancelledImmediately(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
 		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
-		ReadyTimeout:       5 * time.Second,
+		ReadyTimeout:       100 * time.Millisecond,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
 		StopTimeoutSeconds: 10,
@@ -244,23 +244,23 @@ func TestControllerStart_ContextCancelledImmediately(t *testing.T) {
 	select {
 	case result := <-resultCh:
 		if result.Success {
-			t.Error("Expected Start to fail due to cancelled context")
+			t.Error("Expected Start to fail due to container not found or timeout")
 		}
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("Timeout waiting for Start result with cancelled context")
+		t.Fatal("Timeout waiting for Start result")
 	}
 
 	finalState := stateManager.GetState()
 	if finalState != state.StateError && finalState != state.StateStopped {
-		t.Errorf("Expected state to be Error or Stopped after cancellation, got %s", finalState)
+		t.Errorf("Expected state to be Error or Stopped, got %s", finalState)
 	}
 }
 
-func TestControllerStart_ContextCancelledDuringOperation(t *testing.T) {
+func TestControllerStart_UsesReadyTimeoutNotExternalContext(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
 		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
-		ReadyTimeout:       5 * time.Second,
+		ReadyTimeout:       100 * time.Millisecond,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
 		StopTimeoutSeconds: 10,
@@ -274,7 +274,7 @@ func TestControllerStart_ContextCancelledDuringOperation(t *testing.T) {
 	}
 	defer controller.Shutdown()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
 	resultCh := controller.Start(ctx)
@@ -282,7 +282,7 @@ func TestControllerStart_ContextCancelledDuringOperation(t *testing.T) {
 	select {
 	case result := <-resultCh:
 		if result.Success {
-			t.Error("Expected Start to fail due to timeout or cancellation")
+			t.Error("Expected Start to fail due to container not found or timeout")
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("Timeout waiting for Start result")
@@ -290,6 +290,6 @@ func TestControllerStart_ContextCancelledDuringOperation(t *testing.T) {
 
 	finalState := stateManager.GetState()
 	if finalState != state.StateError && finalState != state.StateStopped {
-		t.Errorf("Expected state to be Error or Stopped after timeout, got %s", finalState)
+		t.Errorf("Expected state to be Error or Stopped, got %s", finalState)
 	}
 }

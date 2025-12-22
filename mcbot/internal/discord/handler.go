@@ -111,16 +111,16 @@ func (h *Handler) handleComponentInteraction(s *discordgo.Session, i *discordgo.
 		return
 	}
 
-	opCtx, opCancel := context.WithTimeout(context.Background(), h.cfg.ServerOperationTimeout)
-	defer opCancel()
+	presenceCtx, presenceCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
+	defer presenceCancel()
 
-	presence := h.controller.Presence(opCtx)
+	presence := h.controller.Presence(presenceCtx)
 
 	switch presence.ServerState {
 	case state.StateStopped, state.StateError:
-		h.handleButtonStart(opCtx, s, i)
+		h.handleButtonStart(s, i)
 	case state.StateRunning:
-		h.handleButtonStop(opCtx, s, i)
+		h.handleButtonStop(s, i)
 	default:
 		log.Printf("버튼 클릭 무시: 현재 상태 %v", presence.ServerState)
 	}
@@ -151,16 +151,22 @@ func (h *Handler) hasRequiredRole(s *discordgo.Session, i *discordgo.Interaction
 	return false
 }
 
-func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
-	resultCh := h.controller.Start(ctx)
+func (h *Handler) handleButtonStart(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	serverCtx := context.Background()
+	resultCh := h.controller.Start(serverCtx)
 
-	if err := h.statusEmbed.Update(ctx); err != nil {
+	embedCtx, embedCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
+	if err := h.statusEmbed.Update(embedCtx); err != nil {
 		log.Printf("상태 임베드 업데이트 실패: %v", err)
 	}
+	embedCancel()
 
 	go func() {
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), h.cfg.ServerOperationTimeout)
+		defer waitCancel()
+
 		var result mcserver.StartResult
-		var timedOut bool
+		var waitTimedOut bool
 
 		select {
 		case res, ok := <-resultCh:
@@ -173,13 +179,13 @@ func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i
 			} else {
 				result = res
 			}
-		case <-ctx.Done():
-			timedOut = true
-			log.Printf("서버 시작 작업 타임아웃 (UserID: %s, Timeout: %v, Err: %v)",
-				h.getUserID(i), h.cfg.ServerOperationTimeout, ctx.Err())
+		case <-waitCtx.Done():
+			waitTimedOut = true
+			log.Printf("서버 시작 대기 타임아웃 (UserID: %s, Timeout: %v)",
+				h.getUserID(i), h.cfg.ServerOperationTimeout)
 			result = mcserver.StartResult{
 				Success:      false,
-				ErrorMessage: "서버 시작 작업이 제한 시간을 초과했습니다. 서버 상태를 확인해주세요.",
+				ErrorMessage: "서버 시작 대기 시간이 초과되었습니다. 서버가 나중에 열렸을 수 있으니 상시 임베드를 확인해주세요.",
 			}
 		}
 
@@ -195,8 +201,8 @@ func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i
 		if result.Success {
 			embed = EmbedStartSuccess(result.ReadyDuration, requestedBy)
 		} else {
-			if timedOut {
-				log.Printf("서버 시작 타임아웃: %s", result.ErrorMessage)
+			if waitTimedOut {
+				log.Printf("서버 시작 대기 타임아웃: %s", result.ErrorMessage)
 			} else {
 				log.Printf("서버 시작 실패: %s", result.ErrorMessage)
 			}
@@ -215,16 +221,22 @@ func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i
 	}()
 }
 
-func (h *Handler) handleButtonStop(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
-	resultCh := h.controller.Stop(ctx)
+func (h *Handler) handleButtonStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	serverCtx := context.Background()
+	resultCh := h.controller.Stop(serverCtx)
 
-	if err := h.statusEmbed.Update(ctx); err != nil {
+	embedCtx, embedCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
+	if err := h.statusEmbed.Update(embedCtx); err != nil {
 		log.Printf("상태 임베드 업데이트 실패: %v", err)
 	}
+	embedCancel()
 
 	go func() {
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), h.cfg.ServerOperationTimeout)
+		defer waitCancel()
+
 		var result mcserver.StopResult
-		var timedOut bool
+		var waitTimedOut bool
 
 		select {
 		case res, ok := <-resultCh:
@@ -237,13 +249,13 @@ func (h *Handler) handleButtonStop(ctx context.Context, s *discordgo.Session, i 
 			} else {
 				result = res
 			}
-		case <-ctx.Done():
-			timedOut = true
-			log.Printf("서버 종료 작업 타임아웃 (UserID: %s, Timeout: %v, Err: %v)",
-				h.getUserID(i), h.cfg.ServerOperationTimeout, ctx.Err())
+		case <-waitCtx.Done():
+			waitTimedOut = true
+			log.Printf("서버 종료 대기 타임아웃 (UserID: %s, Timeout: %v)",
+				h.getUserID(i), h.cfg.ServerOperationTimeout)
 			result = mcserver.StopResult{
 				Success:      false,
-				ErrorMessage: "서버 종료 작업이 제한 시간을 초과했습니다. 서버 상태를 확인해주세요.",
+				ErrorMessage: "서버 종료 대기 시간이 초과되었습니다. 서버가 나중에 닫혔을 수 있으니 상시 임베드를 확인해주세요.",
 			}
 		}
 
@@ -259,8 +271,8 @@ func (h *Handler) handleButtonStop(ctx context.Context, s *discordgo.Session, i 
 		if result.Success {
 			embed = EmbedStopSuccess(requestedBy)
 		} else {
-			if timedOut {
-				log.Printf("서버 종료 타임아웃: %s", result.ErrorMessage)
+			if waitTimedOut {
+				log.Printf("서버 종료 대기 타임아웃: %s", result.ErrorMessage)
 			} else {
 				log.Printf("서버 종료 실패: %s", result.ErrorMessage)
 			}
