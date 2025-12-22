@@ -17,6 +17,8 @@ const (
 
 	ComponentIDToggle = "mcserver_toggle"
 	EmbedMarkerFooter = "MCBOT"
+
+	maxVisiblePlayers = 10
 )
 
 func EmbedStartSuccess(readyDuration time.Duration, requestedBy string) *discordgo.MessageEmbed {
@@ -118,19 +120,35 @@ func EmbedPersistentStatus(p mcserver.PresenceState) *discordgo.MessageEmbed {
 }
 
 func formatPlayers(players []string) string {
-	if len(players) == 0 {
-		return "현재 접속자(0명)\n없음"
+	total := len(players)
+
+	if total == 0 {
+		return "현재 접속자(0명)\n- 없음"
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("현재 접속자(%d명)\n", len(players)))
-	for _, player := range players {
-		sb.WriteString(player)
+	sb.WriteString(fmt.Sprintf("현재 접속자(%d명)\n", total))
+
+	visibleCount := total
+	if visibleCount > maxVisiblePlayers {
+		visibleCount = maxVisiblePlayers
+	}
+
+	for i := 0; i < visibleCount; i++ {
+		sb.WriteString("- ")
+		sb.WriteString(players[i])
 		sb.WriteString("\n")
 	}
 
-	result := sb.String()
-	return strings.TrimSuffix(result, "\n")
+	hiddenCount := total - visibleCount
+	if hiddenCount > 0 {
+		sb.WriteString(fmt.Sprintf("_...외 %d명_", hiddenCount))
+	} else {
+		result := sb.String()
+		return strings.TrimSuffix(result, "\n")
+	}
+
+	return sb.String()
 }
 
 func BuildToggleButton(p mcserver.PresenceState) discordgo.Button {

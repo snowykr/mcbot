@@ -237,6 +237,7 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 		}
 
 		if !containerState.Exists || !containerState.Running {
+			c.playerTracker.Clear()
 			c.stateManager.SetStopped()
 			resultCh <- StopResult{
 				Success:      false,
@@ -254,6 +255,7 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 			return
 		}
 
+		c.playerTracker.Clear()
 		c.stateManager.SetStopped()
 		resultCh <- StopResult{
 			Success: true,
@@ -283,6 +285,7 @@ func (c *Controller) Status(ctx context.Context) StatusResult {
 		c.stateManager.SetState(state.StateRunning)
 		info.State = state.StateRunning
 	} else if !containerState.Running && info.State == state.StateRunning {
+		c.playerTracker.Clear()
 		c.stateManager.SetStopped()
 		info.State = state.StateStopped
 	}
@@ -330,6 +333,7 @@ func (c *Controller) SyncState(ctx context.Context) error {
 		c.logMux.Start(containerState.StartedAt)
 	} else {
 		if currentState == state.StateRunning {
+			c.playerTracker.Clear()
 			c.stateManager.SetStopped()
 		}
 	}
