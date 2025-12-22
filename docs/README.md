@@ -147,17 +147,37 @@ docker compose up -d mcbot
 
 ## 환경 변수
 
-| 변수명 | 필수 | 기본값 | 설명 |
-|--------|------|--------|------|
-| `DISCORD_TOKEN` | ✅ | - | Discord 봇 토큰 |
-| `EMBED_CHANNEL_ID` | ✅ | - | 상시 임베드 메시지를 표시할 채널 ID |
-| `MC_CONTAINER_NAME` | ❌ | `stardew_create_forge_server` | MC 서버 컨테이너 이름 |
-| `MCBOT_ROLE_NAME` | ❌ | `마크봇` | 봇 사용 권한 역할 이름 |
-| `READY_LOG_PATTERN` | ❌ | `Dedicated server took` | 서버 준비 완료 로그 패턴 |
-| `READY_TIMEOUT_SECONDS` | ❌ | `600` | 서버 시작 타임아웃 (초) |
-| `STOP_TIMEOUT_SECONDS` | ❌ | `120` | 서버 종료 타임아웃 (초) |
+| 변수명 | 필수 | 기본값                       | 설명 |
+|--------|------|---------------------------|------|
+| `DISCORD_TOKEN` | ✅ | -                         | Discord 봇 토큰 |
+| `EMBED_CHANNEL_ID` | ✅ | -                         | 상시 임베드 메시지를 표시할 채널 ID |
+| `MC_CONTAINER_NAME` | ❌ | `mc-server`               | MC 서버 컨테이너 이름 |
+| `MCBOT_ROLE_NAME` | ❌ | `마크봇`                     | 봇 사용 권한 역할 이름 |
+| `READY_LOG_PATTERN` | ❌ | `Dedicated server took`   | 서버 준비 완료 로그 패턴 |
+| `READY_TIMEOUT_SECONDS` | ❌ | `600`                     | 서버 시작 타임아웃 (초, 서버가 "준비 완료" 로그를 남길 때까지 대기하는 최대 시간) |
+| `STOP_TIMEOUT_SECONDS` | ❌ | `120`                     | 서버 종료 타임아웃 (초, Docker가 컨테이너를 그레이스풀하게 중지하기 위해 기다리는 시간) |
+| `SERVER_OPERATION_TIMEOUT_SECONDS` | ❌ | `720`                     | 서버 작업(시작/종료) 전체 타임아웃 (초, 버튼 클릭부터 최종 결과 처리까지의 상위 타임아웃) |
+| `EMBED_UPDATE_TIMEOUT_SECONDS` | ❌ | `10`                      | 임베드 메시지 업데이트 타임아웃 (초, Discord로 상태 임베드를 전송/수정할 때의 최대 대기 시간) |
 | `MC_JOIN_LOG_PATTERN` | ❌ | `]: (.+) joined the game` | 플레이어 접속 로그 패턴 (정규식) |
-| `MC_LEAVE_LOG_PATTERN` | ❌ | `]: (.+) left the game` | 플레이어 퇴장 로그 패턴 (정규식) |
+| `MC_LEAVE_LOG_PATTERN` | ❌ | `]: (.+) left the game`   | 플레이어 퇴장 로그 패턴 (정규식) |
+
+### 타임아웃 변수 간 차이
+
+- **READY_TIMEOUT_SECONDS**
+  - 서버 컨테이너를 시작한 뒤, 로그에서 "서버 준비 완료" 패턴이 나타날 때까지 대기하는 최대 시간입니다.
+  - `Start` 경로에서만 사용되며, 서버가 정상적으로 뜨는 데 걸릴 수 있는 시간을 정의합니다.
+
+- **STOP_TIMEOUT_SECONDS**
+  - `docker stop --time <값>` 에 전달되는 숫자이며, 컨테이너가 SIGTERM 이후 그레이스풀하게 종료될 수 있도록 기다려주는 시간입니다.
+  - Docker 레벨의 종료 유예 시간으로, Go 코드의 전체 오퍼레이션 타임아웃과는 별개입니다.
+
+- **SERVER_OPERATION_TIMEOUT_SECONDS**
+  - Discord 버튼 클릭으로 시작된 "서버 시작/종료" 오퍼레이션 전체의 상한선입니다.
+  - Presence 조회, Start/Stop 실행, 결과 채널 수신 및 후속 임베드 업데이트까지 포함한 상위 타임아웃으로, goroutine leak 방지에도 사용됩니다.
+
+- **EMBED_UPDATE_TIMEOUT_SECONDS**
+  - 상태 임베드 메시지를 생성/수정할 때 사용하는 HTTP 호출의 최대 대기 시간입니다.
+  - 서버 작업 자체의 길이와는 독립적으로, Discord API 호출 지연에 대한 방어선 역할을 합니다.
 
 ## 상태 모델
 

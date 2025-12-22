@@ -8,22 +8,23 @@ import (
 )
 
 type Config struct {
-	DiscordToken       string
-	MCContainerName    string
-	ReadyLogPattern    string
-	ReadyTimeout       time.Duration
-	McbotRoleName      string
-	StopTimeoutSeconds int
-	EmbedChannelID     string
-	MCJoinLogPattern   string
-	MCLeaveLogPattern  string
-	EmbedUpdateTimeout time.Duration
+	DiscordToken           string
+	MCContainerName        string
+	ReadyLogPattern        string
+	ReadyTimeout           time.Duration
+	McbotRoleName          string
+	StopTimeoutSeconds     int
+	EmbedChannelID         string
+	MCJoinLogPattern       string
+	MCLeaveLogPattern      string
+	EmbedUpdateTimeout     time.Duration
+	ServerOperationTimeout time.Duration
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
 		DiscordToken:       os.Getenv("DISCORD_TOKEN"),
-		MCContainerName:    getEnvOrDefault("MC_CONTAINER_NAME", "stardew_create_forge_server"),
+		MCContainerName:    getEnvOrDefault("MC_CONTAINER_NAME", "mc-server"),
 		ReadyLogPattern:    getEnvOrDefault("READY_LOG_PATTERN", "Dedicated server took"),
 		McbotRoleName:      getEnvOrDefault("MCBOT_ROLE_NAME", "마크봇"),
 		StopTimeoutSeconds: getEnvIntOrDefault("STOP_TIMEOUT_SECONDS", 120),
@@ -37,6 +38,9 @@ func Load() (*Config, error) {
 
 	embedUpdateTimeoutSec := getEnvIntOrDefault("EMBED_UPDATE_TIMEOUT_SECONDS", 10)
 	cfg.EmbedUpdateTimeout = time.Duration(embedUpdateTimeoutSec) * time.Second
+
+	serverOpTimeoutSec := getEnvIntOrDefault("SERVER_OPERATION_TIMEOUT_SECONDS", 720)
+	cfg.ServerOperationTimeout = time.Duration(serverOpTimeoutSec) * time.Second
 
 	if err := cfg.validate(); err != nil {
 		return nil, err

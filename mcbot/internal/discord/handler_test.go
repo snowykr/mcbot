@@ -73,7 +73,8 @@ func (t *testStatusEmbedUpdater) getUpdateCalls() []contextInfo {
 
 func TestHandleButtonStart_FirstUpdateUsesProvidedContext(t *testing.T) {
 	cfg := &config.Config{
-		EmbedUpdateTimeout: 5 * time.Second,
+		EmbedUpdateTimeout:     5 * time.Second,
+		ServerOperationTimeout: 10 * time.Second,
 	}
 
 	controller := &testServerController{
@@ -117,7 +118,8 @@ func TestHandleButtonStart_FirstUpdateUsesProvidedContext(t *testing.T) {
 
 func TestHandleButtonStart_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 	cfg := &config.Config{
-		EmbedUpdateTimeout: 5 * time.Second,
+		EmbedUpdateTimeout:     5 * time.Second,
+		ServerOperationTimeout: 10 * time.Second,
 	}
 
 	controller := &testServerController{
@@ -131,8 +133,9 @@ func TestHandleButtonStart_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 
 	handler := NewHandler(cfg, controller, updater)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	mockSession := &discordgo.Session{}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
 			ID:    "test-interaction-id",
@@ -140,45 +143,38 @@ func TestHandleButtonStart_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 			Member: &discordgo.Member{
 				User: &discordgo.User{
 					Username: "testuser",
+					ID:       "test-user-id",
 				},
 			},
 		},
 	}
 
-	done := make(chan bool, 1)
+	goroutineDone := make(chan bool, 1)
 
-	testHandler := func(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
-		resultCh := handler.controller.Start(ctx)
+	handler.handleButtonStart(ctx, nil, mockInteraction)
 
-		if err := handler.statusEmbed.Update(ctx); err != nil {
-			t.Logf("상태 임베드 업데이트 실패: %v", err)
-		}
-
-		go func() {
-			defer func() { done <- true }()
-			result := <-resultCh
-
-			updateCtx, updateCancel := context.WithTimeout(context.Background(), handler.cfg.EmbedUpdateTimeout)
-			defer updateCancel()
-
-			if err := handler.statusEmbed.Update(updateCtx); err != nil {
-				t.Logf("서버 시작 후 상태 임베드 업데이트 실패: %v", err)
-			}
-
-			_ = result
-		}()
-	}
-
-	testHandler(ctx, mockSession, mockInteraction)
-
-	cancel()
+	time.Sleep(10 * time.Millisecond)
 
 	controller.startCh <- mcserver.StartResult{
 		Success:       true,
 		ReadyDuration: 10 * time.Second,
 	}
 
-	<-done
+	go func() {
+		for {
+			if len(updater.getUpdateCalls()) >= 2 {
+				goroutineDone <- true
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-goroutineDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Goroutine did not complete second update within timeout")
+	}
 
 	calls := updater.getUpdateCalls()
 	if len(calls) != 2 {
@@ -188,11 +184,11 @@ func TestHandleButtonStart_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 	secondCall := calls[1]
 
 	if secondCall.ctx == ctx {
-		t.Error("Second Update call should NOT use the cancelled parent context")
+		t.Error("Second Update call should NOT use the parent context")
 	}
 
 	if secondCall.isCancelled {
-		t.Error("Second Update context should not be cancelled immediately after parent cancellation")
+		t.Error("Second Update context should not be cancelled")
 	}
 
 	if !secondCall.hasDeadline {
@@ -207,7 +203,8 @@ func TestHandleButtonStart_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 
 func TestHandleButtonStop_FirstUpdateUsesProvidedContext(t *testing.T) {
 	cfg := &config.Config{
-		EmbedUpdateTimeout: 5 * time.Second,
+		EmbedUpdateTimeout:     5 * time.Second,
+		ServerOperationTimeout: 10 * time.Second,
 	}
 
 	controller := &testServerController{
@@ -251,7 +248,8 @@ func TestHandleButtonStop_FirstUpdateUsesProvidedContext(t *testing.T) {
 
 func TestHandleButtonStop_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 	cfg := &config.Config{
-		EmbedUpdateTimeout: 5 * time.Second,
+		EmbedUpdateTimeout:     5 * time.Second,
+		ServerOperationTimeout: 10 * time.Second,
 	}
 
 	controller := &testServerController{
@@ -265,8 +263,9 @@ func TestHandleButtonStop_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 
 	handler := NewHandler(cfg, controller, updater)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	mockSession := &discordgo.Session{}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
 			ID:    "test-interaction-id",
@@ -274,44 +273,37 @@ func TestHandleButtonStop_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 			Member: &discordgo.Member{
 				User: &discordgo.User{
 					Username: "testuser",
+					ID:       "test-user-id",
 				},
 			},
 		},
 	}
 
-	done := make(chan bool, 1)
+	goroutineDone := make(chan bool, 1)
 
-	testHandler := func(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
-		resultCh := handler.controller.Stop(ctx)
+	handler.handleButtonStop(ctx, nil, mockInteraction)
 
-		if err := handler.statusEmbed.Update(ctx); err != nil {
-			t.Logf("상태 임베드 업데이트 실패: %v", err)
-		}
-
-		go func() {
-			defer func() { done <- true }()
-			result := <-resultCh
-
-			updateCtx, updateCancel := context.WithTimeout(context.Background(), handler.cfg.EmbedUpdateTimeout)
-			defer updateCancel()
-
-			if err := handler.statusEmbed.Update(updateCtx); err != nil {
-				t.Logf("서버 종료 후 상태 임베드 업데이트 실패: %v", err)
-			}
-
-			_ = result
-		}()
-	}
-
-	testHandler(ctx, mockSession, mockInteraction)
-
-	cancel()
+	time.Sleep(10 * time.Millisecond)
 
 	controller.stopCh <- mcserver.StopResult{
 		Success: true,
 	}
 
-	<-done
+	go func() {
+		for {
+			if len(updater.getUpdateCalls()) >= 2 {
+				goroutineDone <- true
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-goroutineDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Goroutine did not complete second update within timeout")
+	}
 
 	calls := updater.getUpdateCalls()
 	if len(calls) != 2 {
@@ -321,11 +313,11 @@ func TestHandleButtonStop_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 	secondCall := calls[1]
 
 	if secondCall.ctx == ctx {
-		t.Error("Second Update call should NOT use the cancelled parent context")
+		t.Error("Second Update call should NOT use the parent context")
 	}
 
 	if secondCall.isCancelled {
-		t.Error("Second Update context should not be cancelled immediately after parent cancellation")
+		t.Error("Second Update context should not be cancelled")
 	}
 
 	if !secondCall.hasDeadline {
@@ -340,7 +332,8 @@ func TestHandleButtonStop_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 
 func TestHandleButtonStart_GoroutineContextEventuallyTimesOut(t *testing.T) {
 	cfg := &config.Config{
-		EmbedUpdateTimeout: 50 * time.Millisecond,
+		EmbedUpdateTimeout:     50 * time.Millisecond,
+		ServerOperationTimeout: 10 * time.Second,
 	}
 
 	controller := &testServerController{
@@ -354,8 +347,9 @@ func TestHandleButtonStart_GoroutineContextEventuallyTimesOut(t *testing.T) {
 
 	handler := NewHandler(cfg, controller, updater)
 
-	ctx := context.Background()
-	mockSession := &discordgo.Session{}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
 			ID:    "test-interaction-id",
@@ -363,43 +357,38 @@ func TestHandleButtonStart_GoroutineContextEventuallyTimesOut(t *testing.T) {
 			Member: &discordgo.Member{
 				User: &discordgo.User{
 					Username: "testuser",
+					ID:       "test-user-id",
 				},
 			},
 		},
 	}
 
-	done := make(chan bool, 1)
+	goroutineDone := make(chan bool, 1)
 
-	testHandler := func(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
-		resultCh := handler.controller.Start(ctx)
+	handler.handleButtonStart(ctx, nil, mockInteraction)
 
-		if err := handler.statusEmbed.Update(ctx); err != nil {
-			t.Logf("상태 임베드 업데이트 실패: %v", err)
-		}
-
-		go func() {
-			defer func() { done <- true }()
-			result := <-resultCh
-
-			updateCtx, updateCancel := context.WithTimeout(context.Background(), handler.cfg.EmbedUpdateTimeout)
-			defer updateCancel()
-
-			if err := handler.statusEmbed.Update(updateCtx); err != nil {
-				t.Logf("서버 시작 후 상태 임베드 업데이트 실패: %v", err)
-			}
-
-			_ = result
-		}()
-	}
-
-	testHandler(ctx, mockSession, mockInteraction)
+	time.Sleep(10 * time.Millisecond)
 
 	controller.startCh <- mcserver.StartResult{
 		Success:       true,
 		ReadyDuration: 10 * time.Second,
 	}
 
-	<-done
+	go func() {
+		for {
+			if len(updater.getUpdateCalls()) >= 2 {
+				goroutineDone <- true
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-goroutineDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Goroutine did not complete within timeout")
+	}
 
 	calls := updater.getUpdateCalls()
 	if len(calls) != 2 {
@@ -418,5 +407,243 @@ func TestHandleButtonStart_GoroutineContextEventuallyTimesOut(t *testing.T) {
 
 	if goroutineCtx.Err() == nil {
 		t.Error("Goroutine context should have an error after timeout")
+	}
+}
+
+func TestHandleButtonStart_TimeoutWhenChannelNeverSends(t *testing.T) {
+	cfg := &config.Config{
+		EmbedUpdateTimeout:     5 * time.Second,
+		ServerOperationTimeout: 100 * time.Millisecond,
+	}
+
+	controller := &testServerController{
+		startCh: make(chan mcserver.StartResult),
+		presenceVal: mcserver.PresenceState{
+			ServerState: state.StateStopped,
+		},
+	}
+
+	updater := &testStatusEmbedUpdater{}
+	handler := NewHandler(cfg, controller, updater)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	mockInteraction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:    "test-interaction-id",
+			Token: "test-token",
+			Member: &discordgo.Member{
+				User: &discordgo.User{
+					Username: "testuser",
+					ID:       "test-user-id",
+				},
+			},
+		},
+	}
+
+	goroutineDone := make(chan bool, 1)
+
+	handler.handleButtonStart(ctx, nil, mockInteraction)
+
+	go func() {
+		for {
+			if len(updater.getUpdateCalls()) >= 2 {
+				goroutineDone <- true
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-goroutineDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("handleButtonStart goroutine did not complete within timeout")
+	}
+
+	calls := updater.getUpdateCalls()
+	if len(calls) != 2 {
+		t.Fatalf("Expected 2 Update calls (initial + after timeout), got %d", len(calls))
+	}
+}
+
+func TestHandleButtonStop_TimeoutWhenChannelNeverSends(t *testing.T) {
+	cfg := &config.Config{
+		EmbedUpdateTimeout:     5 * time.Second,
+		ServerOperationTimeout: 100 * time.Millisecond,
+	}
+
+	controller := &testServerController{
+		stopCh: make(chan mcserver.StopResult),
+		presenceVal: mcserver.PresenceState{
+			ServerState: state.StateRunning,
+		},
+	}
+
+	updater := &testStatusEmbedUpdater{}
+	handler := NewHandler(cfg, controller, updater)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	mockInteraction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:    "test-interaction-id",
+			Token: "test-token",
+			Member: &discordgo.Member{
+				User: &discordgo.User{
+					Username: "testuser",
+					ID:       "test-user-id",
+				},
+			},
+		},
+	}
+
+	goroutineDone := make(chan bool, 1)
+
+	handler.handleButtonStop(ctx, nil, mockInteraction)
+
+	go func() {
+		for {
+			if len(updater.getUpdateCalls()) >= 2 {
+				goroutineDone <- true
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-goroutineDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("handleButtonStop goroutine did not complete within timeout")
+	}
+
+	calls := updater.getUpdateCalls()
+	if len(calls) != 2 {
+		t.Fatalf("Expected 2 Update calls (initial + after timeout), got %d", len(calls))
+	}
+}
+
+func TestHandleButtonStart_ChannelClosedWithoutValue(t *testing.T) {
+	cfg := &config.Config{
+		EmbedUpdateTimeout:     5 * time.Second,
+		ServerOperationTimeout: 10 * time.Second,
+	}
+
+	controller := &testServerController{
+		startCh: make(chan mcserver.StartResult),
+		presenceVal: mcserver.PresenceState{
+			ServerState: state.StateStopped,
+		},
+	}
+
+	updater := &testStatusEmbedUpdater{}
+	handler := NewHandler(cfg, controller, updater)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mockInteraction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:    "test-interaction-id",
+			Token: "test-token",
+			Member: &discordgo.Member{
+				User: &discordgo.User{
+					Username: "testuser",
+					ID:       "test-user-id",
+				},
+			},
+		},
+	}
+
+	goroutineDone := make(chan bool, 1)
+
+	handler.handleButtonStart(ctx, nil, mockInteraction)
+
+	time.Sleep(10 * time.Millisecond)
+	close(controller.startCh)
+
+	go func() {
+		for {
+			if len(updater.getUpdateCalls()) >= 2 {
+				goroutineDone <- true
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-goroutineDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("handleButtonStart goroutine did not complete after channel close")
+	}
+
+	calls := updater.getUpdateCalls()
+	if len(calls) != 2 {
+		t.Fatalf("Expected 2 Update calls, got %d", len(calls))
+	}
+}
+
+func TestHandleButtonStop_ChannelClosedWithoutValue(t *testing.T) {
+	cfg := &config.Config{
+		EmbedUpdateTimeout:     5 * time.Second,
+		ServerOperationTimeout: 10 * time.Second,
+	}
+
+	controller := &testServerController{
+		stopCh: make(chan mcserver.StopResult),
+		presenceVal: mcserver.PresenceState{
+			ServerState: state.StateRunning,
+		},
+	}
+
+	updater := &testStatusEmbedUpdater{}
+	handler := NewHandler(cfg, controller, updater)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	mockInteraction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:    "test-interaction-id",
+			Token: "test-token",
+			Member: &discordgo.Member{
+				User: &discordgo.User{
+					Username: "testuser",
+					ID:       "test-user-id",
+				},
+			},
+		},
+	}
+
+	goroutineDone := make(chan bool, 1)
+
+	handler.handleButtonStop(ctx, nil, mockInteraction)
+
+	time.Sleep(10 * time.Millisecond)
+	close(controller.stopCh)
+
+	go func() {
+		for {
+			if len(updater.getUpdateCalls()) >= 2 {
+				goroutineDone <- true
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-goroutineDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("handleButtonStop goroutine did not complete after channel close")
+	}
+
+	calls := updater.getUpdateCalls()
+	if len(calls) != 2 {
+		t.Fatalf("Expected 2 Update calls, got %d", len(calls))
 	}
 }

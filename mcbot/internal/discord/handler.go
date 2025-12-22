@@ -111,14 +111,16 @@ func (h *Handler) handleComponentInteraction(s *discordgo.Session, i *discordgo.
 		return
 	}
 
-	ctx := context.Background()
-	presence := h.controller.Presence(ctx)
+	opCtx, opCancel := context.WithTimeout(context.Background(), h.cfg.ServerOperationTimeout)
+	defer opCancel()
+
+	presence := h.controller.Presence(opCtx)
 
 	switch presence.ServerState {
 	case state.StateStopped, state.StateError:
-		h.handleButtonStart(ctx, s, i)
+		h.handleButtonStart(opCtx, s, i)
 	case state.StateRunning:
-		h.handleButtonStop(ctx, s, i)
+		h.handleButtonStop(opCtx, s, i)
 	default:
 		log.Printf("버튼 클릭 무시: 현재 상태 %v", presence.ServerState)
 	}
@@ -157,7 +159,29 @@ func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i
 	}
 
 	go func() {
-		result := <-resultCh
+		var result mcserver.StartResult
+		var timedOut bool
+
+		select {
+		case res, ok := <-resultCh:
+			if !ok {
+				log.Printf("서버 시작 결과 채널이 값 없이 닫혔습니다 (UserID: %s)", h.getUserID(i))
+				result = mcserver.StartResult{
+					Success:      false,
+					ErrorMessage: "서버 시작 작업이 예기치 않게 종료되었습니다.",
+				}
+			} else {
+				result = res
+			}
+		case <-ctx.Done():
+			timedOut = true
+			log.Printf("서버 시작 작업 타임아웃 (UserID: %s, Timeout: %v, Err: %v)",
+				h.getUserID(i), h.cfg.ServerOperationTimeout, ctx.Err())
+			result = mcserver.StartResult{
+				Success:      false,
+				ErrorMessage: "서버 시작 작업이 제한 시간을 초과했습니다. 서버 상태를 확인해주세요.",
+			}
+		}
 
 		updateCtx, updateCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
 		defer updateCancel()
@@ -171,16 +195,22 @@ func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i
 		if result.Success {
 			embed = EmbedStartSuccess(result.ReadyDuration, requestedBy)
 		} else {
-			log.Printf("서버 시작 실패: %s", result.ErrorMessage)
+			if timedOut {
+				log.Printf("서버 시작 타임아웃: %s", result.ErrorMessage)
+			} else {
+				log.Printf("서버 시작 실패: %s", result.ErrorMessage)
+			}
 			embed = EmbedStartFailed(result.ErrorMessage)
 		}
 
-		_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-			Embeds: []*discordgo.MessageEmbed{embed},
-			Flags:  discordgo.MessageFlagsEphemeral,
-		})
-		if err != nil {
-			log.Printf("결과 메시지 전송 실패: %v", err)
+		if s != nil {
+			_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+				Embeds: []*discordgo.MessageEmbed{embed},
+				Flags:  discordgo.MessageFlagsEphemeral,
+			})
+			if err != nil {
+				log.Printf("결과 메시지 전송 실패: %v", err)
+			}
 		}
 	}()
 }
@@ -193,7 +223,29 @@ func (h *Handler) handleButtonStop(ctx context.Context, s *discordgo.Session, i 
 	}
 
 	go func() {
-		result := <-resultCh
+		var result mcserver.StopResult
+		var timedOut bool
+
+		select {
+		case res, ok := <-resultCh:
+			if !ok {
+				log.Printf("서버 종료 결과 채널이 값 없이 닫혔습니다 (UserID: %s)", h.getUserID(i))
+				result = mcserver.StopResult{
+					Success:      false,
+					ErrorMessage: "서버 종료 작업이 예기치 않게 종료되었습니다.",
+				}
+			} else {
+				result = res
+			}
+		case <-ctx.Done():
+			timedOut = true
+			log.Printf("서버 종료 작업 타임아웃 (UserID: %s, Timeout: %v, Err: %v)",
+				h.getUserID(i), h.cfg.ServerOperationTimeout, ctx.Err())
+			result = mcserver.StopResult{
+				Success:      false,
+				ErrorMessage: "서버 종료 작업이 제한 시간을 초과했습니다. 서버 상태를 확인해주세요.",
+			}
+		}
 
 		updateCtx, updateCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
 		defer updateCancel()
@@ -207,16 +259,22 @@ func (h *Handler) handleButtonStop(ctx context.Context, s *discordgo.Session, i 
 		if result.Success {
 			embed = EmbedStopSuccess(requestedBy)
 		} else {
-			log.Printf("서버 종료 실패: %s", result.ErrorMessage)
+			if timedOut {
+				log.Printf("서버 종료 타임아웃: %s", result.ErrorMessage)
+			} else {
+				log.Printf("서버 종료 실패: %s", result.ErrorMessage)
+			}
 			embed = EmbedStopFailed(result.ErrorMessage)
 		}
 
-		_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-			Embeds: []*discordgo.MessageEmbed{embed},
-			Flags:  discordgo.MessageFlagsEphemeral,
-		})
-		if err != nil {
-			log.Printf("결과 메시지 전송 실패: %v", err)
+		if s != nil {
+			_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+				Embeds: []*discordgo.MessageEmbed{embed},
+				Flags:  discordgo.MessageFlagsEphemeral,
+			})
+			if err != nil {
+				log.Printf("결과 메시지 전송 실패: %v", err)
+			}
 		}
 	}()
 }
@@ -232,4 +290,14 @@ func (h *Handler) getUsername(i *discordgo.InteractionCreate) string {
 		return i.User.Username
 	}
 	return "알 수 없음"
+}
+
+func (h *Handler) getUserID(i *discordgo.InteractionCreate) string {
+	if i.Member != nil && i.Member.User != nil {
+		return i.Member.User.ID
+	}
+	if i.User != nil {
+		return i.User.ID
+	}
+	return "unknown"
 }
