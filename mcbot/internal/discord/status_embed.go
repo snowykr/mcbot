@@ -125,34 +125,40 @@ func (m *StatusEmbedManager) Update(ctx context.Context) error {
 }
 
 func (m *StatusEmbedManager) UpdateWithPresence(presence mcserver.PresenceState) error {
-	m.mu.RLock()
-	msgID := m.messageID
-	m.mu.RUnlock()
+	const maxUnknownMessageRetries = 2
 
-	if msgID == "" {
-		return fmt.Errorf("메시지 ID가 설정되지 않음")
-	}
+	for attempt := 0; attempt <= maxUnknownMessageRetries; attempt++ {
+		m.mu.RLock()
+		msgID := m.messageID
+		m.mu.RUnlock()
 
-	embed := EmbedPersistentStatus(presence)
-	button := BuildToggleButton(presence)
+		if msgID == "" {
+			return fmt.Errorf("메시지 ID가 설정되지 않음")
+		}
 
-	embeds := []*discordgo.MessageEmbed{embed}
-	components := []discordgo.MessageComponent{
-		discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{button},
-		},
-	}
+		embed := EmbedPersistentStatus(presence)
+		button := BuildToggleButton(presence)
 
-	_, err := m.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
-		Channel:    m.cfg.EmbedChannelID,
-		ID:         msgID,
-		Embeds:     &embeds,
-		Components: &components,
-	})
+		embeds := []*discordgo.MessageEmbed{embed}
+		components := []discordgo.MessageComponent{
+			discordgo.ActionsRow{
+				Components: []discordgo.MessageComponent{button},
+			},
+		}
 
-	if err != nil {
+		_, err := m.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
+			Channel:    m.cfg.EmbedChannelID,
+			ID:         msgID,
+			Embeds:     &embeds,
+			Components: &components,
+		})
+
+		if err == nil {
+			return nil
+		}
+
 		if isUnknownMessageError(err) {
-			log.Printf("상시 임베드 메시지가 삭제되었습니다. 새 메시지를 생성합니다.")
+			log.Printf("상시 임베드 메시지가 삭제되었습니다. 새 메시지를 생성합니다. (시도 %d/%d)", attempt+1, maxUnknownMessageRetries+1)
 
 			m.mu.Lock()
 			m.messageID = ""
@@ -163,11 +169,11 @@ func (m *StatusEmbedManager) UpdateWithPresence(presence mcserver.PresenceState)
 				return fmt.Errorf("삭제된 메시지 재생성 실패: %w", err)
 			}
 
-			return m.UpdateWithPresence(presence)
+			continue
 		}
 
 		return fmt.Errorf("메시지 업데이트 실패: %w", err)
 	}
 
-	return nil
+	return fmt.Errorf("메시지 업데이트 재시도 횟수 초과: unknown message 에러가 지속됨")
 }

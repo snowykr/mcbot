@@ -27,7 +27,10 @@ func NewHandler(cfg *config.Config, controller *mcserver.Controller, statusEmbed
 func (h *Handler) HandleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type == discordgo.InteractionMessageComponent {
 		h.handleComponentInteraction(s, i)
+		return
 	}
+
+	log.Printf("지원하지 않는 인터랙션 타입: %v (ID: %s)", i.Type, i.ID)
 }
 
 func (h *Handler) handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -98,9 +101,10 @@ func (h *Handler) hasRequiredRole(s *discordgo.Session, i *discordgo.Interaction
 }
 
 func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
+	presence := h.controller.Presence(ctx)
 	resultCh := h.controller.Start(ctx)
 
-	if err := h.statusEmbed.Update(ctx); err != nil {
+	if err := h.statusEmbed.UpdateWithPresence(presence); err != nil {
 		log.Printf("상태 임베드 업데이트 실패: %v", err)
 	}
 
@@ -131,9 +135,10 @@ func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i
 }
 
 func (h *Handler) handleButtonStop(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
+	presence := h.controller.Presence(ctx)
 	resultCh := h.controller.Stop(ctx)
 
-	if err := h.statusEmbed.Update(ctx); err != nil {
+	if err := h.statusEmbed.UpdateWithPresence(presence); err != nil {
 		log.Printf("상태 임베드 업데이트 실패: %v", err)
 	}
 

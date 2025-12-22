@@ -65,11 +65,39 @@ func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller
 func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 	resultCh := make(chan StartResult, 1)
 
-	if !c.stateManager.SetStarting() {
-		currentState := c.stateManager.GetState()
+	currentState := c.stateManager.GetState()
+
+	if currentState == state.StateStarting {
 		resultCh <- StartResult{
 			Success:      false,
-			ErrorMessage: fmt.Sprintf("서버를 시작할 수 없습니다. 현재 상태: %s", currentState.Korean()),
+			ErrorMessage: "서버가 이미 시작 중입니다.",
+		}
+		close(resultCh)
+		return resultCh
+	}
+
+	if currentState == state.StateRunning {
+		resultCh <- StartResult{
+			Success:      false,
+			ErrorMessage: "서버가 이미 실행 중입니다.",
+		}
+		close(resultCh)
+		return resultCh
+	}
+
+	if currentState == state.StateStopping {
+		resultCh <- StartResult{
+			Success:      false,
+			ErrorMessage: "서버가 종료 중입니다. 종료가 완료된 후 다시 시도해주세요.",
+		}
+		close(resultCh)
+		return resultCh
+	}
+
+	if !c.stateManager.SetStarting() {
+		resultCh <- StartResult{
+			Success:      false,
+			ErrorMessage: "서버 상태가 변경되었습니다. 다시 시도해주세요.",
 		}
 		close(resultCh)
 		return resultCh

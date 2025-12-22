@@ -62,7 +62,7 @@ func main() {
 
 		playerTracker := controller.GetPlayerTracker()
 		playerTracker.SetOnChange(func(players []string) {
-			if err := statusEmbed.Update(ctx); err != nil {
+			if err := statusEmbed.Update(context.Background()); err != nil {
 				log.Printf("플레이어 변경 시 상태 임베드 업데이트 실패: %v", err)
 			}
 		})
