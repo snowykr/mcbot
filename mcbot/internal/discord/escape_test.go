@@ -88,6 +88,36 @@ func TestEscapeDiscordText(t *testing.T) {
 			input:    "**__test__**",
 			expected: "\\*\\*\\_\\_test\\_\\_\\*\\*",
 		},
+		{
+			name:     "Backslash before @everyone",
+			input:    "\\@everyone",
+			expected: "\\\\@\u200beveryone",
+		},
+		{
+			name:     "Backslash before @here",
+			input:    "\\@here",
+			expected: "\\\\@\u200bhere",
+		},
+		{
+			name:     "Username with backslash and @everyone",
+			input:    "User\\@everyone",
+			expected: "User\\\\@\u200beveryone",
+		},
+		{
+			name:     "Backslash before user mention",
+			input:    "\\<@123456789>",
+			expected: "\\\\<@123456789>",
+		},
+		{
+			name:     "Multiple backslashes before @everyone",
+			input:    "\\\\@everyone",
+			expected: "\\\\\\\\@\u200beveryone",
+		},
+		{
+			name:     "Path with @everyone",
+			input:    "path\\to\\@everyone",
+			expected: "path\\\\to\\\\@\u200beveryone",
+		},
 	}
 
 	for _, tt := range tests {

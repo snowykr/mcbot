@@ -310,6 +310,65 @@ func TestPlayerTracker_Clear(t *testing.T) {
 	}
 }
 
+func TestPlayerTracker_ClearTriggersOnChange(t *testing.T) {
+	mockMux := newMockLogMultiplexer()
+	defer mockMux.close()
+
+	tracker, err := NewPlayerTracker(mockMux, `(\w+) joined`, `(\w+) left`)
+	if err != nil {
+		t.Fatalf("Failed to create tracker: %v", err)
+	}
+
+	var mu sync.Mutex
+	callbackCount := 0
+	var lastPlayers []string
+
+	tracker.SetOnChange(func(players []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		callbackCount++
+		lastPlayers = make([]string, len(players))
+		copy(lastPlayers, players)
+	})
+
+	mockMux.sendLog("Player1 joined")
+	mockMux.sendLog("Player2 joined")
+	time.Sleep(20 * time.Millisecond)
+
+	mu.Lock()
+	if callbackCount != 2 {
+		t.Errorf("Expected 2 callbacks after joins, got %d", callbackCount)
+	}
+	if len(lastPlayers) != 2 {
+		t.Errorf("Expected 2 players in last callback, got %d", len(lastPlayers))
+	}
+	mu.Unlock()
+
+	tracker.Clear()
+	time.Sleep(10 * time.Millisecond)
+
+	mu.Lock()
+	if callbackCount != 3 {
+		t.Errorf("Expected 3 callbacks after Clear (2 joins + 1 clear), got %d", callbackCount)
+	}
+	if len(lastPlayers) != 0 {
+		t.Errorf("Expected 0 players in callback after Clear, got %d: %v", len(lastPlayers), lastPlayers)
+	}
+	mu.Unlock()
+
+	mockMux.sendLog("Player3 joined")
+	time.Sleep(20 * time.Millisecond)
+
+	mu.Lock()
+	if callbackCount != 4 {
+		t.Errorf("Expected 4 callbacks after new join, got %d", callbackCount)
+	}
+	if len(lastPlayers) != 1 || lastPlayers[0] != "Player3" {
+		t.Errorf("Expected [Player3] in last callback, got %v", lastPlayers)
+	}
+	mu.Unlock()
+}
+
 func TestPlayerTracker_ClearDuringActiveTracking(t *testing.T) {
 	mockMux := newMockLogMultiplexer()
 	defer mockMux.close()

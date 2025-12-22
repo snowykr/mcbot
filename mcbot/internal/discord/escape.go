@@ -9,13 +9,6 @@ func EscapeDiscordText(s string) string {
 
 	escaped := s
 
-	escaped = strings.ReplaceAll(escaped, "@everyone", "@\u200beveryone")
-	escaped = strings.ReplaceAll(escaped, "@here", "@\u200bhere")
-
-	if strings.HasPrefix(escaped, "<@") || strings.HasPrefix(escaped, "<#") {
-		escaped = "\u200b" + escaped
-	}
-
 	replacer := strings.NewReplacer(
 		"\\", "\\\\",
 		"*", "\\*",
@@ -25,6 +18,13 @@ func EscapeDiscordText(s string) string {
 		"|", "\\|",
 	)
 	escaped = replacer.Replace(escaped)
+
+	escaped = strings.ReplaceAll(escaped, "@everyone", "@\u200beveryone")
+	escaped = strings.ReplaceAll(escaped, "@here", "@\u200bhere")
+
+	if strings.HasPrefix(escaped, "<@") || strings.HasPrefix(escaped, "<#") {
+		escaped = "\u200b" + escaped
+	}
 
 	return escaped
 }

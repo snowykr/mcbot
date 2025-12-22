@@ -104,6 +104,12 @@ func (t *PlayerTracker) SetOnChange(callback func([]string)) {
 
 func (t *PlayerTracker) Clear() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.players = make(map[string]struct{})
+	players := t.getPlayersLocked()
+	callback := t.onChange
+	t.mu.Unlock()
+
+	if callback != nil {
+		callback(players)
+	}
 }
