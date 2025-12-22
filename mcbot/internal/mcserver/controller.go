@@ -207,8 +207,27 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 	go func() {
 		defer close(resultCh)
 
+		select {
+		case <-ctx.Done():
+			c.stateManager.SetError(ctx.Err())
+			resultCh <- StopResult{
+				Success:      false,
+				ErrorMessage: "서버 종료가 취소되었습니다.",
+			}
+			return
+		default:
+		}
+
 		containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
 		if err != nil {
+			if ctx.Err() != nil {
+				c.stateManager.SetError(ctx.Err())
+				resultCh <- StopResult{
+					Success:      false,
+					ErrorMessage: "서버 종료가 취소되었습니다.",
+				}
+				return
+			}
 			c.stateManager.SetError(err)
 			resultCh <- StopResult{
 				Success:      false,
@@ -228,7 +247,26 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 			return
 		}
 
+		select {
+		case <-ctx.Done():
+			c.stateManager.SetError(ctx.Err())
+			resultCh <- StopResult{
+				Success:      false,
+				ErrorMessage: "서버 종료가 취소되었습니다.",
+			}
+			return
+		default:
+		}
+
 		if err := dockerctl.StopContainer(ctx, c.cfg.MCContainerName, c.cfg.StopTimeoutSeconds); err != nil {
+			if ctx.Err() != nil {
+				c.stateManager.SetError(ctx.Err())
+				resultCh <- StopResult{
+					Success:      false,
+					ErrorMessage: "서버 종료가 취소되었습니다.",
+				}
+				return
+			}
 			c.stateManager.SetError(err)
 			resultCh <- StopResult{
 				Success:      false,

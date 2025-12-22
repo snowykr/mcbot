@@ -202,3 +202,84 @@ func TestControllerStop_FromErrorState(t *testing.T) {
 		t.Fatal("Timeout waiting for Stop result")
 	}
 }
+
+func TestControllerStop_ContextCancelledImmediately(t *testing.T) {
+	cfg := &config.Config{
+		MCContainerName:    "test-container",
+		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
+		ReadyTimeout:       5 * time.Second,
+		MCJoinLogPattern:   `(\w+) joined`,
+		MCLeaveLogPattern:  `(\w+) left`,
+		StopTimeoutSeconds: 10,
+	}
+
+	stateManager := state.NewManager()
+	stateManager.SetState(state.StateRunning)
+
+	controller, err := NewController(cfg, stateManager)
+	if err != nil {
+		t.Fatalf("Failed to create controller: %v", err)
+	}
+	defer controller.Shutdown()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	resultCh := controller.Stop(ctx)
+
+	select {
+	case result := <-resultCh:
+		if result.Success {
+			t.Error("Expected Stop to fail due to cancelled context")
+		}
+		expectedMsg := "서버 종료가 취소되었습니다."
+		if result.ErrorMessage != expectedMsg {
+			t.Errorf("Expected error message '%s', got '%s'", expectedMsg, result.ErrorMessage)
+		}
+
+		if stateManager.GetState() != state.StateError {
+			t.Errorf("Expected state to be Error after cancellation, got %s", stateManager.GetState())
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Timeout waiting for Stop result with cancelled context")
+	}
+}
+
+func TestControllerStop_ContextCancelledDuringOperation(t *testing.T) {
+	cfg := &config.Config{
+		MCContainerName:    "test-container",
+		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
+		ReadyTimeout:       5 * time.Second,
+		MCJoinLogPattern:   `(\w+) joined`,
+		MCLeaveLogPattern:  `(\w+) left`,
+		StopTimeoutSeconds: 10,
+	}
+
+	stateManager := state.NewManager()
+	stateManager.SetState(state.StateRunning)
+
+	controller, err := NewController(cfg, stateManager)
+	if err != nil {
+		t.Fatalf("Failed to create controller: %v", err)
+	}
+	defer controller.Shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	resultCh := controller.Stop(ctx)
+
+	select {
+	case result := <-resultCh:
+		if result.Success {
+			t.Error("Expected Stop to fail due to timeout or cancellation")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Timeout waiting for Stop result")
+	}
+
+	finalState := stateManager.GetState()
+	if finalState != state.StateError && finalState != state.StateStopped {
+		t.Errorf("Expected state to be Error or Stopped after timeout, got %s", finalState)
+	}
+}

@@ -217,3 +217,79 @@ func TestControllerStart_FromStoppingState(t *testing.T) {
 		t.Fatal("Timeout waiting for Start result")
 	}
 }
+
+func TestControllerStart_ContextCancelledImmediately(t *testing.T) {
+	cfg := &config.Config{
+		MCContainerName:    "test-container",
+		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
+		ReadyTimeout:       5 * time.Second,
+		MCJoinLogPattern:   `(\w+) joined`,
+		MCLeaveLogPattern:  `(\w+) left`,
+		StopTimeoutSeconds: 10,
+	}
+
+	stateManager := state.NewManager()
+
+	controller, err := NewController(cfg, stateManager)
+	if err != nil {
+		t.Fatalf("Failed to create controller: %v", err)
+	}
+	defer controller.Shutdown()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	resultCh := controller.Start(ctx)
+
+	select {
+	case result := <-resultCh:
+		if result.Success {
+			t.Error("Expected Start to fail due to cancelled context")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Timeout waiting for Start result with cancelled context")
+	}
+
+	finalState := stateManager.GetState()
+	if finalState != state.StateError && finalState != state.StateStopped {
+		t.Errorf("Expected state to be Error or Stopped after cancellation, got %s", finalState)
+	}
+}
+
+func TestControllerStart_ContextCancelledDuringOperation(t *testing.T) {
+	cfg := &config.Config{
+		MCContainerName:    "test-container",
+		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
+		ReadyTimeout:       5 * time.Second,
+		MCJoinLogPattern:   `(\w+) joined`,
+		MCLeaveLogPattern:  `(\w+) left`,
+		StopTimeoutSeconds: 10,
+	}
+
+	stateManager := state.NewManager()
+
+	controller, err := NewController(cfg, stateManager)
+	if err != nil {
+		t.Fatalf("Failed to create controller: %v", err)
+	}
+	defer controller.Shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	resultCh := controller.Start(ctx)
+
+	select {
+	case result := <-resultCh:
+		if result.Success {
+			t.Error("Expected Start to fail due to timeout or cancellation")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Timeout waiting for Start result")
+	}
+
+	finalState := stateManager.GetState()
+	if finalState != state.StateError && finalState != state.StateStopped {
+		t.Errorf("Expected state to be Error or Stopped after timeout, got %s", finalState)
+	}
+}
