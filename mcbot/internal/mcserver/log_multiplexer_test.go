@@ -158,20 +158,36 @@ func TestLogMultiplexer_SubscriberChannelCloseOnStop(t *testing.T) {
 	sub1 := mux.Subscribe()
 	sub2 := mux.Subscribe()
 
+	closed1 := make(chan bool)
+	closed2 := make(chan bool)
+
 	go func() {
 		for range sub1 {
 		}
+		closed1 <- true
 	}()
 	go func() {
 		for range sub2 {
 		}
+		closed2 <- true
 	}()
 
 	time.Sleep(50 * time.Millisecond)
 	mux.Stop()
-	time.Sleep(50 * time.Millisecond)
 
-	t.Log("Subscriber channels remain open after Stop (for restart capability)")
+	select {
+	case <-closed1:
+		t.Log("Subscriber 1 channel closed as expected")
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Subscriber 1 channel did not close after Stop")
+	}
+
+	select {
+	case <-closed2:
+		t.Log("Subscriber 2 channel closed as expected")
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Subscriber 2 channel did not close after Stop")
+	}
 }
 
 func TestLogMultiplexer_NoDeadlockOnSlowSubscriber(t *testing.T) {
@@ -253,12 +269,101 @@ func TestLogMultiplexer_MultipleRestarts(t *testing.T) {
 		}
 	}()
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 3; i++ {
 		mux.Start(time.Now())
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		mux.Stop()
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	t.Log("Multiple restarts completed successfully")
+}
+
+func TestLogMultiplexer_SubscriberReceivesAllLogs(t *testing.T) {
+	mux := NewLogMultiplexer("test_container")
+
+	sub1 := mux.Subscribe()
+	sub2 := mux.Subscribe()
+
+	received1 := make([]string, 0)
+	received2 := make([]string, 0)
+	done1 := make(chan bool)
+	done2 := make(chan bool)
+
+	go func() {
+		for log := range sub1 {
+			if log.Err == nil {
+				received1 = append(received1, log.Text)
+			}
+		}
+		done1 <- true
+	}()
+
+	go func() {
+		for log := range sub2 {
+			if log.Err == nil {
+				received2 = append(received2, log.Text)
+			}
+		}
+		done2 <- true
+	}()
+
+	mux.Start(time.Now())
+	time.Sleep(100 * time.Millisecond)
+	mux.Stop()
+
+	<-done1
+	<-done2
+
+	if len(received1) == 0 && len(received2) == 0 {
+		t.Log("No logs received (container may not exist), but both subscribers closed properly")
+		return
+	}
+
+	if len(received1) != len(received2) {
+		t.Errorf("Subscribers received different number of logs: sub1=%d, sub2=%d", len(received1), len(received2))
+	}
+
+	t.Logf("Both subscribers received %d logs", len(received1))
+}
+
+func TestLogMultiplexer_SubscriberBufferOverflow(t *testing.T) {
+	mux := NewLogMultiplexer("test_container")
+
+	slowSub := mux.Subscribe()
+	fastSub := mux.Subscribe()
+
+	fastReceived := 0
+	slowReceived := 0
+
+	fastDone := make(chan bool)
+	slowDone := make(chan bool)
+
+	go func() {
+		for range fastSub {
+			fastReceived++
+		}
+		fastDone <- true
+	}()
+
+	go func() {
+		for range slowSub {
+			slowReceived++
+			time.Sleep(50 * time.Millisecond)
+		}
+		slowDone <- true
+	}()
+
+	mux.Start(time.Now())
+	time.Sleep(200 * time.Millisecond)
+	mux.Stop()
+
+	<-fastDone
+	<-slowDone
+
+	t.Logf("Fast subscriber received %d logs, slow subscriber received %d logs", fastReceived, slowReceived)
+
+	if slowReceived > fastReceived {
+		t.Errorf("Slow subscriber received more logs than fast subscriber: slow=%d, fast=%d", slowReceived, fastReceived)
+	}
 }

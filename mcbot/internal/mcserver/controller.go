@@ -62,41 +62,13 @@ func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller
 	}, nil
 }
 
-func startErrorMessage(s state.ServerState) (string, bool) {
-	switch s {
-	case state.StateStarting:
-		return "서버가 이미 시작 중입니다.", true
-	case state.StateRunning:
-		return "서버가 이미 실행 중입니다.", true
-	case state.StateStopping:
-		return "서버가 종료 중입니다. 종료가 완료된 후 다시 시도해주세요.", true
-	case state.StateStopped, state.StateError:
-		return "", false
-	default:
-		return "서버 상태가 변경되었습니다. 다시 시도해주세요.", true
-	}
-}
-
 func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 	resultCh := make(chan StartResult, 1)
 
-	currentState := c.stateManager.GetState()
-
-	if errorMsg, hasError := startErrorMessage(currentState); hasError {
+	if err := c.stateManager.TryStartTransition(); err != nil {
 		resultCh <- StartResult{
 			Success:      false,
-			ErrorMessage: errorMsg,
-		}
-		close(resultCh)
-		return resultCh
-	}
-
-	if !c.stateManager.SetStarting() {
-		currentState = c.stateManager.GetState()
-		errorMsg, _ := startErrorMessage(currentState)
-		resultCh <- StartResult{
-			Success:      false,
-			ErrorMessage: errorMsg,
+			ErrorMessage: err.Error(),
 		}
 		close(resultCh)
 		return resultCh
@@ -163,29 +135,39 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 
 		logCh := c.logMux.Subscribe()
 
-		for logLine := range logCh {
-			if logLine.Err != nil {
-				log.Printf("로그 읽기 오류: %v", logLine.Err)
-				continue
-			}
-
-			matches := c.readyPattern.FindStringSubmatch(logLine.Text)
-			if len(matches) >= 2 {
-				loadSeconds, _ := strconv.ParseFloat(matches[1], 64)
-				readyDuration := time.Since(startTime)
-				c.stateManager.SetRunning(readyDuration)
-
-				logCancel()
-
-				resultCh <- StartResult{
-					Success:       true,
-					ReadyDuration: readyDuration,
-					LoadSeconds:   loadSeconds,
-				}
-				return
-			}
-
+		for {
 			select {
+			case logLine, ok := <-logCh:
+				if !ok {
+					c.stateManager.SetError(fmt.Errorf("log stream ended unexpectedly"))
+					resultCh <- StartResult{
+						Success:      false,
+						ErrorMessage: "로그 스트림이 예기치 않게 종료되었습니다.",
+					}
+					return
+				}
+
+				if logLine.Err != nil {
+					log.Printf("로그 읽기 오류: %v", logLine.Err)
+					continue
+				}
+
+				matches := c.readyPattern.FindStringSubmatch(logLine.Text)
+				if len(matches) >= 2 {
+					loadSeconds, _ := strconv.ParseFloat(matches[1], 64)
+					readyDuration := time.Since(startTime)
+					c.stateManager.SetRunning(readyDuration)
+
+					logCancel()
+
+					resultCh <- StartResult{
+						Success:       true,
+						ReadyDuration: readyDuration,
+						LoadSeconds:   loadSeconds,
+					}
+					return
+				}
+
 			case <-logCtx.Done():
 				if logCtx.Err() == context.DeadlineExceeded {
 					c.stateManager.SetError(fmt.Errorf("ready timeout exceeded"))
@@ -195,6 +177,7 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 					}
 					return
 				}
+
 			case <-ctx.Done():
 				c.stateManager.SetError(ctx.Err())
 				resultCh <- StartResult{
@@ -202,14 +185,7 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 					ErrorMessage: "서버 시작이 취소되었습니다.",
 				}
 				return
-			default:
 			}
-		}
-
-		c.stateManager.SetError(fmt.Errorf("log stream ended unexpectedly"))
-		resultCh <- StartResult{
-			Success:      false,
-			ErrorMessage: "로그 스트림이 예기치 않게 종료되었습니다.",
 		}
 	}()
 
@@ -219,39 +195,10 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 	resultCh := make(chan StopResult, 1)
 
-	currentState := c.stateManager.GetState()
-
-	if currentState == state.StateStopping {
+	if err := c.stateManager.TryStopTransition(); err != nil {
 		resultCh <- StopResult{
 			Success:      false,
-			ErrorMessage: "서버가 이미 종료 중입니다.",
-		}
-		close(resultCh)
-		return resultCh
-	}
-
-	if currentState == state.StateStopped {
-		resultCh <- StopResult{
-			Success:      false,
-			ErrorMessage: "서버가 이미 종료되어 있습니다.",
-		}
-		close(resultCh)
-		return resultCh
-	}
-
-	if currentState == state.StateStarting {
-		resultCh <- StopResult{
-			Success:      false,
-			ErrorMessage: "서버가 시작 중입니다. 시작이 완료된 후 다시 시도해주세요.",
-		}
-		close(resultCh)
-		return resultCh
-	}
-
-	if !c.stateManager.SetStopping() {
-		resultCh <- StopResult{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("서버를 종료할 수 없습니다. 현재 상태: %s", currentState.Korean()),
+			ErrorMessage: err.Error(),
 		}
 		close(resultCh)
 		return resultCh

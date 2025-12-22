@@ -47,6 +47,10 @@ func (m *LogMultiplexer) run(ctx context.Context, since time.Time) {
 	defer func() {
 		m.mu.Lock()
 		m.running = false
+		for _, sub := range m.subscribers {
+			close(sub)
+		}
+		m.subscribers = nil
 		m.mu.Unlock()
 	}()
 

@@ -29,7 +29,7 @@ func EmbedStartSuccess(readyDuration time.Duration, requestedBy string) *discord
 		Fields: []*discordgo.MessageEmbedField{
 			{Name: "상태", Value: "🟢 온라인", Inline: true},
 			{Name: "준비 시간", Value: fmt.Sprintf("%.2f초", readyDuration.Seconds()), Inline: true},
-			{Name: "요청자", Value: requestedBy, Inline: true},
+			{Name: "요청자", Value: EscapeDiscordText(requestedBy), Inline: true},
 		},
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
@@ -51,7 +51,7 @@ func EmbedStopSuccess(requestedBy string) *discordgo.MessageEmbed {
 		Color:       ColorSuccess,
 		Fields: []*discordgo.MessageEmbedField{
 			{Name: "상태", Value: "🔴 오프라인", Inline: true},
-			{Name: "요청자", Value: requestedBy, Inline: true},
+			{Name: "요청자", Value: EscapeDiscordText(requestedBy), Inline: true},
 		},
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
@@ -136,7 +136,7 @@ func formatPlayers(players []string) string {
 
 	for i := 0; i < visibleCount; i++ {
 		sb.WriteString("- ")
-		sb.WriteString(players[i])
+		sb.WriteString(EscapeDiscordText(players[i]))
 		sb.WriteString("\n")
 	}
 

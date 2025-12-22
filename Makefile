@@ -18,7 +18,6 @@ go-build:
 	cd $(GO_DIR) && go build -o mcbot ./cmd/mcbot
 
 up: ensure-mc
-	docker compose create mc-server
 	docker compose up --build -d mcbot
 
 up-all: ensure-mc

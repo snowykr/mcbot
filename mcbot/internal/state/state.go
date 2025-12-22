@@ -1,6 +1,7 @@
 package state
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -85,6 +86,48 @@ func (m *Manager) TryTransition(from, to ServerState) bool {
 	return true
 }
 
+type TransitionError struct {
+	CurrentState ServerState
+	Message      string
+}
+
+func (e *TransitionError) Error() string {
+	return e.Message
+}
+
+func (m *Manager) TryStartTransition() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	switch m.state {
+	case StateStarting:
+		return &TransitionError{
+			CurrentState: m.state,
+			Message:      "서버가 이미 시작 중입니다.",
+		}
+	case StateRunning:
+		return &TransitionError{
+			CurrentState: m.state,
+			Message:      "서버가 이미 실행 중입니다.",
+		}
+	case StateStopping:
+		return &TransitionError{
+			CurrentState: m.state,
+			Message:      "서버가 종료 중입니다. 종료가 완료된 후 다시 시도해주세요.",
+		}
+	case StateStopped, StateError:
+		m.state = StateStarting
+		m.lastStartTime = time.Now()
+		m.lastError = nil
+		return nil
+	default:
+		return &TransitionError{
+			CurrentState: m.state,
+			Message:      "서버 상태가 변경되었습니다. 다시 시도해주세요.",
+		}
+	}
+}
+
 func (m *Manager) SetStarting() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -102,6 +145,37 @@ func (m *Manager) SetRunning(readyDuration time.Duration) {
 	defer m.mu.Unlock()
 	m.state = StateRunning
 	m.lastReadyDuration = readyDuration
+}
+
+func (m *Manager) TryStopTransition() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	switch m.state {
+	case StateStopping:
+		return &TransitionError{
+			CurrentState: m.state,
+			Message:      "서버가 이미 종료 중입니다.",
+		}
+	case StateStopped:
+		return &TransitionError{
+			CurrentState: m.state,
+			Message:      "서버가 이미 종료되어 있습니다.",
+		}
+	case StateStarting:
+		return &TransitionError{
+			CurrentState: m.state,
+			Message:      "서버가 시작 중입니다. 시작이 완료된 후 다시 시도해주세요.",
+		}
+	case StateRunning, StateError:
+		m.state = StateStopping
+		return nil
+	default:
+		return &TransitionError{
+			CurrentState: m.state,
+			Message:      fmt.Sprintf("서버를 종료할 수 없습니다. 현재 상태: %s", m.state.Korean()),
+		}
+	}
 }
 
 func (m *Manager) SetStopping() bool {
