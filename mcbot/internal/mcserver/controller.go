@@ -340,3 +340,7 @@ func (c *Controller) SyncState(ctx context.Context) error {
 
 	return nil
 }
+
+func (c *Controller) Shutdown() {
+	c.logMux.Stop()
+}

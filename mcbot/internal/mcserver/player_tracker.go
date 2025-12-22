@@ -8,6 +8,10 @@ import (
 	"github.com/snowy/mcbot/internal/dockerctl"
 )
 
+type LogSubscriber interface {
+	Subscribe() <-chan dockerctl.LogLine
+}
+
 type PlayerTracker struct {
 	players      map[string]struct{}
 	mu           sync.RWMutex
@@ -16,7 +20,7 @@ type PlayerTracker struct {
 	onChange     func([]string)
 }
 
-func NewPlayerTracker(mux *LogMultiplexer, joinPattern, leavePattern string) (*PlayerTracker, error) {
+func NewPlayerTracker(subscriber LogSubscriber, joinPattern, leavePattern string) (*PlayerTracker, error) {
 	joinRegex, err := regexp.Compile(joinPattern)
 	if err != nil {
 		return nil, err
@@ -33,7 +37,7 @@ func NewPlayerTracker(mux *LogMultiplexer, joinPattern, leavePattern string) (*P
 		leavePattern: leaveRegex,
 	}
 
-	logCh := mux.Subscribe()
+	logCh := subscriber.Subscribe()
 	go tracker.processLogs(logCh)
 
 	return tracker, nil
@@ -50,12 +54,13 @@ func (t *PlayerTracker) processLogs(logCh <-chan dockerctl.LogLine) {
 			t.mu.Lock()
 			t.players[playerName] = struct{}{}
 			players := t.getPlayersLocked()
+			callback := t.onChange
 			t.mu.Unlock()
 
 			log.Printf("플레이어 접속: %s (현재 %d명)", playerName, len(players))
 
-			if t.onChange != nil {
-				t.onChange(players)
+			if callback != nil {
+				callback(players)
 			}
 			continue
 		}
@@ -65,12 +70,13 @@ func (t *PlayerTracker) processLogs(logCh <-chan dockerctl.LogLine) {
 			t.mu.Lock()
 			delete(t.players, playerName)
 			players := t.getPlayersLocked()
+			callback := t.onChange
 			t.mu.Unlock()
 
 			log.Printf("플레이어 퇴장: %s (현재 %d명)", playerName, len(players))
 
-			if t.onChange != nil {
-				t.onChange(players)
+			if callback != nil {
+				callback(players)
 			}
 		}
 	}

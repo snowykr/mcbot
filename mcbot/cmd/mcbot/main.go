@@ -84,5 +84,6 @@ func main() {
 	<-stop
 
 	log.Println("마크봇을 종료합니다...")
+	controller.Shutdown()
 	log.Println("마크봇이 정상적으로 종료되었습니다.")
 }
