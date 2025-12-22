@@ -12,19 +12,47 @@ import (
 	"github.com/snowy/mcbot/internal/mcserver"
 )
 
+type discordSession interface {
+	ChannelMessageEditComplex(*discordgo.MessageEdit) (*discordgo.Message, error)
+	ChannelMessageSendComplex(string, *discordgo.MessageSend) (*discordgo.Message, error)
+	ChannelMessages(string, int, string, string, string) ([]*discordgo.Message, error)
+}
+
+type serverController interface {
+	Presence(context.Context) mcserver.PresenceState
+}
+
+type discordSessionWrapper struct {
+	*discordgo.Session
+}
+
+func (w *discordSessionWrapper) ChannelMessageEditComplex(edit *discordgo.MessageEdit) (*discordgo.Message, error) {
+	return w.Session.ChannelMessageEditComplex(edit)
+}
+
+func (w *discordSessionWrapper) ChannelMessageSendComplex(channelID string, data *discordgo.MessageSend) (*discordgo.Message, error) {
+	return w.Session.ChannelMessageSendComplex(channelID, data)
+}
+
+func (w *discordSessionWrapper) ChannelMessages(channelID string, limit int, beforeID, afterID, aroundID string) ([]*discordgo.Message, error) {
+	return w.Session.ChannelMessages(channelID, limit, beforeID, afterID, aroundID)
+}
+
 type StatusEmbedManager struct {
-	session    *discordgo.Session
-	cfg        *config.Config
-	controller *mcserver.Controller
-	messageID  string
-	mu         sync.RWMutex
+	session     discordSession
+	realSession *discordgo.Session
+	cfg         *config.Config
+	controller  serverController
+	messageID   string
+	mu          sync.RWMutex
 }
 
 func NewStatusEmbedManager(session *discordgo.Session, cfg *config.Config, controller *mcserver.Controller) *StatusEmbedManager {
 	return &StatusEmbedManager{
-		session:    session,
-		cfg:        cfg,
-		controller: controller,
+		session:     &discordSessionWrapper{Session: session},
+		realSession: session,
+		cfg:         cfg,
+		controller:  controller,
 	}
 }
 
@@ -59,7 +87,7 @@ func (m *StatusEmbedManager) findExistingMessage() (*discordgo.Message, error) {
 		return nil, fmt.Errorf("채널 메시지 조회 실패: %w", err)
 	}
 
-	botID := m.session.State.User.ID
+	botID := m.realSession.State.User.ID
 
 	for _, msg := range messages {
 		if msg.Author.ID != botID {
