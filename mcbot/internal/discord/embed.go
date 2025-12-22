@@ -17,7 +17,7 @@ const (
 	ColorWarning = 0xFFCC00
 
 	ComponentIDToggle = "mcserver_toggle"
-	EmbedMarkerFooter = "MCBOT_STATUS_PRESENCE"
+	EmbedMarkerFooter = "MCBOT"
 )
 
 func EmbedStarting() *discordgo.MessageEmbed {

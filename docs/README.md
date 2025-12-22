@@ -70,7 +70,7 @@ docker compose create mc-server
 docker compose up --build -d mcbot
 ```
 
-이 명령은 **mcbot만 실행**합니다. mc-server는 자동으로 시작되지 않습니다.
+이 명령은 **mcbot만 실행**합니다. `mc-server` 는 자동으로 시작되지 않습니다.
 
 ### 4. 디스코드에서 사용
 
