@@ -147,24 +147,25 @@ func TestTryStopTransition(t *testing.T) {
 func TestConcurrentStartTransitions(t *testing.T) {
 	m := NewManager()
 
-	successCount := 0
-	errorCount := 0
-	done := make(chan bool, 10)
+	const numGoroutines = 10
+	resultCh := make(chan error, numGoroutines)
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < numGoroutines; i++ {
 		go func() {
 			err := m.TryStartTransition()
-			if err == nil {
-				successCount++
-			} else {
-				errorCount++
-			}
-			done <- true
+			resultCh <- err
 		}()
 	}
 
-	for i := 0; i < 10; i++ {
-		<-done
+	successCount := 0
+	errorCount := 0
+	for i := 0; i < numGoroutines; i++ {
+		err := <-resultCh
+		if err == nil {
+			successCount++
+		} else {
+			errorCount++
+		}
 	}
 
 	if successCount != 1 {
@@ -185,24 +186,25 @@ func TestConcurrentStopTransitions(t *testing.T) {
 	m := NewManager()
 	m.SetState(StateRunning)
 
-	successCount := 0
-	errorCount := 0
-	done := make(chan bool, 10)
+	const numGoroutines = 10
+	resultCh := make(chan error, numGoroutines)
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < numGoroutines; i++ {
 		go func() {
 			err := m.TryStopTransition()
-			if err == nil {
-				successCount++
-			} else {
-				errorCount++
-			}
-			done <- true
+			resultCh <- err
 		}()
 	}
 
-	for i := 0; i < 10; i++ {
-		<-done
+	successCount := 0
+	errorCount := 0
+	for i := 0; i < numGoroutines; i++ {
+		err := <-resultCh
+		if err == nil {
+			successCount++
+		} else {
+			errorCount++
+		}
 	}
 
 	if successCount != 1 {
