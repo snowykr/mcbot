@@ -93,7 +93,14 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 			resultCh <- StartResult{
 				Success: false,
 				ErrorMessage: fmt.Sprintf(
-					"컨테이너 '%s'를 찾을 수 없습니다. 'docker compose create mc-server' 또는 'docker compose up --no-start mc-server' 명령으로 먼저 컨테이너를 생성해주세요.",
+					"컨테이너 '%s'를 찾을 수 없습니다.\n\n"+
+						"[권장] Make를 사용하여 컨테이너를 생성해주세요:\n"+
+						"  make ensure-mc\n\n"+
+						"[대안] Docker Compose를 직접 사용하는 경우:\n"+
+						"  • Docker Compose v2: docker compose create mc-server\n"+
+						"                      또는 docker compose up --no-start mc-server\n"+
+						"  • Docker Compose v1: docker-compose create mc-server\n"+
+						"                      또는 docker-compose up --no-start mc-server",
 					c.cfg.MCContainerName,
 				),
 			}
