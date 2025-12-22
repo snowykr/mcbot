@@ -14,9 +14,10 @@ import (
 )
 
 type StartResult struct {
-	Success      bool
-	LoadSeconds  float64
-	ErrorMessage string
+	Success       bool
+	ReadyDuration time.Duration
+	LoadSeconds   float64
+	ErrorMessage  string
 }
 
 type StopResult struct {
@@ -143,8 +144,9 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 				logCancel()
 
 				resultCh <- StartResult{
-					Success:     true,
-					LoadSeconds: loadSeconds,
+					Success:       true,
+					ReadyDuration: readyDuration,
+					LoadSeconds:   loadSeconds,
 				}
 				return
 			}

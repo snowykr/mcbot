@@ -156,7 +156,7 @@ func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i
 			}
 		} else {
 			_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-				Content: fmt.Sprintf("✅ 서버가 성공적으로 시작되었습니다 (%.2f초)", result.LoadSeconds),
+				Content: fmt.Sprintf("✅ 서버가 성공적으로 시작되었습니다 (%.2f초)", result.ReadyDuration.Seconds()),
 				Flags:   discordgo.MessageFlagsEphemeral,
 			})
 			if err != nil {
@@ -213,7 +213,7 @@ func (h *Handler) handleStart(s *discordgo.Session, i *discordgo.InteractionCrea
 
 		var embed *discordgo.MessageEmbed
 		if result.Success {
-			embed = EmbedStartSuccess(result.LoadSeconds, requestedBy)
+			embed = EmbedStartSuccess(result.ReadyDuration, requestedBy)
 		} else {
 			embed = EmbedStartFailed(result.ErrorMessage)
 		}

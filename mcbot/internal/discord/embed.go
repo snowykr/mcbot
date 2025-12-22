@@ -29,14 +29,14 @@ func EmbedStarting() *discordgo.MessageEmbed {
 	}
 }
 
-func EmbedStartSuccess(loadSeconds float64, requestedBy string) *discordgo.MessageEmbed {
+func EmbedStartSuccess(readyDuration time.Duration, requestedBy string) *discordgo.MessageEmbed {
 	return &discordgo.MessageEmbed{
 		Title:       "✅ 서버 시작 완료",
 		Description: "마인크래프트 서버가 정상적으로 시작되었습니다!",
 		Color:       ColorSuccess,
 		Fields: []*discordgo.MessageEmbedField{
 			{Name: "상태", Value: "🟢 온라인", Inline: true},
-			{Name: "로드 시간", Value: fmt.Sprintf("%.2f초", loadSeconds), Inline: true},
+			{Name: "준비 시간", Value: fmt.Sprintf("%.2f초", readyDuration.Seconds()), Inline: true},
 			{Name: "요청자", Value: requestedBy, Inline: true},
 		},
 		Timestamp: time.Now().Format(time.RFC3339),
@@ -112,7 +112,7 @@ func EmbedStatus(stateKorean string, isOnline bool, lastStartTime time.Time, las
 
 	if lastReadyDuration > 0 {
 		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-			Name:   "마지막 로드 시간",
+			Name:   "마지막 준비 시간",
 			Value:  fmt.Sprintf("%.2f초", lastReadyDuration.Seconds()),
 			Inline: true,
 		})
