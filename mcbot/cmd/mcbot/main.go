@@ -77,17 +77,6 @@ func main() {
 		}
 	}()
 
-	log.Println("슬래시 명령어를 등록합니다...")
-	registeredCommands := make([]*discordgo.ApplicationCommand, len(discord.Commands))
-	for i, cmd := range discord.Commands {
-		registered, err := session.ApplicationCommandCreate(session.State.User.ID, "", cmd)
-		if err != nil {
-			log.Fatalf("슬래시 명령어 등록 실패 (%s): %v", cmd.Name, err)
-		}
-		registeredCommands[i] = registered
-		log.Printf("슬래시 명령어 등록 완료: /%s", cmd.Name)
-	}
-
 	log.Println("마크봇이 실행 중입니다. 종료하려면 Ctrl+C를 누르세요.")
 
 	stop := make(chan os.Signal, 1)
@@ -95,14 +84,5 @@ func main() {
 	<-stop
 
 	log.Println("마크봇을 종료합니다...")
-
-	for _, cmd := range registeredCommands {
-		if err := session.ApplicationCommandDelete(session.State.User.ID, "", cmd.ID); err != nil {
-			log.Printf("슬래시 명령어 삭제 실패 (%s): %v", cmd.Name, err)
-		} else {
-			log.Printf("슬래시 명령어 삭제 완료: /%s", cmd.Name)
-		}
-	}
-
 	log.Println("마크봇이 정상적으로 종료되었습니다.")
 }

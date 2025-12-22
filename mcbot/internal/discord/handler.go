@@ -2,7 +2,6 @@ package discord
 
 import (
 	"context"
-	"fmt"
 	"log"
 
 	"github.com/bwmarrin/discordgo"
@@ -26,41 +25,8 @@ func NewHandler(cfg *config.Config, controller *mcserver.Controller, statusEmbed
 }
 
 func (h *Handler) HandleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	switch i.Type {
-	case discordgo.InteractionApplicationCommand:
-		h.handleCommandInteraction(s, i)
-	case discordgo.InteractionMessageComponent:
+	if i.Type == discordgo.InteractionMessageComponent {
 		h.handleComponentInteraction(s, i)
-	}
-}
-
-func (h *Handler) handleCommandInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.ApplicationCommandData().Name != CommandName {
-		return
-	}
-
-	if !h.hasRequiredRole(s, i) {
-		h.respondEmbed(s, i, EmbedPermissionDenied(h.cfg.McbotRoleName), false)
-		return
-	}
-
-	options := i.ApplicationCommandData().Options
-	if len(options) == 0 {
-		h.respondEmbed(s, i, EmbedError("오류", "action 옵션이 필요합니다."), false)
-		return
-	}
-
-	action := options[0].StringValue()
-
-	switch action {
-	case ActionStart:
-		h.handleStart(s, i)
-	case ActionStop:
-		h.handleStop(s, i)
-	case ActionStatus:
-		h.handleStatus(s, i)
-	default:
-		h.respondEmbed(s, i, EmbedError("오류", "알 수 없는 action입니다."), false)
 	}
 }
 
@@ -75,8 +41,8 @@ func (h *Handler) handleComponentInteraction(s *discordgo.Session, i *discordgo.
 		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Content: "이 버튼을 사용하려면 권한이 필요합니다.",
-				Flags:   discordgo.MessageFlagsEphemeral,
+				Embeds: []*discordgo.MessageEmbed{EmbedPermissionDenied(h.cfg.McbotRoleName)},
+				Flags:  discordgo.MessageFlagsEphemeral,
 			},
 		})
 		if err != nil {
@@ -145,23 +111,21 @@ func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i
 			log.Printf("서버 시작 후 상태 임베드 업데이트 실패: %v", err)
 		}
 
-		if !result.Success {
-			log.Printf("서버 시작 실패: %s", result.ErrorMessage)
-			_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-				Content: fmt.Sprintf("❌ 서버 시작 실패: %s", result.ErrorMessage),
-				Flags:   discordgo.MessageFlagsEphemeral,
-			})
-			if err != nil {
-				log.Printf("실패 메시지 전송 실패: %v", err)
-			}
+		requestedBy := h.getUsername(i)
+		var embed *discordgo.MessageEmbed
+		if result.Success {
+			embed = EmbedStartSuccess(result.ReadyDuration, requestedBy)
 		} else {
-			_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-				Content: fmt.Sprintf("✅ 서버가 성공적으로 시작되었습니다 (%.2f초)", result.ReadyDuration.Seconds()),
-				Flags:   discordgo.MessageFlagsEphemeral,
-			})
-			if err != nil {
-				log.Printf("성공 메시지 전송 실패: %v", err)
-			}
+			log.Printf("서버 시작 실패: %s", result.ErrorMessage)
+			embed = EmbedStartFailed(result.ErrorMessage)
+		}
+
+		_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Embeds: []*discordgo.MessageEmbed{embed},
+			Flags:  discordgo.MessageFlagsEphemeral,
+		})
+		if err != nil {
+			log.Printf("결과 메시지 전송 실패: %v", err)
 		}
 	}()
 }
@@ -180,89 +144,23 @@ func (h *Handler) handleButtonStop(ctx context.Context, s *discordgo.Session, i 
 			log.Printf("서버 종료 후 상태 임베드 업데이트 실패: %v", err)
 		}
 
-		if !result.Success {
-			log.Printf("서버 종료 실패: %s", result.ErrorMessage)
-			_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-				Content: fmt.Sprintf("❌ 서버 종료 실패: %s", result.ErrorMessage),
-				Flags:   discordgo.MessageFlagsEphemeral,
-			})
-			if err != nil {
-				log.Printf("실패 메시지 전송 실패: %v", err)
-			}
-		} else {
-			_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-				Content: "✅ 서버가 정상적으로 종료되었습니다",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			})
-			if err != nil {
-				log.Printf("성공 메시지 전송 실패: %v", err)
-			}
-		}
-	}()
-}
-
-func (h *Handler) handleStart(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	h.respondEmbed(s, i, EmbedStarting(), false)
-
-	ctx := context.Background()
-	resultCh := h.controller.Start(ctx)
-
-	go func() {
-		result := <-resultCh
 		requestedBy := h.getUsername(i)
-
-		var embed *discordgo.MessageEmbed
-		if result.Success {
-			embed = EmbedStartSuccess(result.ReadyDuration, requestedBy)
-		} else {
-			embed = EmbedStartFailed(result.ErrorMessage)
-		}
-
-		h.editResponseEmbed(s, i, embed)
-
-		if err := h.statusEmbed.Update(ctx); err != nil {
-			log.Printf("상태 임베드 업데이트 실패: %v", err)
-		}
-	}()
-}
-
-func (h *Handler) handleStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	h.respondEmbed(s, i, EmbedStopping(), false)
-
-	ctx := context.Background()
-	resultCh := h.controller.Stop(ctx)
-
-	go func() {
-		result := <-resultCh
-		requestedBy := h.getUsername(i)
-
 		var embed *discordgo.MessageEmbed
 		if result.Success {
 			embed = EmbedStopSuccess(requestedBy)
 		} else {
+			log.Printf("서버 종료 실패: %s", result.ErrorMessage)
 			embed = EmbedStopFailed(result.ErrorMessage)
 		}
 
-		h.editResponseEmbed(s, i, embed)
-
-		if err := h.statusEmbed.Update(ctx); err != nil {
-			log.Printf("상태 임베드 업데이트 실패: %v", err)
+		_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+			Embeds: []*discordgo.MessageEmbed{embed},
+			Flags:  discordgo.MessageFlagsEphemeral,
+		})
+		if err != nil {
+			log.Printf("결과 메시지 전송 실패: %v", err)
 		}
 	}()
-}
-
-func (h *Handler) handleStatus(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	ctx := context.Background()
-	status := h.controller.Status(ctx)
-
-	embed := EmbedStatus(
-		status.State.Korean(),
-		status.ContainerRunning,
-		status.LastStartTime,
-		status.LastReadyDuration,
-	)
-
-	h.respondEmbed(s, i, embed, true)
 }
 
 func (h *Handler) getUsername(i *discordgo.InteractionCreate) string {
@@ -276,31 +174,4 @@ func (h *Handler) getUsername(i *discordgo.InteractionCreate) string {
 		return i.User.Username
 	}
 	return "알 수 없음"
-}
-
-func (h *Handler) respondEmbed(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed, ephemeral bool) {
-	var flags discordgo.MessageFlags
-	if ephemeral {
-		flags = discordgo.MessageFlagsEphemeral
-	}
-
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Embeds: []*discordgo.MessageEmbed{embed},
-			Flags:  flags,
-		},
-	})
-	if err != nil {
-		log.Printf("응답 전송 실패: %v", err)
-	}
-}
-
-func (h *Handler) editResponseEmbed(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed) {
-	_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Embeds: &[]*discordgo.MessageEmbed{embed},
-	})
-	if err != nil {
-		log.Printf("응답 수정 실패: %v", err)
-	}
 }
