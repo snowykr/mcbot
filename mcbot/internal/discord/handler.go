@@ -7,51 +7,122 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/snowy/mcbot/internal/config"
 	"github.com/snowy/mcbot/internal/mcserver"
+	"github.com/snowy/mcbot/internal/state"
 )
 
-type Handler struct {
-	cfg        *config.Config
-	controller *mcserver.Controller
+type ServerController interface {
+	Start(ctx context.Context) <-chan mcserver.StartResult
+	Stop(ctx context.Context) <-chan mcserver.StopResult
+	Presence(ctx context.Context) mcserver.PresenceState
 }
 
-func NewHandler(cfg *config.Config, controller *mcserver.Controller) *Handler {
+type StatusEmbedUpdater interface {
+	Update(ctx context.Context) error
+}
+
+type Handler struct {
+	cfg         *config.Config
+	controller  ServerController
+	statusEmbed StatusEmbedUpdater
+}
+
+func NewHandler(cfg *config.Config, controller ServerController, statusEmbed StatusEmbedUpdater) *Handler {
 	return &Handler{
-		cfg:        cfg,
-		controller: controller,
+		cfg:         cfg,
+		controller:  controller,
+		statusEmbed: statusEmbed,
 	}
 }
 
 func (h *Handler) HandleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
+	switch i.Type {
+	case discordgo.InteractionMessageComponent:
+		h.handleComponentInteraction(s, i)
 		return
-	}
 
-	if i.ApplicationCommandData().Name != CommandName {
+	case discordgo.InteractionApplicationCommand:
+		h.handleApplicationCommand(s, i)
+		return
+
+	default:
+		h.handleUnsupportedInteraction(s, i)
+	}
+}
+
+func (h *Handler) handleApplicationCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	commandName := i.ApplicationCommandData().Name
+	log.Printf("슬래시 커맨드 수신 (더 이상 지원하지 않음): %s (ID: %s, GuildID: %s, UserID: %s)",
+		commandName, i.ID, i.GuildID, i.User.ID)
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "이 봇은 슬래시 커맨드를 더 이상 지원하지 않습니다.\n버튼을 통해 서버를 제어해주세요.",
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+	if err != nil {
+		log.Printf("슬래시 커맨드 응답 실패: %v", err)
+	}
+}
+
+func (h *Handler) handleUnsupportedInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	log.Printf("지원하지 않는 인터랙션 타입: %v (ID: %s, GuildID: %s, UserID: %s)",
+		i.Type, i.ID, i.GuildID, i.User.ID)
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: "지원하지 않는 인터랙션 타입입니다.",
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+	if err != nil {
+		log.Printf("인터랙션 응답 실패: %v", err)
+	}
+}
+
+func (h *Handler) handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	customID := i.MessageComponentData().CustomID
+
+	if customID != ComponentIDToggle {
 		return
 	}
 
 	if !h.hasRequiredRole(s, i) {
-		h.respondEmbed(s, i, EmbedPermissionDenied(h.cfg.McbotRoleName), false)
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Embeds: []*discordgo.MessageEmbed{EmbedPermissionDenied(h.cfg.McbotRoleName)},
+				Flags:  discordgo.MessageFlagsEphemeral,
+			},
+		})
+		if err != nil {
+			log.Printf("권한 거부 응답 실패: %v", err)
+		}
 		return
 	}
 
-	options := i.ApplicationCommandData().Options
-	if len(options) == 0 {
-		h.respondEmbed(s, i, EmbedError("오류", "action 옵션이 필요합니다."), false)
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredMessageUpdate,
+	})
+	if err != nil {
+		log.Printf("인터랙션 응답 실패: %v", err)
 		return
 	}
 
-	action := options[0].StringValue()
+	opCtx, opCancel := context.WithTimeout(context.Background(), h.cfg.ServerOperationTimeout)
+	defer opCancel()
 
-	switch action {
-	case ActionStart:
-		h.handleStart(s, i)
-	case ActionStop:
-		h.handleStop(s, i)
-	case ActionStatus:
-		h.handleStatus(s, i)
+	presence := h.controller.Presence(opCtx)
+
+	switch presence.ServerState {
+	case state.StateStopped, state.StateError:
+		h.handleButtonStart(opCtx, s, i)
+	case state.StateRunning:
+		h.handleButtonStop(opCtx, s, i)
 	default:
-		h.respondEmbed(s, i, EmbedError("오류", "알 수 없는 action입니다."), false)
+		log.Printf("버튼 클릭 무시: 현재 상태 %v", presence.ServerState)
 	}
 }
 
@@ -80,60 +151,132 @@ func (h *Handler) hasRequiredRole(s *discordgo.Session, i *discordgo.Interaction
 	return false
 }
 
-func (h *Handler) handleStart(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	h.respondEmbed(s, i, EmbedStarting(), false)
-
-	ctx := context.Background()
+func (h *Handler) handleButtonStart(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
 	resultCh := h.controller.Start(ctx)
 
-	go func() {
-		result := <-resultCh
-		requestedBy := h.getUsername(i)
+	if err := h.statusEmbed.Update(ctx); err != nil {
+		log.Printf("상태 임베드 업데이트 실패: %v", err)
+	}
 
+	go func() {
+		var result mcserver.StartResult
+		var timedOut bool
+
+		select {
+		case res, ok := <-resultCh:
+			if !ok {
+				log.Printf("서버 시작 결과 채널이 값 없이 닫혔습니다 (UserID: %s)", h.getUserID(i))
+				result = mcserver.StartResult{
+					Success:      false,
+					ErrorMessage: "서버 시작 작업이 예기치 않게 종료되었습니다.",
+				}
+			} else {
+				result = res
+			}
+		case <-ctx.Done():
+			timedOut = true
+			log.Printf("서버 시작 작업 타임아웃 (UserID: %s, Timeout: %v, Err: %v)",
+				h.getUserID(i), h.cfg.ServerOperationTimeout, ctx.Err())
+			result = mcserver.StartResult{
+				Success:      false,
+				ErrorMessage: "서버 시작 작업이 제한 시간을 초과했습니다. 서버 상태를 확인해주세요.",
+			}
+		}
+
+		updateCtx, updateCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
+		defer updateCancel()
+
+		if err := h.statusEmbed.Update(updateCtx); err != nil {
+			log.Printf("서버 시작 후 상태 임베드 업데이트 실패: %v", err)
+		}
+
+		requestedBy := h.getUsername(i)
 		var embed *discordgo.MessageEmbed
 		if result.Success {
-			embed = EmbedStartSuccess(result.LoadSeconds, requestedBy)
+			embed = EmbedStartSuccess(result.ReadyDuration, requestedBy)
 		} else {
+			if timedOut {
+				log.Printf("서버 시작 타임아웃: %s", result.ErrorMessage)
+			} else {
+				log.Printf("서버 시작 실패: %s", result.ErrorMessage)
+			}
 			embed = EmbedStartFailed(result.ErrorMessage)
 		}
 
-		h.editResponseEmbed(s, i, embed)
+		if s != nil {
+			_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+				Embeds: []*discordgo.MessageEmbed{embed},
+				Flags:  discordgo.MessageFlagsEphemeral,
+			})
+			if err != nil {
+				log.Printf("결과 메시지 전송 실패: %v", err)
+			}
+		}
 	}()
 }
 
-func (h *Handler) handleStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	h.respondEmbed(s, i, EmbedStopping(), false)
-
-	ctx := context.Background()
+func (h *Handler) handleButtonStop(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
 	resultCh := h.controller.Stop(ctx)
 
-	go func() {
-		result := <-resultCh
-		requestedBy := h.getUsername(i)
+	if err := h.statusEmbed.Update(ctx); err != nil {
+		log.Printf("상태 임베드 업데이트 실패: %v", err)
+	}
 
+	go func() {
+		var result mcserver.StopResult
+		var timedOut bool
+
+		select {
+		case res, ok := <-resultCh:
+			if !ok {
+				log.Printf("서버 종료 결과 채널이 값 없이 닫혔습니다 (UserID: %s)", h.getUserID(i))
+				result = mcserver.StopResult{
+					Success:      false,
+					ErrorMessage: "서버 종료 작업이 예기치 않게 종료되었습니다.",
+				}
+			} else {
+				result = res
+			}
+		case <-ctx.Done():
+			timedOut = true
+			log.Printf("서버 종료 작업 타임아웃 (UserID: %s, Timeout: %v, Err: %v)",
+				h.getUserID(i), h.cfg.ServerOperationTimeout, ctx.Err())
+			result = mcserver.StopResult{
+				Success:      false,
+				ErrorMessage: "서버 종료 작업이 제한 시간을 초과했습니다. 서버 상태를 확인해주세요.",
+			}
+		}
+
+		updateCtx, updateCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
+		defer updateCancel()
+
+		if err := h.statusEmbed.Update(updateCtx); err != nil {
+			log.Printf("서버 종료 후 상태 임베드 업데이트 실패: %v", err)
+		}
+
+		requestedBy := h.getUsername(i)
 		var embed *discordgo.MessageEmbed
 		if result.Success {
 			embed = EmbedStopSuccess(requestedBy)
 		} else {
+			if timedOut {
+				log.Printf("서버 종료 타임아웃: %s", result.ErrorMessage)
+			} else {
+				log.Printf("서버 종료 실패: %s", result.ErrorMessage)
+			}
 			embed = EmbedStopFailed(result.ErrorMessage)
 		}
 
-		h.editResponseEmbed(s, i, embed)
+		if s != nil {
+			_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+				Embeds: []*discordgo.MessageEmbed{embed},
+				Flags:  discordgo.MessageFlagsEphemeral,
+			})
+			if err != nil {
+				log.Printf("결과 메시지 전송 실패: %v", err)
+			}
+		}
 	}()
-}
-
-func (h *Handler) handleStatus(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	ctx := context.Background()
-	status := h.controller.Status(ctx)
-
-	embed := EmbedStatus(
-		status.State.Korean(),
-		status.ContainerRunning,
-		status.LastStartTime,
-		status.LastReadyDuration,
-	)
-
-	h.respondEmbed(s, i, embed, true)
 }
 
 func (h *Handler) getUsername(i *discordgo.InteractionCreate) string {
@@ -149,29 +292,12 @@ func (h *Handler) getUsername(i *discordgo.InteractionCreate) string {
 	return "알 수 없음"
 }
 
-func (h *Handler) respondEmbed(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed, ephemeral bool) {
-	var flags discordgo.MessageFlags
-	if ephemeral {
-		flags = discordgo.MessageFlagsEphemeral
+func (h *Handler) getUserID(i *discordgo.InteractionCreate) string {
+	if i.Member != nil && i.Member.User != nil {
+		return i.Member.User.ID
 	}
-
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Embeds: []*discordgo.MessageEmbed{embed},
-			Flags:  flags,
-		},
-	})
-	if err != nil {
-		log.Printf("응답 전송 실패: %v", err)
+	if i.User != nil {
+		return i.User.ID
 	}
-}
-
-func (h *Handler) editResponseEmbed(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed) {
-	_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Embeds: &[]*discordgo.MessageEmbed{embed},
-	})
-	if err != nil {
-		log.Printf("응답 수정 실패: %v", err)
-	}
+	return "unknown"
 }

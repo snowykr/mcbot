@@ -14,9 +14,10 @@ import (
 )
 
 type StartResult struct {
-	Success      bool
-	LoadSeconds  float64
-	ErrorMessage string
+	Success       bool
+	ReadyDuration time.Duration
+	LoadSeconds   float64
+	ErrorMessage  string
 }
 
 type StopResult struct {
@@ -31,38 +32,50 @@ type StatusResult struct {
 	LastStartTime     time.Time
 	LastReadyDuration time.Duration
 	LastError         error
+	Players           []string
 }
 
 type Controller struct {
-	cfg          *config.Config
-	stateManager *state.Manager
-	readyPattern *regexp.Regexp
+	cfg           *config.Config
+	stateManager  *state.Manager
+	readyPattern  *regexp.Regexp
+	logMux        *LogMultiplexer
+	playerTracker *PlayerTracker
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
 	pattern := regexp.MustCompile(cfg.ReadyLogPattern)
 
+	logMux := NewLogMultiplexer(cfg.MCContainerName)
+
+	playerTracker, err := NewPlayerTracker(logMux, cfg.MCJoinLogPattern, cfg.MCLeaveLogPattern)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create player tracker: %w", err)
+	}
+
 	return &Controller{
-		cfg:          cfg,
-		stateManager: stateManager,
-		readyPattern: pattern,
+		cfg:           cfg,
+		stateManager:  stateManager,
+		readyPattern:  pattern,
+		logMux:        logMux,
+		playerTracker: playerTracker,
 	}, nil
 }
 
 func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 	resultCh := make(chan StartResult, 1)
 
+	if err := c.stateManager.TryStartTransition(); err != nil {
+		resultCh <- StartResult{
+			Success:      false,
+			ErrorMessage: err.Error(),
+		}
+		close(resultCh)
+		return resultCh
+	}
+
 	go func() {
 		defer close(resultCh)
-
-		if !c.stateManager.SetStarting() {
-			currentState := c.stateManager.GetState()
-			resultCh <- StartResult{
-				Success:      false,
-				ErrorMessage: fmt.Sprintf("서버를 시작할 수 없습니다. 현재 상태: %s", currentState.Korean()),
-			}
-			return
-		}
 
 		containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
 		if err != nil {
@@ -75,10 +88,20 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 		}
 
 		if !containerState.Exists {
-			c.stateManager.SetError(fmt.Errorf("container not found"))
+			c.stateManager.SetStoppedWithError(fmt.Errorf("container not found"))
 			resultCh <- StartResult{
-				Success:      false,
-				ErrorMessage: fmt.Sprintf("컨테이너 '%s'를 찾을 수 없습니다. docker-compose up으로 먼저 컨테이너를 생성해주세요.", c.cfg.MCContainerName),
+				Success: false,
+				ErrorMessage: fmt.Sprintf(
+					"컨테이너 '%s'를 찾을 수 없습니다.\n\n"+
+						"[권장] Make를 사용하여 컨테이너를 생성해주세요:\n"+
+						"  make ensure-mc\n\n"+
+						"[대안] Docker Compose를 직접 사용하는 경우:\n"+
+						"  • Docker Compose v2: docker compose create mc-server\n"+
+						"                      또는 docker compose up --no-start mc-server\n"+
+						"  • Docker Compose v1: docker-compose create mc-server\n"+
+						"                      또는 docker-compose up --no-start mc-server",
+					c.cfg.MCContainerName,
+				),
 			}
 			return
 		}
@@ -103,55 +126,66 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 			return
 		}
 
+		c.playerTracker.Clear()
+
+		c.logMux.Start(startTime)
+
 		logCtx, logCancel := context.WithTimeout(ctx, c.cfg.ReadyTimeout)
 		defer logCancel()
 
-		logCh := dockerctl.FollowLogs(logCtx, c.cfg.MCContainerName, startTime)
+		logCh := c.logMux.Subscribe()
 
-		for logLine := range logCh {
-			if logLine.Err != nil {
-				log.Printf("로그 읽기 오류: %v", logLine.Err)
-				continue
-			}
+		for {
+			select {
+			case logLine, ok := <-logCh:
+				if !ok {
+					c.stateManager.SetError(fmt.Errorf("log stream ended unexpectedly"))
+					resultCh <- StartResult{
+						Success:      false,
+						ErrorMessage: "로그 스트림이 예기치 않게 종료되었습니다.",
+					}
+					return
+				}
 
-			matches := c.readyPattern.FindStringSubmatch(logLine.Text)
-			if len(matches) >= 2 {
-				loadSeconds, _ := strconv.ParseFloat(matches[1], 64)
-				readyDuration := time.Since(startTime)
-				c.stateManager.SetRunning(readyDuration)
+				if logLine.Err != nil {
+					log.Printf("로그 읽기 오류: %v", logLine.Err)
+					continue
+				}
 
-				logCancel()
+				matches := c.readyPattern.FindStringSubmatch(logLine.Text)
+				if len(matches) >= 2 {
+					loadSeconds, _ := strconv.ParseFloat(matches[1], 64)
+					readyDuration := time.Since(startTime)
+					c.stateManager.SetRunning(readyDuration)
 
+					logCancel()
+
+					resultCh <- StartResult{
+						Success:       true,
+						ReadyDuration: readyDuration,
+						LoadSeconds:   loadSeconds,
+					}
+					return
+				}
+
+			case <-logCtx.Done():
+				if logCtx.Err() == context.DeadlineExceeded {
+					c.stateManager.SetError(fmt.Errorf("ready timeout exceeded"))
+					resultCh <- StartResult{
+						Success:      false,
+						ErrorMessage: fmt.Sprintf("서버 시작 시간이 %v을 초과했습니다. 서버 로그를 확인해주세요.", c.cfg.ReadyTimeout),
+					}
+					return
+				}
+
+			case <-ctx.Done():
+				c.stateManager.SetError(ctx.Err())
 				resultCh <- StartResult{
-					Success:     true,
-					LoadSeconds: loadSeconds,
+					Success:      false,
+					ErrorMessage: "서버 시작이 취소되었습니다.",
 				}
 				return
 			}
-		}
-
-		if logCtx.Err() == context.DeadlineExceeded {
-			c.stateManager.SetError(fmt.Errorf("ready timeout exceeded"))
-			resultCh <- StartResult{
-				Success:      false,
-				ErrorMessage: fmt.Sprintf("서버 시작 시간이 %v을 초과했습니다. 서버 로그를 확인해주세요.", c.cfg.ReadyTimeout),
-			}
-			return
-		}
-
-		if ctx.Err() != nil {
-			c.stateManager.SetError(ctx.Err())
-			resultCh <- StartResult{
-				Success:      false,
-				ErrorMessage: "서버 시작이 취소되었습니다.",
-			}
-			return
-		}
-
-		c.stateManager.SetError(fmt.Errorf("log stream ended unexpectedly"))
-		resultCh <- StartResult{
-			Success:      false,
-			ErrorMessage: "로그 스트림이 예기치 않게 종료되었습니다.",
 		}
 	}()
 
@@ -161,29 +195,40 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 	resultCh := make(chan StopResult, 1)
 
+	if err := c.stateManager.TryStopTransition(); err != nil {
+		resultCh <- StopResult{
+			Success:      false,
+			ErrorMessage: err.Error(),
+		}
+		close(resultCh)
+		return resultCh
+	}
+
 	go func() {
 		defer close(resultCh)
 
-		currentState := c.stateManager.GetState()
-
-		if currentState == state.StateStopping {
+		select {
+		case <-ctx.Done():
+			c.stateManager.SetError(ctx.Err())
 			resultCh <- StopResult{
 				Success:      false,
-				ErrorMessage: "서버가 이미 종료 중입니다.",
+				ErrorMessage: "서버 종료가 취소되었습니다.",
 			}
 			return
-		}
-
-		if currentState == state.StateStopped {
-			resultCh <- StopResult{
-				Success:      false,
-				ErrorMessage: "서버가 이미 종료되어 있습니다.",
-			}
-			return
+		default:
 		}
 
 		containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
 		if err != nil {
+			if ctx.Err() != nil {
+				c.stateManager.SetError(ctx.Err())
+				resultCh <- StopResult{
+					Success:      false,
+					ErrorMessage: "서버 종료가 취소되었습니다.",
+				}
+				return
+			}
+			c.stateManager.SetError(err)
 			resultCh <- StopResult{
 				Success:      false,
 				ErrorMessage: fmt.Sprintf("컨테이너 상태 확인 실패: %v", err),
@@ -192,6 +237,8 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 		}
 
 		if !containerState.Exists || !containerState.Running {
+			c.logMux.Stop()
+			c.playerTracker.Clear()
 			c.stateManager.SetStopped()
 			resultCh <- StopResult{
 				Success:      false,
@@ -200,17 +247,26 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 			return
 		}
 
-		if !c.stateManager.SetStopping() {
-			if c.stateManager.GetState() == state.StateStarting {
-				resultCh <- StopResult{
-					Success:      false,
-					ErrorMessage: "서버가 시작 중입니다. 시작이 완료된 후 다시 시도해주세요.",
-				}
-				return
+		select {
+		case <-ctx.Done():
+			c.stateManager.SetError(ctx.Err())
+			resultCh <- StopResult{
+				Success:      false,
+				ErrorMessage: "서버 종료가 취소되었습니다.",
 			}
+			return
+		default:
 		}
 
 		if err := dockerctl.StopContainer(ctx, c.cfg.MCContainerName, c.cfg.StopTimeoutSeconds); err != nil {
+			if ctx.Err() != nil {
+				c.stateManager.SetError(ctx.Err())
+				resultCh <- StopResult{
+					Success:      false,
+					ErrorMessage: "서버 종료가 취소되었습니다.",
+				}
+				return
+			}
 			c.stateManager.SetError(err)
 			resultCh <- StopResult{
 				Success:      false,
@@ -219,6 +275,8 @@ func (c *Controller) Stop(ctx context.Context) <-chan StopResult {
 			return
 		}
 
+		c.logMux.Stop()
+		c.playerTracker.Clear()
 		c.stateManager.SetStopped()
 		resultCh <- StopResult{
 			Success: true,
@@ -240,6 +298,7 @@ func (c *Controller) Status(ctx context.Context) StatusResult {
 			LastStartTime:     info.LastStartTime,
 			LastReadyDuration: info.LastReadyDuration,
 			LastError:         err,
+			Players:           []string{},
 		}
 	}
 
@@ -247,6 +306,7 @@ func (c *Controller) Status(ctx context.Context) StatusResult {
 		c.stateManager.SetState(state.StateRunning)
 		info.State = state.StateRunning
 	} else if !containerState.Running && info.State == state.StateRunning {
+		c.playerTracker.Clear()
 		c.stateManager.SetStopped()
 		info.State = state.StateStopped
 	}
@@ -258,7 +318,24 @@ func (c *Controller) Status(ctx context.Context) StatusResult {
 		LastStartTime:     info.LastStartTime,
 		LastReadyDuration: info.LastReadyDuration,
 		LastError:         info.LastError,
+		Players:           c.playerTracker.GetPlayers(),
 	}
+}
+
+func (c *Controller) Presence(ctx context.Context) PresenceState {
+	status := c.Status(ctx)
+
+	return PresenceState{
+		ServerState:       status.State,
+		ContainerRunning:  status.ContainerRunning,
+		Players:           status.Players,
+		LastStartTime:     status.LastStartTime,
+		LastReadyDuration: status.LastReadyDuration,
+	}
+}
+
+func (c *Controller) GetPlayerTracker() *PlayerTracker {
+	return c.playerTracker
 }
 
 func (c *Controller) SyncState(ctx context.Context) error {
@@ -273,11 +350,19 @@ func (c *Controller) SyncState(ctx context.Context) error {
 		if currentState == state.StateStopped || currentState == state.StateError {
 			c.stateManager.SetState(state.StateRunning)
 		}
+
+		c.logMux.Start(containerState.StartedAt)
 	} else {
 		if currentState == state.StateRunning {
+			c.logMux.Stop()
+			c.playerTracker.Clear()
 			c.stateManager.SetStopped()
 		}
 	}
 
 	return nil
+}
+
+func (c *Controller) Shutdown() {
+	c.logMux.Close()
 }
