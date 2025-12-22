@@ -167,21 +167,30 @@ go tool cover -html=coverage.out
 - **재시작 후 재연결**: Stop 후 다시 Start 호출 시 동일 구독자 채널로 새 로그 전달
 - **다중 재시작**: 여러 번의 Start/Stop 사이클에서도 구독자 채널 유지
 
-**Start/Stop/Subscribe 규약**:
+**Start/Stop/Subscribe/Close 규약**:
 - 여러 구독자에게 동일한 로그 스트림 브로드캐스트
-- **구독자 채널은 프로세스 수명 동안 유지** (Stop 시에도 닫지 않음)
+- **구독자 채널은 LogMultiplexer 수명 동안 유지** (Stop 시에도 닫지 않음, Close 시에만 닫힘)
 - Start:
   - 이미 running 상태면 no-op (로그 출력 후 즉시 반환)
   - 아니면 새 context로 FollowLogs 시작, running = true
   - 컨테이너 재시작 시마다 호출 가능 (재연결)
+  - Close 이후에는 호출해도 무시됨
 - Stop:
   - 현재 FollowLogs context를 취소하고 run goroutine 종료 대기
   - running = false로 설정
   - **구독자 채널은 닫지 않음** (다음 Start에서 재사용)
+  - Close 이후에는 호출해도 무시됨
 - Subscribe:
   - 언제든 호출 가능, 새 버퍼 채널(cap=100) 생성 및 등록
   - 채널은 LogMultiplexer 수명 동안 유지
   - Start 상태에 따라 로그 전달 여부가 결정됨
+  - Close 이후에는 호출 시 이미 닫힌 채널 반환 (즉시 range 종료)
+- Close:
+  - LogMultiplexer의 수명을 종료하는 메서드
+  - 내부적으로 Stop() 호출하여 로그 팔로우 중단
+  - 모든 구독자 채널을 닫고 목록 비움
+  - 이후 Start/Stop/Subscribe 호출은 무시되거나 닫힌 채널 반환
+  - Controller.Shutdown()에서만 호출됨
 - Subscribe/Stop/Start 동시 호출해도 데드락/패닉 없음
 - 느린 구독자는 default 분기로 드롭되어 전체 시스템 블로킹 방지
 

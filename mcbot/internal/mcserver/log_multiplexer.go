@@ -16,6 +16,7 @@ type LogMultiplexer struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	running       bool
+	closed        bool
 	wg            sync.WaitGroup
 }
 
@@ -29,6 +30,11 @@ func NewLogMultiplexer(containerName string) *LogMultiplexer {
 func (m *LogMultiplexer) Start(since time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.closed {
+		log.Printf("LogMultiplexer: 이미 종료되었습니다. Start 호출 무시")
+		return
+	}
 
 	if m.running {
 		log.Printf("LogMultiplexer: 이미 실행 중입니다. Start 호출 무시")
@@ -47,10 +53,6 @@ func (m *LogMultiplexer) run(ctx context.Context, since time.Time) {
 	defer func() {
 		m.mu.Lock()
 		m.running = false
-		for _, sub := range m.subscribers {
-			close(sub)
-		}
-		m.subscribers = nil
 		m.mu.Unlock()
 	}()
 
@@ -77,6 +79,12 @@ func (m *LogMultiplexer) Subscribe() <-chan dockerctl.LogLine {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.closed {
+		ch := make(chan dockerctl.LogLine)
+		close(ch)
+		return ch
+	}
+
 	ch := make(chan dockerctl.LogLine, 100)
 	m.subscribers = append(m.subscribers, ch)
 	return ch
@@ -84,7 +92,7 @@ func (m *LogMultiplexer) Subscribe() <-chan dockerctl.LogLine {
 
 func (m *LogMultiplexer) Stop() {
 	m.mu.Lock()
-	if !m.running {
+	if m.closed || !m.running {
 		m.mu.Unlock()
 		return
 	}
@@ -95,4 +103,28 @@ func (m *LogMultiplexer) Stop() {
 		cancel()
 	}
 	m.wg.Wait()
+}
+
+func (m *LogMultiplexer) Close() {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	m.closed = true
+	cancel := m.cancel
+	isRunning := m.running
+	m.mu.Unlock()
+
+	if isRunning && cancel != nil {
+		cancel()
+		m.wg.Wait()
+	}
+
+	m.mu.Lock()
+	for _, sub := range m.subscribers {
+		close(sub)
+	}
+	m.subscribers = nil
+	m.mu.Unlock()
 }

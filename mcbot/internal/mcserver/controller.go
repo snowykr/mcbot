@@ -326,5 +326,5 @@ func (c *Controller) SyncState(ctx context.Context) error {
 }
 
 func (c *Controller) Shutdown() {
-	c.logMux.Stop()
+	c.logMux.Close()
 }
