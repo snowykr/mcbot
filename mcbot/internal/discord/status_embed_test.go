@@ -362,3 +362,66 @@ func TestUpdateWithPresence_CreateNewMessageFails(t *testing.T) {
 		t.Errorf("Expected 1 send call, got %d", mockSession.sendCalls)
 	}
 }
+
+func TestUpdate_BeforeInit_SafelySkips(t *testing.T) {
+	mockSession := &mockDiscordSession{}
+
+	mockCtrl := &mockController{
+		presence: mcserver.PresenceState{
+			ServerState: state.StateRunning,
+			Players:     []string{"Player1"},
+		},
+	}
+
+	manager := newTestStatusEmbedManager(mockSession, mockCtrl)
+	manager.messageID = ""
+
+	err := manager.Update(context.Background())
+	if err != nil {
+		t.Errorf("Expected Update to safely skip when messageID is empty, got error: %v", err)
+	}
+
+	if mockSession.editCalls != 0 {
+		t.Errorf("Expected 0 edit calls when messageID is empty, got %d", mockSession.editCalls)
+	}
+
+	if mockSession.sendCalls != 0 {
+		t.Errorf("Expected 0 send calls when messageID is empty, got %d", mockSession.sendCalls)
+	}
+}
+
+func TestUpdate_AfterInit_UpdatesMessage(t *testing.T) {
+	mockSession := &mockDiscordSession{
+		editResponses: []error{nil},
+	}
+
+	mockCtrl := &mockController{
+		presence: mcserver.PresenceState{
+			ServerState: state.StateRunning,
+			Players:     []string{"Player1", "Player2"},
+		},
+	}
+
+	manager := newTestStatusEmbedManager(mockSession, mockCtrl)
+
+	err := manager.Update(context.Background())
+	if err != nil {
+		t.Errorf("Expected no error, got %v", err)
+	}
+
+	if mockSession.editCalls != 1 {
+		t.Errorf("Expected 1 edit call, got %d", mockSession.editCalls)
+	}
+
+	if mockSession.sendCalls != 0 {
+		t.Errorf("Expected 0 send calls, got %d", mockSession.sendCalls)
+	}
+
+	if mockSession.lastEdit == nil {
+		t.Fatal("Expected lastEdit to be set")
+	}
+
+	if mockSession.lastEdit.ID != "existing-message-id" {
+		t.Errorf("Expected edit message ID to be 'existing-message-id', got '%s'", mockSession.lastEdit.ID)
+	}
+}

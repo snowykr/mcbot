@@ -42,6 +42,13 @@ func main() {
 
 	handler := discord.NewHandler(cfg, controller, statusEmbed)
 
+	playerTracker := controller.GetPlayerTracker()
+	playerTracker.SetOnChange(func(players []string) {
+		if err := statusEmbed.Update(context.Background()); err != nil {
+			log.Printf("플레이어 변경 시 상태 임베드 업데이트 실패: %v", err)
+		}
+	})
+
 	session.AddHandler(handler.HandleInteraction)
 
 	session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
@@ -59,13 +66,6 @@ func main() {
 		} else {
 			log.Printf("상시 임베드 초기화 완료")
 		}
-
-		playerTracker := controller.GetPlayerTracker()
-		playerTracker.SetOnChange(func(players []string) {
-			if err := statusEmbed.Update(context.Background()); err != nil {
-				log.Printf("플레이어 변경 시 상태 임베드 업데이트 실패: %v", err)
-			}
-		})
 	})
 
 	if err := session.Open(); err != nil {

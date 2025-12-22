@@ -145,7 +145,8 @@ func (m *StatusEmbedManager) Update(ctx context.Context) error {
 	m.mu.RUnlock()
 
 	if msgID == "" {
-		return fmt.Errorf("메시지 ID가 설정되지 않음")
+		log.Printf("상시 임베드가 아직 초기화되지 않아 업데이트를 건너뜁니다")
+		return nil
 	}
 
 	presence := m.controller.Presence(ctx)
