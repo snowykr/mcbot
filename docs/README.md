@@ -92,18 +92,24 @@ docker compose up -d
 ## 프로젝트 구조
 
 ```
-mcbot/
-├── cmd/mcbot/          # 엔트리포인트
-│   └── main.go
-├── internal/
-│   ├── config/         # 환경 변수 로딩
-│   ├── discord/        # 디스코드 명령어 및 핸들러
-│   ├── dockerctl/      # Docker CLI 래퍼
-│   ├── mcserver/       # MC 서버 제어 로직
-│   └── state/          # 서버 상태 관리
-├── Dockerfile
-├── go.mod
-└── README.md
+.
+├── docs/
+│   └── README.md        # 문서
+├── mcbot/               # Go 애플리케이션
+│   ├── cmd/mcbot/       # 엔트리포인트
+│   │   └── main.go
+│   ├── internal/
+│   │   ├── config/      # 환경 변수 로딩
+│   │   ├── discord/     # 디스코드 명령어 및 핸들러
+│   │   ├── dockerctl/   # Docker CLI 래퍼
+│   │   ├── mcserver/    # MC 서버 제어 로직
+│   │   └── state/       # 서버 상태 관리
+│   ├── Dockerfile
+│   ├── go.mod
+│   └── go.sum
+├── docker-compose.yml
+├── .env.example
+└── .gitignore
 ```
 
 ## 로컬 개발
