@@ -89,8 +89,11 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 		if !containerState.Exists {
 			c.stateManager.SetError(fmt.Errorf("container not found"))
 			resultCh <- StartResult{
-				Success:      false,
-				ErrorMessage: fmt.Sprintf("컨테이너 '%s'를 찾을 수 없습니다. docker-compose up으로 먼저 컨테이너를 생성해주세요.", c.cfg.MCContainerName),
+				Success: false,
+				ErrorMessage: fmt.Sprintf(
+					"컨테이너 '%s'를 찾을 수 없습니다. 'docker compose create mc-server' 또는 'docker compose up --no-start mc-server' 명령으로 먼저 컨테이너를 생성해주세요.",
+					c.cfg.MCContainerName,
+				),
 			}
 			return
 		}
