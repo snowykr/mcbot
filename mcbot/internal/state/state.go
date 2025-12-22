@@ -194,6 +194,13 @@ func (m *Manager) SetStopped() {
 	m.state = StateStopped
 }
 
+func (m *Manager) SetStoppedWithError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state = StateStopped
+	m.lastError = err
+}
+
 func (m *Manager) SetError(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

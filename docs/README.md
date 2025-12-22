@@ -159,6 +159,39 @@ docker compose up -d mcbot
 | `MC_JOIN_LOG_PATTERN` | ❌ | `]: (.+) joined the game` | 플레이어 접속 로그 패턴 (정규식) |
 | `MC_LEAVE_LOG_PATTERN` | ❌ | `]: (.+) left the game` | 플레이어 퇴장 로그 패턴 (정규식) |
 
+## 상태 모델
+
+### 서버 상태 (ServerState)
+
+- **StateStopped**: 서버가 종료된 상태
+- **StateStarting**: 서버 시작 중
+- **StateRunning**: 서버 실행 중
+- **StateStopping**: 서버 종료 중
+- **StateError**: 실제 런타임 예외 발생 (docker 명령 실패, 타임아웃 등)
+
+### 상태 전이 규칙
+
+- `Stopped` 또는 `Error` → `Start` 가능
+- `Running` 또는 `Error` → `Stop` 가능
+- 전환 중 상태(`Starting`, `Stopping`)에서는 다른 명령 거부
+
+### 에러 처리 원칙 (2024-12-23 개선)
+
+**컨테이너 미존재 (인프라 미준비)**:
+- 상태: `StateStopped`
+- `lastError`에 상세 메시지 기록
+- 사용자에게 `make ensure-mc` 안내
+
+**실제 런타임 예외**:
+- 상태: `StateError`
+- docker inspect 실패, start/stop 명령 실패, ready 타임아웃 등
+- 복구 가능한 오류로, 재시도 가능
+
+**설계 근거**:
+- 서버 라이프사이클 상태와 인프라 provisioning 상태를 분리
+- Start/Stop 간 일관성 확보: 컨테이너 없음은 모두 Stopped로 처리
+- `StateError`는 실제 예외 상황에만 사용하여 의미 명확화
+
 ## 프로젝트 구조
 
 ```
@@ -169,7 +202,8 @@ docker compose up -d mcbot
 ├── .gitignore
 ├── data/                       # MC 서버 데이터 (gitignore)
 ├── docs/
-│   └── README.md               # 프로젝트 문서
+│   ├── README.md               # 프로젝트 문서
+│   └── TESTING.md              # 테스트 가이드
 └── mcbot/                      # Go 애플리케이션
     ├── cmd/
     │   └── mcbot/
@@ -192,7 +226,8 @@ docker compose up -d mcbot
     │   │   ├── player_tracker_test.go
     │   │   └── presence.go             # 서버 상태 표현
     │   └── state/              # 서버 상태 관리
-    │       └── state.go
+    │       ├── state.go
+    │       └── state_test.go
     ├── Dockerfile              # mcbot 컨테이너 이미지
     ├── go.mod                  # Go 모듈 정의
     └── go.sum                  # Go 의존성 체크섬

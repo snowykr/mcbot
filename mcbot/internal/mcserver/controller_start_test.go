@@ -41,6 +41,14 @@ func TestControllerStart_FromStoppedState(t *testing.T) {
 		if result.ErrorMessage == "" {
 			t.Error("Expected error message, got empty string")
 		}
+
+		if stateManager.GetState() != state.StateStopped {
+			t.Errorf("Expected state to be Stopped after container not found, got %s", stateManager.GetState())
+		}
+
+		if stateManager.GetLastError() == nil {
+			t.Error("Expected lastError to be set after container not found")
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timeout waiting for Start result")
 	}
@@ -76,6 +84,14 @@ func TestControllerStart_FromErrorState(t *testing.T) {
 	case result := <-resultCh:
 		if result.Success {
 			t.Error("Expected Start to fail (no container), but it succeeded")
+		}
+
+		if stateManager.GetState() != state.StateStopped {
+			t.Errorf("Expected state to be Stopped after container not found, got %s", stateManager.GetState())
+		}
+
+		if stateManager.GetLastError() == nil {
+			t.Error("Expected lastError to be set after container not found")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timeout waiting for Start result")

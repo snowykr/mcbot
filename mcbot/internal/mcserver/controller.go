@@ -88,7 +88,7 @@ func (c *Controller) Start(ctx context.Context) <-chan StartResult {
 		}
 
 		if !containerState.Exists {
-			c.stateManager.SetError(fmt.Errorf("container not found"))
+			c.stateManager.SetStoppedWithError(fmt.Errorf("container not found"))
 			resultCh <- StartResult{
 				Success: false,
 				ErrorMessage: fmt.Sprintf(

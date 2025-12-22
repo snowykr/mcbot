@@ -55,8 +55,8 @@ go tool cover -html=coverage.out
 - 에러 메시지 정확성 검증
 
 **검증 포인트**:
-- `Stopped` → `Start` 시도: 컨테이너 없으면 실패, 에러 메시지 반환
-- `Error` → `Start` 시도: 실패 처리
+- `Stopped` → `Start` 시도: 컨테이너 없으면 실패, 에러 메시지 반환, 상태는 `Stopped` 유지 (lastError 기록)
+- `Error` → `Start` 시도: 컨테이너 없으면 실패, 상태는 `Stopped`로 전환 (lastError 기록)
 - `Running` → `Start` 시도: "서버가 이미 실행 중입니다." 에러, 상태 유지
 - `Starting` → `Start` 시도: "서버가 이미 시작 중입니다." 에러, 상태 유지
 - `Stopping` → `Start` 시도: "서버가 종료 중입니다. 종료가 완료된 후 다시 시도해주세요." 에러
@@ -65,6 +65,12 @@ go tool cover -html=coverage.out
 - `Stopping` → `Stop` 시도: "서버가 이미 종료 중입니다." 에러, 상태 유지
 - `Starting` → `Stop` 시도: "서버가 시작 중입니다. 시작이 완료된 후 다시 시도해주세요." 에러
 - `Error` → `Stop` 시도: 실패 처리
+
+**상태 모델 개선 (2024-12-23)**:
+- 컨테이너 미존재는 인프라 미준비 상태로, `StateError`가 아닌 `StateStopped` + `lastError` 조합으로 표현
+- `StateError`는 실제 런타임 예외(docker inspect 실패, start/stop 명령 실패, ready 타임아웃 등)에만 사용
+- Start/Stop 간 상태 처리 일관성 확보: 컨테이너 없음은 모두 Stopped 상태로 처리
+- `SetStoppedWithError` 메서드 추가: Stopped 상태이면서 lastError를 기록 가능
 
 **연결된 수동 시나리오**: `1.3 중복 요청 방지`, `3.2 비정상 상태에서의 명령 거부`
 

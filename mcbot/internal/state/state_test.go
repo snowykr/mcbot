@@ -1,6 +1,7 @@
 package state
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -218,5 +219,41 @@ func TestConcurrentStopTransitions(t *testing.T) {
 	finalState := m.GetState()
 	if finalState != StateStopping {
 		t.Errorf("Expected final state Stopping, got %s", finalState)
+	}
+}
+
+func TestSetStoppedWithError(t *testing.T) {
+	m := NewManager()
+	m.SetState(StateRunning)
+
+	testErr := fmt.Errorf("container not found")
+	m.SetStoppedWithError(testErr)
+
+	if m.GetState() != StateStopped {
+		t.Errorf("Expected state Stopped, got %s", m.GetState())
+	}
+
+	if m.GetLastError() != testErr {
+		t.Errorf("Expected lastError to be %v, got %v", testErr, m.GetLastError())
+	}
+}
+
+func TestSetStoppedWithErrorFromError(t *testing.T) {
+	m := NewManager()
+	m.SetError(fmt.Errorf("previous error"))
+
+	if m.GetState() != StateError {
+		t.Errorf("Expected initial state Error, got %s", m.GetState())
+	}
+
+	newErr := fmt.Errorf("container not found")
+	m.SetStoppedWithError(newErr)
+
+	if m.GetState() != StateStopped {
+		t.Errorf("Expected state Stopped after SetStoppedWithError, got %s", m.GetState())
+	}
+
+	if m.GetLastError() != newErr {
+		t.Errorf("Expected lastError to be updated to %v, got %v", newErr, m.GetLastError())
 	}
 }
