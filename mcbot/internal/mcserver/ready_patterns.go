@@ -3,6 +3,7 @@ package mcserver
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 )
 
 type readyPattern struct {
@@ -36,4 +37,8 @@ func newReadyMatchers() ([]readyPattern, error) {
 	}
 
 	return builtinReadyPatterns, nil
+}
+
+func parseLoadSeconds(s string) (float64, error) {
+	return strconv.ParseFloat(s, 64)
 }

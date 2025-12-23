@@ -1,7 +1,6 @@
 package mcserver
 
 import (
-	"fmt"
 	"testing"
 )
 
@@ -52,7 +51,7 @@ func TestBuiltinReadyPatterns(t *testing.T) {
 				if len(matches) >= 2 {
 					matched = true
 					var parseErr error
-					actualSeconds, parseErr = parseFloat(matches[1])
+					actualSeconds, parseErr = parseLoadSeconds(matches[1])
 					if parseErr != nil {
 						t.Errorf("Pattern '%s' matched but failed to parse seconds: %v", pattern.name, parseErr)
 						continue
@@ -112,7 +111,7 @@ func TestReadyPatternOrder_PrefersDefaultOverShort(t *testing.T) {
 		matches := pattern.re.FindStringSubmatch(fullHelpLog)
 		if len(matches) >= 2 {
 			matchedPatternName = pattern.name
-			matchedSeconds, err = parseFloat(matches[1])
+			matchedSeconds, err = parseLoadSeconds(matches[1])
 			if err != nil {
 				t.Fatalf("Failed to parse seconds from matched pattern: %v", err)
 			}
@@ -133,10 +132,4 @@ func TestReadyPatternOrder_PrefersDefaultOverShort(t *testing.T) {
 	if matchedSeconds != expectedSeconds {
 		t.Errorf("Expected seconds=%v, got seconds=%v", expectedSeconds, matchedSeconds)
 	}
-}
-
-func parseFloat(s string) (float64, error) {
-	var f float64
-	_, err := fmt.Sscanf(s, "%f", &f)
-	return f, err
 }

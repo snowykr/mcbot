@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strconv"
 	"time"
 
 	"github.com/snowy/mcbot/internal/config"
@@ -159,7 +158,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 				for _, pattern := range c.readyPatterns {
 					matches := pattern.re.FindStringSubmatch(logLine.Text)
 					if len(matches) >= 2 {
-						loadSeconds, parseErr := strconv.ParseFloat(matches[1], 64)
+						loadSeconds, parseErr := parseLoadSeconds(matches[1])
 						if parseErr != nil {
 							log.Printf("패턴 '%s' 매칭되었으나 로딩 시간 파싱 실패: %v", pattern.name, parseErr)
 							continue
