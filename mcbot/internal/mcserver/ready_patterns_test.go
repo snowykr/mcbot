@@ -97,6 +97,44 @@ func TestNewReadyMatchers(t *testing.T) {
 	}
 }
 
+func TestReadyPatternOrder_PrefersDefaultOverShort(t *testing.T) {
+	patterns, err := newReadyMatchers()
+	if err != nil {
+		t.Fatalf("Failed to initialize ready patterns: %v", err)
+	}
+
+	fullHelpLog := `[12:34:56] [Server thread/INFO]: Done (23.456s)! For help, type "help"`
+
+	var matchedPatternName string
+	var matchedSeconds float64
+
+	for _, pattern := range patterns {
+		matches := pattern.re.FindStringSubmatch(fullHelpLog)
+		if len(matches) >= 2 {
+			matchedPatternName = pattern.name
+			matchedSeconds, err = parseFloat(matches[1])
+			if err != nil {
+				t.Fatalf("Failed to parse seconds from matched pattern: %v", err)
+			}
+			break
+		}
+	}
+
+	if matchedPatternName == "" {
+		t.Fatal("Expected full help log to match a pattern, but no pattern matched")
+	}
+
+	expectedPatternName := "itzg_vanilla_default"
+	if matchedPatternName != expectedPatternName {
+		t.Errorf("Expected pattern '%s' to match first, but got '%s'. This indicates pattern order is incorrect.", expectedPatternName, matchedPatternName)
+	}
+
+	expectedSeconds := 23.456
+	if matchedSeconds != expectedSeconds {
+		t.Errorf("Expected seconds=%v, got seconds=%v", expectedSeconds, matchedSeconds)
+	}
+}
+
 func parseFloat(s string) (float64, error) {
 	var f float64
 	_, err := fmt.Sscanf(s, "%f", &f)

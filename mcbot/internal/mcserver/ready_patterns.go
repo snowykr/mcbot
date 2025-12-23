@@ -26,10 +26,7 @@ var builtinReadyPatterns = []readyPattern{
 }
 
 func newReadyMatchers() ([]readyPattern, error) {
-	patterns := make([]readyPattern, len(builtinReadyPatterns))
-	copy(patterns, builtinReadyPatterns)
-
-	for i, p := range patterns {
+	for i, p := range builtinReadyPatterns {
 		if p.re == nil {
 			return nil, fmt.Errorf("pattern %d (%s) has nil regexp", i, p.name)
 		}
@@ -38,5 +35,5 @@ func newReadyMatchers() ([]readyPattern, error) {
 		}
 	}
 
-	return patterns, nil
+	return builtinReadyPatterns, nil
 }
