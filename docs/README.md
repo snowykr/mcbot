@@ -153,13 +153,22 @@ docker compose up -d mcbot
 | `EMBED_CHANNEL_ID` | ✅ | -                         | 상시 임베드 메시지를 표시할 채널 ID |
 | `MC_CONTAINER_NAME` | ❌ | `mc-server`               | MC 서버 컨테이너 이름 |
 | `MCBOT_ROLE_NAME` | ❌ | `마크봇`                     | 봇 사용 권한 역할 이름 |
-| `READY_LOG_PATTERN` | ❌ | `Dedicated server took`   | 서버 준비 완료 로그 패턴 |
 | `READY_TIMEOUT_SECONDS` | ❌ | `600`                     | 서버 시작 타임아웃 (초, 서버가 "준비 완료" 로그를 남길 때까지 대기하는 최대 시간) |
 | `STOP_TIMEOUT_SECONDS` | ❌ | `120`                     | 서버 종료 타임아웃 (초, Docker가 컨테이너를 그레이스풀하게 중지하기 위해 기다리는 시간) |
 | `SERVER_OPERATION_TIMEOUT_SECONDS` | ❌ | `720`                     | 서버 작업(시작/종료) 전체 타임아웃 (초, 버튼 클릭부터 최종 결과 처리까지의 상위 타임아웃) |
 | `EMBED_UPDATE_TIMEOUT_SECONDS` | ❌ | `10`                      | 임베드 메시지 업데이트 타임아웃 (초, Discord로 상태 임베드를 전송/수정할 때의 최대 대기 시간) |
 | `MC_JOIN_LOG_PATTERN` | ❌ | `]: (.+) joined the game` | 플레이어 접속 로그 패턴 (정규식) |
 | `MC_LEAVE_LOG_PATTERN` | ❌ | `]: (.+) left the game`   | 플레이어 퇴장 로그 패턴 (정규식) |
+
+### 서버 준비 완료 자동 감지
+
+mcbot은 대표적인 Minecraft 서버 이미지의 "서버 준비 완료" 로그 패턴을 내장하고 있어, 별도 설정 없이 자동으로 서버 시작 완료 시점을 감지합니다.
+
+**지원하는 서버 타입:**
+- itzg/minecraft-server (Vanilla, Forge, Fabric 등)
+- Paper/Spigot 계열
+
+로그에서 로딩 시간(초 단위)을 자동으로 추출하여 Discord 임베드에 표시합니다.
 
 ### 타임아웃 변수 간 차이
 

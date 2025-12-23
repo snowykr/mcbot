@@ -10,7 +10,6 @@ import (
 type Config struct {
 	DiscordToken           string
 	MCContainerName        string
-	ReadyLogPattern        string
 	ReadyTimeout           time.Duration
 	McbotRoleName          string
 	StopTimeoutSeconds     int
@@ -25,7 +24,6 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		DiscordToken:       os.Getenv("DISCORD_TOKEN"),
 		MCContainerName:    getEnvOrDefault("MC_CONTAINER_NAME", "mc-server"),
-		ReadyLogPattern:    getEnvOrDefault("READY_LOG_PATTERN", "Dedicated server took"),
 		McbotRoleName:      getEnvOrDefault("MCBOT_ROLE_NAME", "마크봇"),
 		StopTimeoutSeconds: getEnvIntOrDefault("STOP_TIMEOUT_SECONDS", 120),
 		EmbedChannelID:     os.Getenv("EMBED_CHANNEL_ID"),
@@ -55,9 +53,6 @@ func (c *Config) validate() error {
 	}
 	if c.MCContainerName == "" {
 		return errors.New("MC_CONTAINER_NAME is required")
-	}
-	if c.ReadyLogPattern == "" {
-		return errors.New("READY_LOG_PATTERN is required")
 	}
 	if c.McbotRoleName == "" {
 		return errors.New("MCBOT_ROLE_NAME is required")

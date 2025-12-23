@@ -12,7 +12,6 @@ import (
 func TestControllerStart_FromStoppedState(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
-		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
 		ReadyTimeout:       5 * time.Second,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
@@ -57,7 +56,6 @@ func TestControllerStart_FromStoppedState(t *testing.T) {
 func TestControllerStart_FromErrorState(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
-		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
 		ReadyTimeout:       5 * time.Second,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
@@ -101,7 +99,6 @@ func TestControllerStart_FromErrorState(t *testing.T) {
 func TestControllerStart_FromRunningState(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
-		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
 		ReadyTimeout:       5 * time.Second,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
@@ -141,7 +138,6 @@ func TestControllerStart_FromRunningState(t *testing.T) {
 func TestControllerStart_FromStartingState(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
-		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
 		ReadyTimeout:       5 * time.Second,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
@@ -181,7 +177,6 @@ func TestControllerStart_FromStartingState(t *testing.T) {
 func TestControllerStart_FromStoppingState(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
-		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
 		ReadyTimeout:       5 * time.Second,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
@@ -221,7 +216,6 @@ func TestControllerStart_FromStoppingState(t *testing.T) {
 func TestControllerStart_ContextCancelledImmediately(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
-		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
 		ReadyTimeout:       100 * time.Millisecond,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
@@ -259,7 +253,6 @@ func TestControllerStart_ContextCancelledImmediately(t *testing.T) {
 func TestControllerStart_UsesReadyTimeoutNotExternalContext(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
-		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
 		ReadyTimeout:       100 * time.Millisecond,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
