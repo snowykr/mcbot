@@ -12,7 +12,6 @@ import (
 func TestControllerStatus_StateStartingPreservedWhenContainerNotRunning(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
-		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
 		ReadyTimeout:       5 * time.Second,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
@@ -45,7 +44,6 @@ func TestControllerStatus_StateStartingPreservedWhenContainerNotRunning(t *testi
 func TestControllerStatus_StateStartingPreservedEvenWhenContainerRunning(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
-		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
 		ReadyTimeout:       5 * time.Second,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
@@ -78,7 +76,6 @@ func TestControllerStatus_StateStartingPreservedEvenWhenContainerRunning(t *test
 func TestControllerStatus_StateRunningToStoppedWhenContainerNotRunning(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
-		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
 		ReadyTimeout:       5 * time.Second,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,
@@ -113,7 +110,6 @@ func TestControllerStatus_StateRunningToStoppedWhenContainerNotRunning(t *testin
 func TestControllerStatus_StateStoppingPreservedWhenContainerNotRunning(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
-		ReadyLogPattern:    `Done \(([0-9.]+)s\)`,
 		ReadyTimeout:       5 * time.Second,
 		MCJoinLogPattern:   `(\w+) joined`,
 		MCLeaveLogPattern:  `(\w+) left`,

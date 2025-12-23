@@ -10,7 +10,6 @@ services:
     environment:
       MC_CONTAINER_NAME: mc-server
       MCBOT_ROLE_NAME: 마크봇
-      READY_LOG_PATTERN: "Done \\(([0-9.]+)s\\)! For help, type \"help\""
       READY_TIMEOUT_SECONDS: "600"
       STOP_TIMEOUT_SECONDS: "120"
     volumes:

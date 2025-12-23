@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"regexp"
-	"strconv"
 	"time"
 
 	"github.com/snowy/mcbot/internal/config"
@@ -38,13 +36,16 @@ type StatusResult struct {
 type Controller struct {
 	cfg           *config.Config
 	stateManager  *state.Manager
-	readyPattern  *regexp.Regexp
+	readyPatterns []readyPattern
 	logMux        *LogMultiplexer
 	playerTracker *PlayerTracker
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
-	pattern := regexp.MustCompile(cfg.ReadyLogPattern)
+	patterns, err := newReadyMatchers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to init ready patterns: %w", err)
+	}
 
 	logMux := NewLogMultiplexer(cfg.MCContainerName)
 
@@ -56,7 +57,7 @@ func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller
 	return &Controller{
 		cfg:           cfg,
 		stateManager:  stateManager,
-		readyPattern:  pattern,
+		readyPatterns: patterns,
 		logMux:        logMux,
 		playerTracker: playerTracker,
 	}, nil
@@ -154,20 +155,27 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 					continue
 				}
 
-				matches := c.readyPattern.FindStringSubmatch(logLine.Text)
-				if len(matches) >= 2 {
-					loadSeconds, _ := strconv.ParseFloat(matches[1], 64)
-					readyDuration := time.Since(startTime)
-					c.stateManager.SetRunning(readyDuration)
+				for _, pattern := range c.readyPatterns {
+					matches := pattern.re.FindStringSubmatch(logLine.Text)
+					if len(matches) >= 2 {
+						loadSeconds, parseErr := parseLoadSeconds(matches[1])
+						if parseErr != nil {
+							log.Printf("패턴 '%s' 매칭되었으나 로딩 시간 파싱 실패: %v", pattern.name, parseErr)
+							continue
+						}
 
-					logCancel()
+						readyDuration := time.Since(startTime)
+						c.stateManager.SetRunning(readyDuration)
 
-					resultCh <- StartResult{
-						Success:       true,
-						ReadyDuration: readyDuration,
-						LoadSeconds:   loadSeconds,
+						logCancel()
+
+						resultCh <- StartResult{
+							Success:       true,
+							ReadyDuration: readyDuration,
+							LoadSeconds:   loadSeconds,
+						}
+						return
 					}
-					return
 				}
 
 			case <-logCtx.Done():
