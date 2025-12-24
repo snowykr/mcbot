@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/snowy/mcbot/internal/config"
@@ -21,17 +22,56 @@ type StatusEmbedUpdater interface {
 	Update(ctx context.Context) error
 }
 
+type StopConfirmationContext struct {
+	ConfirmationID string
+	UserID         string
+	Interaction    *discordgo.Interaction
+	MessageID      string
+}
+
+type StopConfirmationStore struct {
+	mu sync.RWMutex
+	m  map[string]StopConfirmationContext
+}
+
+func NewStopConfirmationStore() *StopConfirmationStore {
+	return &StopConfirmationStore{
+		m: make(map[string]StopConfirmationContext),
+	}
+}
+
+func (s *StopConfirmationStore) Save(ctx StopConfirmationContext) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[ctx.ConfirmationID] = ctx
+}
+
+func (s *StopConfirmationStore) Get(confirmationID string) (StopConfirmationContext, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ctx, ok := s.m[confirmationID]
+	return ctx, ok
+}
+
+func (s *StopConfirmationStore) Delete(confirmationID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.m, confirmationID)
+}
+
 type Handler struct {
-	cfg         *config.Config
-	controller  ServerController
-	statusEmbed StatusEmbedUpdater
+	cfg                   *config.Config
+	controller            ServerController
+	statusEmbed           StatusEmbedUpdater
+	stopConfirmationStore *StopConfirmationStore
 }
 
 func NewHandler(cfg *config.Config, controller ServerController, statusEmbed StatusEmbedUpdater) *Handler {
 	return &Handler{
-		cfg:         cfg,
-		controller:  controller,
-		statusEmbed: statusEmbed,
+		cfg:                   cfg,
+		controller:            controller,
+		statusEmbed:           statusEmbed,
+		stopConfirmationStore: NewStopConfirmationStore(),
 	}
 }
 
@@ -138,20 +178,21 @@ func (h *Handler) handleToggleComponent(s *discordgo.Session, i *discordgo.Inter
 
 func (h *Handler) handleStopConfirmationRequest(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	userID := h.getUserID(i)
+	confirmationID := i.ID
 
 	confirmButton := discordgo.Button{
 		Label:    "닫기",
 		Style:    discordgo.DangerButton,
-		CustomID: ComponentIDConfirmStopPrefix + userID,
+		CustomID: ComponentIDConfirmStopPrefix + confirmationID,
 	}
 
 	cancelButton := discordgo.Button{
 		Label:    "취소",
 		Style:    discordgo.SecondaryButton,
-		CustomID: ComponentIDCancelStopPrefix + userID,
+		CustomID: ComponentIDCancelStopPrefix + confirmationID,
 	}
 
-	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+	msg, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 		Content: "정말 서버를 닫을까요?\n현재 접속 중인 플레이어의 연결이 모두 종료됩니다.",
 		Components: []discordgo.MessageComponent{
 			discordgo.ActionsRow{
@@ -165,15 +206,39 @@ func (h *Handler) handleStopConfirmationRequest(s *discordgo.Session, i *discord
 	})
 	if err != nil {
 		log.Printf("서버 닫기 확인 메시지 전송 실패: %v", err)
+		return
 	}
+
+	ctx := StopConfirmationContext{
+		ConfirmationID: confirmationID,
+		UserID:         userID,
+		Interaction:    i.Interaction,
+		MessageID:      msg.ID,
+	}
+	h.stopConfirmationStore.Save(ctx)
 }
 
 func (h *Handler) handleStopConfirmComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	customID := i.MessageComponentData().CustomID
-	expectedUserID := strings.TrimPrefix(customID, ComponentIDConfirmStopPrefix)
-	actualUserID := h.getUserID(i)
+	confirmationID := strings.TrimPrefix(customID, ComponentIDConfirmStopPrefix)
 
-	if expectedUserID != actualUserID {
+	ctx, ok := h.stopConfirmationStore.Get(confirmationID)
+	if !ok {
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "이 확인 요청은 이미 처리되었거나 만료되었습니다.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		if err != nil {
+			log.Printf("만료된 확인 요청 응답 실패: %v", err)
+		}
+		return
+	}
+
+	actualUserID := h.getUserID(i)
+	if ctx.UserID != actualUserID {
 		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
@@ -187,7 +252,12 @@ func (h *Handler) handleStopConfirmComponent(s *discordgo.Session, i *discordgo.
 		return
 	}
 
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	err := s.FollowupMessageDelete(ctx.Interaction, ctx.MessageID)
+	if err != nil {
+		log.Printf("확인 메시지 삭제 실패 (무시하고 계속): %v", err)
+	}
+
+	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Flags: discordgo.MessageFlagsEphemeral,
@@ -195,18 +265,35 @@ func (h *Handler) handleStopConfirmComponent(s *discordgo.Session, i *discordgo.
 	})
 	if err != nil {
 		log.Printf("확인 버튼 응답 실패: %v", err)
+		h.stopConfirmationStore.Delete(confirmationID)
 		return
 	}
 
+	h.stopConfirmationStore.Delete(confirmationID)
 	h.handleButtonStop(s, i)
 }
 
 func (h *Handler) handleStopCancelComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	customID := i.MessageComponentData().CustomID
-	expectedUserID := strings.TrimPrefix(customID, ComponentIDCancelStopPrefix)
-	actualUserID := h.getUserID(i)
+	confirmationID := strings.TrimPrefix(customID, ComponentIDCancelStopPrefix)
 
-	if expectedUserID != actualUserID {
+	ctx, ok := h.stopConfirmationStore.Get(confirmationID)
+	if !ok {
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "이 취소 요청은 이미 처리되었거나 만료되었습니다.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		if err != nil {
+			log.Printf("만료된 취소 요청 응답 실패: %v", err)
+		}
+		return
+	}
+
+	actualUserID := h.getUserID(i)
+	if ctx.UserID != actualUserID {
 		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
@@ -220,16 +307,23 @@ func (h *Handler) handleStopCancelComponent(s *discordgo.Session, i *discordgo.I
 		return
 	}
 
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseUpdateMessage,
+	err := s.FollowupMessageDelete(ctx.Interaction, ctx.MessageID)
+	if err != nil {
+		log.Printf("확인 메시지 삭제 실패 (무시하고 계속): %v", err)
+	}
+
+	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content:    "서버 닫기 요청이 취소되었습니다.",
-			Components: []discordgo.MessageComponent{},
+			Content: "서버 닫기 작업이 취소되었습니다.",
+			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	})
 	if err != nil {
-		log.Printf("취소 버튼 응답 실패: %v", err)
+		log.Printf("취소 응답 실패: %v", err)
 	}
+
+	h.stopConfirmationStore.Delete(confirmationID)
 }
 
 func (h *Handler) hasRequiredRole(s *discordgo.Session, i *discordgo.InteractionCreate) bool {
