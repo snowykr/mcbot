@@ -40,7 +40,7 @@ services:
       # --- 게임 설정 ---
       view-distance: 8
       simulation-distance: 8
-      MOTD: "SNOWY'S KRCRAFT SERVER"
+      MOTD: "SNOWY'S SERVER"
       
     volumes:
       - ./data:/data
