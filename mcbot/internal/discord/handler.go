@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"log"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/snowy/mcbot/internal/config"
@@ -85,10 +86,19 @@ func (h *Handler) handleUnsupportedInteraction(s *discordgo.Session, i *discordg
 func (h *Handler) handleComponentInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	customID := i.MessageComponentData().CustomID
 
-	if customID != ComponentIDToggle {
-		return
+	switch {
+	case customID == ComponentIDToggle:
+		h.handleToggleComponent(s, i)
+	case strings.HasPrefix(customID, ComponentIDConfirmStopPrefix):
+		h.handleStopConfirmComponent(s, i)
+	case strings.HasPrefix(customID, ComponentIDCancelStopPrefix):
+		h.handleStopCancelComponent(s, i)
+	default:
+		log.Printf("알 수 없는 컴포넌트 ID: %s (UserID: %s)", customID, h.getUserID(i))
 	}
+}
 
+func (h *Handler) handleToggleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if !h.hasRequiredRole(s, i) {
 		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -120,9 +130,105 @@ func (h *Handler) handleComponentInteraction(s *discordgo.Session, i *discordgo.
 	case state.StateStopped, state.StateError:
 		h.handleButtonStart(s, i)
 	case state.StateRunning:
-		h.handleButtonStop(s, i)
+		h.handleStopConfirmationRequest(s, i)
 	default:
 		log.Printf("버튼 클릭 무시: 현재 상태 %v", presence.ServerState)
+	}
+}
+
+func (h *Handler) handleStopConfirmationRequest(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	userID := h.getUserID(i)
+
+	confirmButton := discordgo.Button{
+		Label:    "닫기",
+		Style:    discordgo.DangerButton,
+		CustomID: ComponentIDConfirmStopPrefix + userID,
+	}
+
+	cancelButton := discordgo.Button{
+		Label:    "취소",
+		Style:    discordgo.SecondaryButton,
+		CustomID: ComponentIDCancelStopPrefix + userID,
+	}
+
+	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content: "정말 서버를 닫을까요?\n현재 접속 중인 플레이어의 연결이 모두 종료됩니다.",
+		Components: []discordgo.MessageComponent{
+			discordgo.ActionsRow{
+				Components: []discordgo.MessageComponent{
+					confirmButton,
+					cancelButton,
+				},
+			},
+		},
+		Flags: discordgo.MessageFlagsEphemeral,
+	})
+	if err != nil {
+		log.Printf("서버 닫기 확인 메시지 전송 실패: %v", err)
+	}
+}
+
+func (h *Handler) handleStopConfirmComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	customID := i.MessageComponentData().CustomID
+	expectedUserID := strings.TrimPrefix(customID, ComponentIDConfirmStopPrefix)
+	actualUserID := h.getUserID(i)
+
+	if expectedUserID != actualUserID {
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "이 확인창은 다른 사용자의 요청입니다.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		if err != nil {
+			log.Printf("사용자 불일치 응답 실패: %v", err)
+		}
+		return
+	}
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Flags: discordgo.MessageFlagsEphemeral,
+		},
+	})
+	if err != nil {
+		log.Printf("확인 버튼 응답 실패: %v", err)
+		return
+	}
+
+	h.handleButtonStop(s, i)
+}
+
+func (h *Handler) handleStopCancelComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	customID := i.MessageComponentData().CustomID
+	expectedUserID := strings.TrimPrefix(customID, ComponentIDCancelStopPrefix)
+	actualUserID := h.getUserID(i)
+
+	if expectedUserID != actualUserID {
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "이 취소 버튼은 다른 사용자의 요청입니다.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		if err != nil {
+			log.Printf("사용자 불일치 응답 실패: %v", err)
+		}
+		return
+	}
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:    "서버 닫기 요청이 취소되었습니다.",
+			Components: []discordgo.MessageComponent{},
+		},
+	})
+	if err != nil {
+		log.Printf("취소 버튼 응답 실패: %v", err)
 	}
 }
 

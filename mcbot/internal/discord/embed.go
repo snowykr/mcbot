@@ -15,8 +15,10 @@ const (
 	ColorError   = 0xFF0000
 	ColorWarning = 0xFFCC00
 
-	ComponentIDToggle = "mcserver_toggle"
-	EmbedMarkerFooter = "MCBOT"
+	ComponentIDToggle            = "mcserver_toggle"
+	ComponentIDConfirmStopPrefix = "mcserver_confirm_stop:"
+	ComponentIDCancelStopPrefix  = "mcserver_cancel_stop:"
+	EmbedMarkerFooter            = "MCBOT"
 
 	maxVisiblePlayers = 10
 )
