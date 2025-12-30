@@ -34,14 +34,19 @@ type StatusResult struct {
 }
 
 type Controller struct {
-	cfg           *config.Config
-	stateManager  *state.Manager
-	readyPatterns []readyPattern
-	logMux        *LogMultiplexer
-	playerTracker *PlayerTracker
+	cfg             *config.Config
+	stateManager    *state.Manager
+	readyPatterns   []readyPattern
+	logMux          *LogMultiplexer
+	playerTracker   *PlayerTracker
+	lifecycleLogger LifecycleLogger
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
+	return NewControllerWithLogger(cfg, stateManager, nil)
+}
+
+func NewControllerWithLogger(cfg *config.Config, stateManager *state.Manager, logger LifecycleLogger) (*Controller, error) {
 	patterns, err := newReadyMatchers()
 	if err != nil {
 		return nil, fmt.Errorf("failed to init ready patterns: %w", err)
@@ -54,12 +59,17 @@ func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller
 		return nil, fmt.Errorf("failed to create player tracker: %w", err)
 	}
 
+	if logger == nil {
+		logger = &NoopLifecycleLogger{}
+	}
+
 	return &Controller{
-		cfg:           cfg,
-		stateManager:  stateManager,
-		readyPatterns: patterns,
-		logMux:        logMux,
-		playerTracker: playerTracker,
+		cfg:             cfg,
+		stateManager:    stateManager,
+		readyPatterns:   patterns,
+		logMux:          logMux,
+		playerTracker:   playerTracker,
+		lifecycleLogger: logger,
 	}, nil
 }
 
@@ -75,6 +85,8 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 		return resultCh
 	}
 
+	c.lifecycleLogger.OnServerStartRequested()
+
 	go func() {
 		defer close(resultCh)
 
@@ -83,6 +95,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 		containerState, err := dockerctl.InspectContainer(opCtx, c.cfg.MCContainerName)
 		if err != nil {
 			c.stateManager.SetError(err)
+			c.lifecycleLogger.OnServerStartFailed("docker_inspect_failed", err)
 			resultCh <- StartResult{
 				Success:      false,
 				ErrorMessage: fmt.Sprintf("컨테이너 상태 확인 실패: %v", err),
@@ -92,6 +105,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 
 		if !containerState.Exists {
 			c.stateManager.SetStoppedWithError(fmt.Errorf("container not found"))
+			c.lifecycleLogger.OnServerStartFailed("container_not_found", nil)
 			resultCh <- StartResult{
 				Success: false,
 				ErrorMessage: fmt.Sprintf(
@@ -111,6 +125,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 
 		if containerState.Running {
 			c.stateManager.SetState(state.StateRunning)
+			c.lifecycleLogger.OnServerStartFailed("already_running", nil)
 			resultCh <- StartResult{
 				Success:      false,
 				ErrorMessage: "서버가 이미 실행 중입니다.",
@@ -122,6 +137,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 
 		if err := dockerctl.StartContainer(opCtx, c.cfg.MCContainerName); err != nil {
 			c.stateManager.SetError(err)
+			c.lifecycleLogger.OnServerStartFailed("docker_start_failed", err)
 			resultCh <- StartResult{
 				Success:      false,
 				ErrorMessage: fmt.Sprintf("컨테이너 시작 실패: %v", err),
@@ -143,6 +159,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 			case logLine, ok := <-logCh:
 				if !ok {
 					c.stateManager.SetError(fmt.Errorf("log stream ended unexpectedly"))
+					c.lifecycleLogger.OnServerStartFailed("log_stream_ended_unexpectedly", nil)
 					resultCh <- StartResult{
 						Success:      false,
 						ErrorMessage: "로그 스트림이 예기치 않게 종료되었습니다.",
@@ -166,6 +183,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 
 						readyDuration := time.Since(startTime)
 						c.stateManager.SetRunning(readyDuration)
+						c.lifecycleLogger.OnServerStarted(readyDuration, loadSeconds)
 
 						logCancel()
 
@@ -180,6 +198,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 
 			case <-logCtx.Done():
 				c.stateManager.SetError(fmt.Errorf("ready timeout exceeded"))
+				c.lifecycleLogger.OnServerStartFailed("ready_timeout", logCtx.Err())
 				resultCh <- StartResult{
 					Success:      false,
 					ErrorMessage: fmt.Sprintf("서버 시작 시간이 %v을 초과했습니다. 서버 로그를 확인해주세요.", c.cfg.ReadyTimeout),
@@ -204,6 +223,8 @@ func (c *Controller) Stop(_ context.Context) <-chan StopResult {
 		return resultCh
 	}
 
+	c.lifecycleLogger.OnServerStopRequested()
+
 	go func() {
 		defer close(resultCh)
 
@@ -212,6 +233,7 @@ func (c *Controller) Stop(_ context.Context) <-chan StopResult {
 		containerState, err := dockerctl.InspectContainer(opCtx, c.cfg.MCContainerName)
 		if err != nil {
 			c.stateManager.SetError(err)
+			c.lifecycleLogger.OnServerStopFailed("docker_inspect_failed", err)
 			resultCh <- StopResult{
 				Success:      false,
 				ErrorMessage: fmt.Sprintf("컨테이너 상태 확인 실패: %v", err),
@@ -223,6 +245,7 @@ func (c *Controller) Stop(_ context.Context) <-chan StopResult {
 			c.logMux.Stop()
 			c.playerTracker.Clear()
 			c.stateManager.SetStopped()
+			c.lifecycleLogger.OnServerStopFailed("already_stopped", nil)
 			resultCh <- StopResult{
 				Success:      false,
 				ErrorMessage: "서버가 이미 종료되어 있습니다.",
@@ -232,6 +255,7 @@ func (c *Controller) Stop(_ context.Context) <-chan StopResult {
 
 		if err := dockerctl.StopContainer(opCtx, c.cfg.MCContainerName, c.cfg.StopTimeoutSeconds); err != nil {
 			c.stateManager.SetError(err)
+			c.lifecycleLogger.OnServerStopFailed("docker_stop_failed", err)
 			resultCh <- StopResult{
 				Success:      false,
 				ErrorMessage: fmt.Sprintf("컨테이너 종료 실패: %v", err),
@@ -242,6 +266,7 @@ func (c *Controller) Stop(_ context.Context) <-chan StopResult {
 		c.logMux.Stop()
 		c.playerTracker.Clear()
 		c.stateManager.SetStopped()
+		c.lifecycleLogger.OnServerStopped()
 		resultCh <- StopResult{
 			Success: true,
 		}
@@ -267,9 +292,12 @@ func (c *Controller) Status(ctx context.Context) StatusResult {
 	}
 
 	if !containerState.Running && info.State == state.StateRunning {
+		c.logMux.Stop()
 		c.playerTracker.Clear()
-		c.stateManager.SetStopped()
-		info.State = state.StateStopped
+		c.stateManager.SetCrashed(fmt.Errorf("server stopped unexpectedly"))
+		info.State = state.StateCrashed
+		info.LastError = fmt.Errorf("server stopped unexpectedly")
+		c.lifecycleLogger.OnServerCrashed("container_not_running_while_state_running", info, containerState.Exists)
 	}
 
 	return StatusResult{
@@ -308,7 +336,7 @@ func (c *Controller) SyncState(ctx context.Context) error {
 	currentState := c.stateManager.GetState()
 
 	if containerState.Exists && containerState.Running {
-		if currentState == state.StateStopped || currentState == state.StateError {
+		if currentState == state.StateStopped || currentState == state.StateError || currentState == state.StateCrashed {
 			c.stateManager.SetState(state.StateRunning)
 		}
 
@@ -317,7 +345,9 @@ func (c *Controller) SyncState(ctx context.Context) error {
 		if currentState == state.StateRunning {
 			c.logMux.Stop()
 			c.playerTracker.Clear()
-			c.stateManager.SetStopped()
+			c.stateManager.SetCrashed(fmt.Errorf("server stopped unexpectedly during sync"))
+			info := c.stateManager.GetInfo()
+			c.lifecycleLogger.OnServerCrashed("sync_detected_unexpected_stop", info, containerState.Exists)
 		}
 	}
 

@@ -18,6 +18,9 @@ type Config struct {
 	MCLeaveLogPattern      string
 	EmbedUpdateTimeout     time.Duration
 	ServerOperationTimeout time.Duration
+	AutoRecoverEnabled     bool
+	AutoRecoverInterval    time.Duration
+	MaxAutoRecoverAttempts int
 }
 
 func Load() (*Config, error) {
@@ -39,6 +42,13 @@ func Load() (*Config, error) {
 
 	serverOpTimeoutSec := getEnvIntOrDefault("SERVER_OPERATION_TIMEOUT_SECONDS", 720)
 	cfg.ServerOperationTimeout = time.Duration(serverOpTimeoutSec) * time.Second
+
+	cfg.AutoRecoverEnabled = getEnvBoolOrDefault("AUTO_RECOVER_ENABLED", true)
+
+	autoRecoverIntervalSec := getEnvIntOrDefault("AUTO_RECOVER_INTERVAL_SECONDS", 30)
+	cfg.AutoRecoverInterval = time.Duration(autoRecoverIntervalSec) * time.Second
+
+	cfg.MaxAutoRecoverAttempts = getEnvIntOrDefault("MAX_AUTO_RECOVER_ATTEMPTS", 3)
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -74,6 +84,18 @@ func getEnvIntOrDefault(key string, defaultVal int) int {
 	if val := os.Getenv(key); val != "" {
 		if intVal, err := strconv.Atoi(val); err == nil {
 			return intVal
+		}
+	}
+	return defaultVal
+}
+
+func getEnvBoolOrDefault(key string, defaultVal bool) bool {
+	if val := os.Getenv(key); val != "" {
+		switch val {
+		case "true", "1", "yes", "on":
+			return true
+		case "false", "0", "no", "off":
+			return false
 		}
 	}
 	return defaultVal

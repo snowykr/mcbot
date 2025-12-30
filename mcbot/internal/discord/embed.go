@@ -94,6 +94,10 @@ func EmbedPersistentStatus(p mcserver.PresenceState) *discordgo.MessageEmbed {
 		statusIcon = "🟡"
 		statusText = "닫는중"
 		color = ColorWarning
+	case state.StateCrashed:
+		statusIcon = "💥"
+		statusText = "닫힘(크래시)"
+		color = ColorError
 	default:
 		statusIcon = "🔴"
 		statusText = "닫힘"
@@ -171,6 +175,10 @@ func BuildToggleButton(p mcserver.PresenceState) discordgo.Button {
 		label = "서버 닫는중"
 		style = discordgo.SecondaryButton
 		disabled = true
+	case state.StateCrashed:
+		label = "서버 재시작"
+		style = discordgo.SuccessButton
+		disabled = false
 	default:
 		label = "서버 열기"
 		style = discordgo.SuccessButton

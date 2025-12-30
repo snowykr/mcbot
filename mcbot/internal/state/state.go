@@ -14,6 +14,7 @@ const (
 	StateRunning
 	StateStopping
 	StateError
+	StateCrashed
 )
 
 func (s ServerState) String() string {
@@ -28,6 +29,8 @@ func (s ServerState) String() string {
 		return "stopping"
 	case StateError:
 		return "error"
+	case StateCrashed:
+		return "crashed"
 	default:
 		return "unknown"
 	}
@@ -45,6 +48,8 @@ func (s ServerState) Korean() string {
 		return "종료 중"
 	case StateError:
 		return "오류"
+	case StateCrashed:
+		return "종료됨(크래시)"
 	default:
 		return "알 수 없음"
 	}
@@ -115,7 +120,7 @@ func (m *Manager) TryStartTransition() error {
 			CurrentState: m.state,
 			Message:      "서버가 종료 중입니다. 종료가 완료된 후 다시 시도해주세요.",
 		}
-	case StateStopped, StateError:
+	case StateStopped, StateError, StateCrashed:
 		m.state = StateStarting
 		m.lastStartTime = time.Now()
 		m.lastError = nil
@@ -131,7 +136,7 @@ func (m *Manager) TryStartTransition() error {
 func (m *Manager) SetStarting() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.state != StateStopped && m.state != StateError {
+	if m.state != StateStopped && m.state != StateError && m.state != StateCrashed {
 		return false
 	}
 	m.state = StateStarting
@@ -167,7 +172,7 @@ func (m *Manager) TryStopTransition() error {
 			CurrentState: m.state,
 			Message:      "서버가 시작 중입니다. 시작이 완료된 후 다시 시도해주세요.",
 		}
-	case StateRunning, StateError:
+	case StateRunning, StateError, StateCrashed:
 		m.state = StateStopping
 		return nil
 	default:
@@ -205,6 +210,13 @@ func (m *Manager) SetError(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.state = StateError
+	m.lastError = err
+}
+
+func (m *Manager) SetCrashed(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state = StateCrashed
 	m.lastError = err
 }
 

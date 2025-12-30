@@ -73,7 +73,7 @@ func TestControllerStatus_StateStartingPreservedEvenWhenContainerRunning(t *test
 	}
 }
 
-func TestControllerStatus_StateRunningToStoppedWhenContainerNotRunning(t *testing.T) {
+func TestControllerStatus_StateRunningToCrashedWhenContainerNotRunning(t *testing.T) {
 	cfg := &config.Config{
 		MCContainerName:    "test-container",
 		ReadyTimeout:       5 * time.Second,
@@ -97,12 +97,12 @@ func TestControllerStatus_StateRunningToStoppedWhenContainerNotRunning(t *testin
 	status := controller.Status(ctx)
 
 	if !status.ContainerRunning {
-		if status.State != state.StateStopped {
-			t.Errorf("Expected state to transition to StateStopped when container is not running, got %s", status.State)
+		if status.State != state.StateCrashed {
+			t.Errorf("Expected state to transition to StateCrashed when container unexpectedly stops, got %s", status.State)
 		}
 
-		if stateManager.GetState() != state.StateStopped {
-			t.Errorf("Expected stateManager to transition to StateStopped, got %s", stateManager.GetState())
+		if stateManager.GetState() != state.StateCrashed {
+			t.Errorf("Expected stateManager to transition to StateCrashed, got %s", stateManager.GetState())
 		}
 	}
 }
