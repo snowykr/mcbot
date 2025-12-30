@@ -46,6 +46,13 @@ func main() {
 
 	handler := discord.NewHandler(cfg, controller, statusEmbed)
 
+	controller.SetOnStateChange(func(newState state.ServerState) {
+		log.Printf("[STATE_CHANGE] 상태 변경 감지: %s", newState.Korean())
+		if err := statusEmbed.Update(context.Background()); err != nil {
+			log.Printf("상태 변경 시 임베드 업데이트 실패: %v", err)
+		}
+	})
+
 	playerTracker := controller.GetPlayerTracker()
 	playerTracker.SetOnChange(func(players []string) {
 		if err := statusEmbed.Update(context.Background()); err != nil {
