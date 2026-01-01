@@ -90,6 +90,12 @@ go tool cover -html=coverage.out
 - 버튼 클릭 요청이 취소되어도 서버 작업은 계속 진행
 - 대기 타임아웃은 Discord 핸들러에서 별도 관리 (`ServerOperationTimeout`)
 
+**handleCrash invariant (2026-01-01)**:
+- `handleCrash()`는 **오직 `StateRunning` 상태에서만 호출**되어야 함
+- 모든 호출 경로(런타임 워처, 컨테이너 워처, 상태 조회)에서 `StateRunning` 가드가 선행됨
+- 함수 내부에서 `currentState != StateRunning`이면 invariant 위반으로 간주하고 로그 후 return
+- 이 계약은 코드 리뷰 및 테스트에서 검증되어야 함
+
 **연결된 수동 시나리오**: `1.3 중복 요청 방지`, `3.2 비정상 상태에서의 명령 거부`, `1.1 버튼 클릭 - 서버 시작`
 
 ### 상태 임베드 관리 테스트
@@ -536,14 +542,16 @@ go tool pprof mem.prof
 ### 코드 품질 유지
 
 ```bash
-# Race detector 활성화
+# 필수: 정적 분석 (프로젝트 표준)
+go vet ./...
+
+# 필수: Race detector 활성화 (동시성 버그 검출)
 go test -race ./...
 
-# 정적 분석
-go vet ./...
-staticcheck ./...
-
-# 코드 포맷팅
+# 필수: 코드 포맷팅
 go fmt ./...
-goimports -w .
+
+# 선택: 추가 정적 분석 도구 (별도 설치 필요)
+# staticcheck ./...
+# goimports -w .
 ```

@@ -72,6 +72,8 @@ func main() {
 			log.Printf("초기 상태 동기화 완료: %s", stateManager.GetState().Korean())
 		}
 
+		controller.StartRuntimeWatchers(context.Background())
+
 		if err := statusEmbed.Init(ctx); err != nil {
 			log.Printf("상시 임베드 초기화 실패: %v", err)
 		} else {

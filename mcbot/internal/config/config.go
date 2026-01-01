@@ -21,6 +21,9 @@ type Config struct {
 	AutoRecoverEnabled     bool
 	AutoRecoverInterval    time.Duration
 	MaxAutoRecoverAttempts int
+
+	CrashDetectionInterval    time.Duration
+	MaxInspectFailureAttempts int
 }
 
 func Load() (*Config, error) {
@@ -49,6 +52,11 @@ func Load() (*Config, error) {
 	cfg.AutoRecoverInterval = time.Duration(autoRecoverIntervalSec) * time.Second
 
 	cfg.MaxAutoRecoverAttempts = getEnvIntOrDefault("MAX_AUTO_RECOVER_ATTEMPTS", 3)
+
+	crashDetectionIntervalSec := getEnvIntOrDefault("CRASH_DETECTION_INTERVAL_SECONDS", 2)
+	cfg.CrashDetectionInterval = time.Duration(crashDetectionIntervalSec) * time.Second
+
+	cfg.MaxInspectFailureAttempts = getEnvIntOrDefault("MAX_INSPECT_FAILURE_ATTEMPTS", 3)
 
 	if err := cfg.validate(); err != nil {
 		return nil, err

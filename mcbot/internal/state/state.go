@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/snowy/mcbot/internal/logutil"
 )
 
 type ServerState int
@@ -78,7 +80,9 @@ func (m *Manager) GetState() ServerState {
 func (m *Manager) SetState(s ServerState) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	oldState := m.state
 	m.state = s
+	logutil.Debugf("[STATE] SetState: %s -> %s", oldState.Korean(), m.state.Korean())
 }
 
 func (m *Manager) TryTransition(from, to ServerState) bool {
@@ -148,8 +152,10 @@ func (m *Manager) SetStarting() bool {
 func (m *Manager) SetRunning(readyDuration time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	oldState := m.state
 	m.state = StateRunning
 	m.lastReadyDuration = readyDuration
+	logutil.Debugf("[STATE] SetRunning: %s -> %s (duration: %v)", oldState.Korean(), m.state.Korean(), readyDuration)
 }
 
 func (m *Manager) TryStopTransition() error {
@@ -196,7 +202,9 @@ func (m *Manager) SetStopping() bool {
 func (m *Manager) SetStopped() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	oldState := m.state
 	m.state = StateStopped
+	logutil.Debugf("[STATE] SetStopped: %s -> %s", oldState.Korean(), m.state.Korean())
 }
 
 func (m *Manager) SetStoppedWithError(err error) {
@@ -216,8 +224,10 @@ func (m *Manager) SetError(err error) {
 func (m *Manager) SetCrashed(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	oldState := m.state
 	m.state = StateCrashed
 	m.lastError = err
+	logutil.Infof("[STATE] SetCrashed: %s -> %s (err: %v)", oldState.Korean(), m.state.Korean(), err)
 }
 
 func (m *Manager) GetLastStartTime() time.Time {

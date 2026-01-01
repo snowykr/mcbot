@@ -3,11 +3,12 @@ package mcserver
 import (
 	"context"
 	"fmt"
-	"log"
+	"sync"
 	"time"
 
 	"github.com/snowy/mcbot/internal/config"
 	"github.com/snowy/mcbot/internal/dockerctl"
+	"github.com/snowy/mcbot/internal/logutil"
 	"github.com/snowy/mcbot/internal/state"
 )
 
@@ -36,14 +37,19 @@ type StatusResult struct {
 type StateChangeCallback func(newState state.ServerState)
 
 type Controller struct {
-	cfg               *config.Config
-	stateManager      *state.Manager
-	readyPatterns     []readyPattern
-	logMux            *LogMultiplexer
-	playerTracker     *PlayerTracker
-	lifecycleLogger   LifecycleLogger
-	onStateChange     StateChangeCallback
-	syncWatcherCancel context.CancelFunc
+	cfg                      *config.Config
+	stateManager             *state.Manager
+	readyPatterns            []readyPattern
+	logMux                   *LogMultiplexer
+	playerTracker            *PlayerTracker
+	lifecycleLogger          LifecycleLogger
+	onStateChange            StateChangeCallback
+	syncWatcherCancel        context.CancelFunc
+	containerWatcherCancel   context.CancelFunc
+	runtimeLogCh             <-chan dockerctl.LogLine
+	shutdownIntentFromInside bool
+	watchersRunning          bool
+	watchersMu               sync.Mutex
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
@@ -173,7 +179,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 			case logLine, ok := <-logCh:
 				if !ok {
 					c.stateManager.SetError(fmt.Errorf("log stream ended unexpectedly"))
-					c.lifecycleLogger.OnServerStartFailed("log_stream_ended_unexpectedly", nil)
+					c.lifecycleLogger.OnServerStartFailed(ReasonLogStreamEndedUnexpectedly, nil)
 					resultCh <- StartResult{
 						Success:      false,
 						ErrorMessage: "로그 스트림이 예기치 않게 종료되었습니다.",
@@ -182,7 +188,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 				}
 
 				if logLine.Err != nil {
-					log.Printf("로그 읽기 오류: %v", logLine.Err)
+					logutil.Debugf("로그 읽기 오류: %v", logLine.Err)
 					continue
 				}
 
@@ -203,7 +209,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 					if len(matches) >= 2 {
 						loadSeconds, parseErr := parseLoadSeconds(matches[1])
 						if parseErr != nil {
-							log.Printf("패턴 '%s' 매칭되었으나 로딩 시간 파싱 실패: %v", pattern.name, parseErr)
+							logutil.Debugf("패턴 '%s' 매칭되었으나 로딩 시간 파싱 실패: %v", pattern.name, parseErr)
 							continue
 						}
 
@@ -290,10 +296,7 @@ func (c *Controller) Stop(_ context.Context) <-chan StopResult {
 			return
 		}
 
-		c.logMux.Stop()
-		c.playerTracker.Clear()
-		c.stateManager.SetStopped()
-		c.lifecycleLogger.OnServerStopped()
+		c.handleNormalStop()
 		resultCh <- StopResult{
 			Success: true,
 		}
@@ -319,12 +322,9 @@ func (c *Controller) Status(ctx context.Context) StatusResult {
 	}
 
 	if !containerState.Running && info.State == state.StateRunning {
-		c.logMux.Stop()
-		c.playerTracker.Clear()
-		c.stateManager.SetCrashed(fmt.Errorf("server stopped unexpectedly"))
+		c.handleCrash(ReasonStatusContainerNotRunning, fmt.Errorf("server stopped unexpectedly"), containerState.Exists)
 		info.State = state.StateCrashed
 		info.LastError = fmt.Errorf("server stopped unexpectedly")
-		c.lifecycleLogger.OnServerCrashed("container_not_running_while_state_running", info, containerState.Exists)
 	}
 
 	return StatusResult{
@@ -339,14 +339,20 @@ func (c *Controller) Status(ctx context.Context) StatusResult {
 }
 
 func (c *Controller) Presence(ctx context.Context) PresenceState {
-	status := c.Status(ctx)
+	info := c.stateManager.GetInfo()
+
+	containerRunning := false
+	containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
+	if err == nil && containerState.Exists {
+		containerRunning = containerState.Running
+	}
 
 	return PresenceState{
-		ServerState:       status.State,
-		ContainerRunning:  status.ContainerRunning,
-		Players:           status.Players,
-		LastStartTime:     status.LastStartTime,
-		LastReadyDuration: status.LastReadyDuration,
+		ServerState:       info.State,
+		ContainerRunning:  containerRunning,
+		Players:           c.playerTracker.GetPlayers(),
+		LastStartTime:     info.LastStartTime,
+		LastReadyDuration: info.LastReadyDuration,
 	}
 }
 
@@ -375,12 +381,7 @@ func (c *Controller) SyncState(ctx context.Context) error {
 		}
 	} else {
 		if currentState == state.StateRunning {
-			c.logMux.Stop()
-			c.playerTracker.Clear()
-			c.stateManager.SetCrashed(fmt.Errorf("server stopped unexpectedly during sync"))
-			c.notifyStateChange(state.StateCrashed)
-			info := c.stateManager.GetInfo()
-			c.lifecycleLogger.OnServerCrashed("sync_detected_unexpected_stop", info, containerState.Exists)
+			c.handleCrash(ReasonSyncDetectedUnexpectedStop, fmt.Errorf("server stopped unexpectedly during sync"), containerState.Exists)
 		}
 	}
 
@@ -407,7 +408,7 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 	}()
 
 	logCh := c.logMux.Subscribe()
-	log.Printf("[SYNC_WATCHER] 외부 시작 서버 감시 시작 (타임아웃: %v)", c.cfg.ReadyTimeout)
+	logutil.Debugf("[SYNC_WATCHER] 외부 시작 서버 감시 시작 (타임아웃: %v)", c.cfg.ReadyTimeout)
 
 	for {
 		select {
@@ -417,14 +418,14 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 				if currentState == state.StateStarting {
 					c.stateManager.SetCrashed(fmt.Errorf("log stream ended during startup"))
 					c.notifyStateChange(state.StateCrashed)
-					c.lifecycleLogger.OnServerStartFailed("sync_log_stream_ended", nil)
-					log.Printf("[SYNC_WATCHER] 로그 스트림 종료 - 시작 실패로 처리")
+					c.lifecycleLogger.OnServerStartFailed(ReasonSyncLogStreamEnded, nil)
+					logutil.Infof("[SYNC_WATCHER] 로그 스트림 종료 - 시작 실패로 처리")
 				}
 				return
 			}
 
 			if logLine.Err != nil {
-				log.Printf("[SYNC_WATCHER] 로그 읽기 오류: %v", logLine.Err)
+				logutil.Debugf("[SYNC_WATCHER] 로그 읽기 오류: %v", logLine.Err)
 				continue
 			}
 
@@ -433,7 +434,7 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 				c.stateManager.SetCrashed(failureErr)
 				c.notifyStateChange(state.StateCrashed)
 				c.lifecycleLogger.OnServerStartFailed(failure.PatternName, failureErr)
-				log.Printf("[SYNC_WATCHER] 실패 패턴 감지: %s - %s", failure.PatternName, failure.Message)
+				logutil.Infof("[SYNC_WATCHER] 실패 패턴 감지: %s - %s", failure.PatternName, failure.Message)
 				return
 			}
 
@@ -442,7 +443,7 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 				if len(matches) >= 2 {
 					loadSeconds, parseErr := parseLoadSeconds(matches[1])
 					if parseErr != nil {
-						log.Printf("[SYNC_WATCHER] 패턴 '%s' 매칭되었으나 로딩 시간 파싱 실패: %v", pattern.name, parseErr)
+						logutil.Debugf("[SYNC_WATCHER] 패턴 '%s' 매칭되었으나 로딩 시간 파싱 실패: %v", pattern.name, parseErr)
 						continue
 					}
 
@@ -450,7 +451,7 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 					c.stateManager.SetRunning(readyDuration)
 					c.notifyStateChange(state.StateRunning)
 					c.lifecycleLogger.OnServerStarted(readyDuration, loadSeconds)
-					log.Printf("[SYNC_WATCHER] 서버 준비 완료 (로딩: %.2fs, 총 소요: %v)", loadSeconds, readyDuration)
+					logutil.Infof("[SYNC_WATCHER] 서버 준비 완료 (로딩: %.2fs, 총 소요: %v)", loadSeconds, readyDuration)
 					return
 				}
 			}
@@ -470,8 +471,8 @@ func (c *Controller) checkContainerAndDecideState() {
 	if err != nil {
 		c.stateManager.SetCrashed(fmt.Errorf("container inspect failed: %w", err))
 		c.notifyStateChange(state.StateCrashed)
-		c.lifecycleLogger.OnServerStartFailed("sync_container_inspect_failed", err)
-		log.Printf("[SYNC_WATCHER] 컨테이너 상태 확인 실패: %v", err)
+		c.lifecycleLogger.OnServerStartFailed(ReasonSyncContainerInspectFailed, err)
+		logutil.Infof("[SYNC_WATCHER] 컨테이너 상태 확인 실패: %v", err)
 		return
 	}
 
@@ -479,15 +480,204 @@ func (c *Controller) checkContainerAndDecideState() {
 		readyDuration := time.Since(containerState.StartedAt)
 		c.stateManager.SetRunning(readyDuration)
 		c.notifyStateChange(state.StateRunning)
-		log.Printf("[SYNC_WATCHER] 타임아웃 후 컨테이너 실행 중 확인 - Running으로 전환 (소요: %v)", readyDuration)
+		logutil.Infof("[SYNC_WATCHER] 타임아웃 후 컨테이너 실행 중 확인 - Running으로 전환 (소요: %v)", readyDuration)
 	} else {
 		c.stateManager.SetCrashed(fmt.Errorf("container stopped during startup"))
 		c.notifyStateChange(state.StateCrashed)
-		c.lifecycleLogger.OnServerStartFailed("sync_container_stopped", nil)
-		log.Printf("[SYNC_WATCHER] 타임아웃 후 컨테이너 종료 확인 - Crashed로 전환")
+		c.lifecycleLogger.OnServerStartFailed(ReasonSyncContainerStopped, nil)
+		logutil.Infof("[SYNC_WATCHER] 타임아웃 후 컨테이너 종료 확인 - Crashed로 전환")
+	}
+}
+
+func (c *Controller) handleNormalStop() {
+	c.logMux.Stop()
+	c.playerTracker.Clear()
+	c.stateManager.SetStopped()
+	c.notifyStateChange(state.StateStopped)
+	c.lifecycleLogger.OnServerStopped()
+}
+
+func (c *Controller) handleCrash(reason string, err error, containerExists bool) {
+	currentState := c.stateManager.GetState()
+	logutil.Debugf("[CRASH] handleCrash called - reason=%s currentState=%s err=%v containerExists=%v",
+		reason, currentState.Korean(), err, containerExists)
+
+	if currentState == state.StateCrashed {
+		logutil.Debugf("[CRASH] handleCrash skipped - already crashed")
+		return
+	}
+
+	if currentState != state.StateRunning {
+		logutil.Debugf("[CRASH] handleCrash skipped - not in Running state: %s (invariant: only call from Running)", currentState.Korean())
+		return
+	}
+
+	logutil.Debugf("[CRASH] Processing crash - transitioning from %s to Crashed", currentState.Korean())
+
+	c.logMux.Stop()
+	c.playerTracker.Clear()
+	c.stateManager.SetCrashed(err)
+
+	logutil.Debugf("[CRASH] State changed to Crashed, notifying listeners")
+	c.notifyStateChange(state.StateCrashed)
+
+	info := c.stateManager.GetInfo()
+	c.lifecycleLogger.OnServerCrashed(reason, info, containerExists)
+	logutil.Infof("[CRASH] 크래시 감지: reason=%s state_before=%s container_exists=%v", reason, currentState.Korean(), containerExists)
+}
+
+func (c *Controller) StartRuntimeWatchers(ctx context.Context) {
+	c.watchersMu.Lock()
+	defer c.watchersMu.Unlock()
+
+	if c.watchersRunning {
+		logutil.Debugf("[RUNTIME] 런타임 감시가 이미 실행 중입니다")
+		return
+	}
+
+	logutil.Infof("[RUNTIME] 런타임 감시 시작 (컨테이너: %s)", c.cfg.MCContainerName)
+
+	c.runtimeLogCh = c.logMux.Subscribe()
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	c.containerWatcherCancel = cancel
+	c.watchersRunning = true
+
+	go c.runtimeLogWatcherLoop(watchCtx)
+	go c.containerWatchLoop(watchCtx)
+
+	logutil.Debugf("[RUNTIME] 런타임 감시 시작 완료 (로그 워처 + 컨테이너 워처)")
+}
+
+func (c *Controller) StopRuntimeWatchers() {
+	c.watchersMu.Lock()
+	defer c.watchersMu.Unlock()
+
+	if !c.watchersRunning {
+		return
+	}
+
+	if c.containerWatcherCancel != nil {
+		c.containerWatcherCancel()
+		c.containerWatcherCancel = nil
+	}
+	c.watchersRunning = false
+	logutil.Infof("[RUNTIME] 런타임 감시 중지")
+}
+
+func (c *Controller) runtimeLogWatcherLoop(ctx context.Context) {
+	defer func() {
+		c.watchersMu.Lock()
+		c.watchersRunning = false
+		c.watchersMu.Unlock()
+		logutil.Debugf("[LOG_WATCHER] 런타임 로그 감시 종료")
+	}()
+
+	logutil.Debugf("[LOG_WATCHER] 런타임 로그 감시 시작")
+
+	for {
+		select {
+		case <-ctx.Done():
+			logutil.Debugf("[LOG_WATCHER] 런타임 로그 감시 종료 (context done)")
+			return
+
+		case logLine, ok := <-c.runtimeLogCh:
+			if !ok {
+				logutil.Debugf("[LOG_WATCHER] 로그 채널 닫힘")
+				return
+			}
+
+			if logLine.Err != nil {
+				continue
+			}
+
+			currentState := c.stateManager.GetState()
+			if currentState != state.StateRunning {
+				continue
+			}
+
+			if failure := checkFailurePatterns(logLine.Text); failure != nil {
+				failureErr := fmt.Errorf("runtime failure: %s", failure.Message)
+				c.handleCrash(ReasonRuntimeFailurePrefix+failure.PatternName, failureErr, true)
+				return
+			}
+
+			if isShutdownLog(logLine.Text) {
+				c.shutdownIntentFromInside = true
+				logutil.Infof("[LOG_WATCHER] 서버 내부 종료 시작 감지")
+			}
+		}
+	}
+}
+
+func (c *Controller) containerWatchLoop(ctx context.Context) {
+	defer func() {
+		c.watchersMu.Lock()
+		c.watchersRunning = false
+		c.watchersMu.Unlock()
+		logutil.Debugf("[CONTAINER_WATCHER] 컨테이너 상태 감시 종료")
+	}()
+
+	ticker := time.NewTicker(c.cfg.CrashDetectionInterval)
+	defer ticker.Stop()
+
+	logutil.Debugf("[CONTAINER_WATCHER] 컨테이너 상태 감시 시작 (주기: %v)", c.cfg.CrashDetectionInterval)
+
+	consecutiveInspectFailures := 0
+	maxConsecutiveFailures := c.cfg.MaxInspectFailureAttempts
+
+	for {
+		select {
+		case <-ctx.Done():
+			logutil.Debugf("[CONTAINER_WATCHER] 컨테이너 상태 감시 종료 (context done)")
+			return
+
+		case <-ticker.C:
+			currentState := c.stateManager.GetState()
+
+			containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
+			if err != nil {
+				consecutiveInspectFailures++
+				logutil.Debugf("[CONTAINER_WATCHER] 컨테이너 상태 확인 실패 (%d/%d): %v",
+					consecutiveInspectFailures, maxConsecutiveFailures, err)
+
+				if consecutiveInspectFailures >= maxConsecutiveFailures && currentState == state.StateRunning {
+					c.handleCrash(ReasonRuntimeInspectFailedRepeatedly,
+						fmt.Errorf("container inspect failed %d times: %w", consecutiveInspectFailures, err), false)
+					return
+				}
+				continue
+			}
+
+			consecutiveInspectFailures = 0
+
+			logutil.Debugf("[CONTAINER_WATCHER] tick - state=%s exists=%v running=%v shutdownIntent=%v",
+				currentState.Korean(), containerState.Exists, containerState.Running, c.shutdownIntentFromInside)
+
+			if currentState != state.StateRunning {
+				continue
+			}
+
+			if !containerState.Running {
+				if c.shutdownIntentFromInside {
+					logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료로 인한 컨테이너 종료 - 정상 종료로 처리")
+					c.handleNormalStop()
+					c.shutdownIntentFromInside = false
+					return
+				}
+
+				logutil.Infof("[CONTAINER_WATCHER] 비정상 종료 감지 - exists=%v", containerState.Exists)
+				c.handleCrash(ReasonRuntimeContainerStopped, fmt.Errorf("container stopped unexpectedly"), containerState.Exists)
+				return
+			}
+		}
 	}
 }
 
 func (c *Controller) Shutdown() {
+	c.StopRuntimeWatchers()
+	if c.syncWatcherCancel != nil {
+		c.syncWatcherCancel()
+	}
 	c.logMux.Close()
 }

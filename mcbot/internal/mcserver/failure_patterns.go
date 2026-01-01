@@ -2,7 +2,6 @@ package mcserver
 
 import (
 	"regexp"
-	"strings"
 )
 
 type failurePattern struct {
@@ -61,17 +60,17 @@ func checkFailurePatterns(logText string) *FailureMatch {
 	return nil
 }
 
-func containsFailureKeywords(logText string) bool {
-	keywords := []string{
-		"FATAL",
-		"OutOfMemoryError",
-		"StackOverflowError",
-		"Error: Could not",
-		"Exception in thread",
-	}
+var shutdownPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`Stopping server`),
+	regexp.MustCompile(`Stopping the server`),
+	regexp.MustCompile(`\[Server thread/INFO].*Saving worlds`),
+	regexp.MustCompile(`Server closed`),
+	regexp.MustCompile(`ThreadedAnvilChunkStorage.*All dimensions are saved`),
+}
 
-	for _, kw := range keywords {
-		if strings.Contains(logText, kw) {
+func isShutdownLog(logText string) bool {
+	for _, pattern := range shutdownPatterns {
+		if pattern.MatchString(logText) {
 			return true
 		}
 	}
