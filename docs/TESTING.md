@@ -3,12 +3,13 @@
 ## 목차
 
 1. [자동화된 테스트](#자동화된-테스트)
-2. [컴포넌트별 자동화 테스트 전략](#컴포넌트별-자동화-테스트-전략)
-3. [수동 검증 시나리오](#수동-검증-시나리오)
-4. [회귀 테스트](#회귀-테스트)
-5. [테스트 체크리스트](#테스트-체크리스트)
-6. [문제 해결](#문제-해결)
-7. [참고 사항](#참고-사항)
+2. [통합 테스트](#통합-테스트)
+3. [컴포넌트별 자동화 테스트 전략](#컴포넌트별-자동화-테스트-전략)
+4. [수동 검증 시나리오](#수동-검증-시나리오)
+5. [회귀 테스트](#회귀-테스트)
+6. [테스트 체크리스트](#테스트-체크리스트)
+7. [문제 해결](#문제-해결)
+8. [참고 사항](#참고-사항)
 
 ## 자동화된 테스트
 
@@ -40,6 +41,167 @@ go test -cover ./...
 go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
+
+## 통합 테스트
+
+### 개요
+
+통합 테스트는 실제 Docker 컨테이너를 사용하여 엔드투엔드 시나리오를 검증합니다. 단위 테스트와 달리 실제 마인크래프트 서버 컨테이너와 상호작용하여 워처, 상태 전이, 자동 복구 등의 동작을 검증합니다.
+
+### 격리 및 안전성
+
+통합 테스트는 **운영 환경과 완전히 격리**되어 실행됩니다:
+
+- **프로젝트 격리**: 각 테스트 실행마다 유니크한 프로젝트명(`mcbot_test_<timestamp>`) 사용
+- **네트워크 격리**: 테스트 전용 네트워크 생성 (운영의 `mcbot_default`와 분리)
+- **리소스 격리**: 컨테이너/볼륨/네트워크가 운영 환경과 충돌하지 않음
+- **자동 정리**: 테스트 성공/실패 시 항상 `docker compose down -v --remove-orphans` 수행
+
+### 실행 방법
+
+```bash
+# Makefile 사용 (권장)
+make test-integration
+
+# 직접 실행
+cd mcbot
+gtimeout 600s go test -tags=integration -v ./internal/mcserver/...
+
+# 상세 로그와 함께 실행
+make test-integration-verbose
+```
+
+### 주의사항
+
+- **Docker 필수**: 통합 테스트는 Docker가 설치되어 있어야 합니다
+- **시간 소요**: 각 테스트마다 컨테이너를 시작/종료하므로 5-10분 정도 소요됩니다
+- **리소스**: 테스트용 경량 설정(1GB 메모리)을 사용하지만, 여러 테스트가 순차 실행되므로 시스템 리소스를 고려하세요
+- **로컬 전용**: CI 통합은 별도 작업이며, 현재는 로컬 수동 실행만 지원합니다
+- **운영 환경 안전**: 운영 compose를 띄운 상태에서도 통합 테스트 실행 가능 (프로젝트 격리)
+
+### 테스트 시나리오
+
+#### 1. Runtime Watcher - Shutdown Log 감지
+**파일**: `integration_test.go::TestIntegration_RuntimeWatcher_ShutdownLog`
+
+**검증 내용**:
+- 서버 내부에서 `/stop` 명령 실행 시 shutdown 로그 감지
+- `shutdownIntentFromInside` 플래그가 true로 설정됨
+- 컨테이너 종료 후 상태가 `StateStopped`로 전이 (crashed가 아님)
+
+**시나리오**:
+1. 테스트 컨테이너 시작 및 준비 대기
+2. Controller를 `StateRunning`으로 설정
+3. Runtime watcher 시작
+4. RCON으로 `stop` 명령 실행
+5. 컨테이너 종료 대기
+6. 최종 상태가 `StateStopped`인지 확인
+
+#### 2. Runtime Watcher - 예기치 않은 종료
+**파일**: `integration_test.go::TestIntegration_RuntimeWatcher_UnexpectedStop`
+
+**검증 내용**:
+- Shutdown 로그 없이 컨테이너가 강제 종료되면 crashed 처리
+- `docker stop`으로 강제 종료 시 `StateCrashed`로 전이
+
+**시나리오**:
+1. 테스트 컨테이너 시작 및 준비 대기
+2. Controller를 `StateRunning`으로 설정
+3. Runtime watcher 시작
+4. `docker stop`으로 컨테이너 강제 종료
+5. 최종 상태가 `StateCrashed`인지 확인
+
+#### 3. Sync Watcher - 외부 시작 감지
+**파일**: `integration_test.go::TestIntegration_SyncWatcher_ExternalStart`
+
+**검증 내용**:
+- 외부에서 컨테이너를 시작했을 때 자동 감지
+- Ready 패턴 매칭 후 `StateRunning`으로 전이
+- Sync watcher가 정상 동작
+
+**시나리오**:
+1. 컨테이너를 종료된 상태로 시작
+2. `SyncState()` 호출로 초기 상태 확인 (`StateStopped`)
+3. 외부에서 `docker start` 실행
+4. `SyncState()` 재호출로 `StateStarting` 전이 확인
+5. Ready 로그 대기
+6. 최종 상태가 `StateRunning`인지 확인
+
+#### 4. Container Watcher - Inspect 연속 실패
+**파일**: `integration_test.go::TestIntegration_ContainerWatcher_InspectFailure`
+
+**검증 내용**:
+- 존재하지 않는 컨테이너에 대한 inspect 연속 실패 감지
+- `MaxInspectFailureAttempts` 임계치 도달 시 crashed 처리
+
+**시나리오**:
+1. 존재하지 않는 컨테이너명으로 Controller 생성
+2. `StateRunning`으로 설정
+3. Runtime watcher 시작 (inspect 실패 반복)
+4. 설정된 임계치(2회) 도달 후 `StateCrashed` 전이 확인
+
+#### 5. Watcher 재시작 - 크래시 후 복구
+**파일**: `integration_test.go::TestIntegration_WatcherRestart_AfterCrash`
+
+**검증 내용**:
+- Watcher가 크래시로 종료된 후에도 재시작 가능
+- Supervisor goroutine이 `watchersRunning` 상태를 올바르게 정리
+- 동일 Controller 인스턴스에서 여러 번 watcher 시작/종료 가능
+
+**시나리오**:
+1. 테스트 컨테이너 시작 및 준비 대기
+2. Runtime watcher 시작
+3. 컨테이너 강제 종료로 crashed 상태 유발
+4. Watcher 자동 종료 대기
+5. 컨테이너 재시작
+6. Runtime watcher 재시작 시도
+7. 정상적으로 재시작되는지 확인
+
+### 테스트 환경 구성
+
+통합 테스트는 `docker-compose.test.yml`을 사용합니다:
+
+- **컨테이너명**: 동적 생성 (프로젝트명 기반, 예: `mcbot_test_<timestamp>-mc-test-1`)
+- **포트**: 외부 포트 노출 없음 (docker exec를 통한 RCON 사용)
+- **메모리**: 1GB (빠른 시작을 위한 경량 설정)
+- **버전**: Minecraft 1.20.1 Vanilla
+- **RCON**: 활성화 (테스트 명령 실행용, 컨테이너 내부에서만 접근)
+
+### 문제 해결
+
+#### 테스트 타임아웃
+```bash
+# 타임아웃 시간 늘리기
+gtimeout 900s go test -tags=integration -v ./internal/mcserver/...
+```
+
+#### 테스트 중단 후 잔여 리소스 정리
+테스트가 `Ctrl+C` 등으로 중단된 경우, 다음 명령으로 모든 테스트 리소스를 정리할 수 있습니다:
+```bash
+# Makefile 사용 (권장)
+make test-integration-clean
+
+# 수동 정리
+docker ps -a --filter "name=mcbot_test_" --format "{{.Names}}" | xargs docker rm -f
+docker network ls --filter "name=mcbot_test_" --format "{{.Name}}" | xargs docker network rm
+docker volume ls --filter "name=mcbot_test_" --format "{{.Name}}" | xargs docker volume rm
+```
+
+#### 포트 관련 참고사항
+통합 테스트는 기본적으로 외부 포트를 노출하지 않으므로 포트 충돌이 발생하지 않습니다.
+만약 외부 접근이 필요한 경우 `docker-compose.test.yml`에 포트 매핑을 추가할 수 있습니다:
+```yaml
+ports:
+  - "25567:25565"  # 원하는 포트로 설정
+```
+
+#### 테스트 실패 시 디버깅
+테스트가 실패하면 자동으로 다음 정보가 출력됩니다:
+- Docker Compose PS 상태
+- 컨테이너 로그 (마지막 100줄)
+- 컨테이너 상태 정보 (inspect)
+
+이 정보를 활용하여 실패 원인을 파악할 수 있습니다.
 
 ## 컴포넌트별 자동화 테스트 전략
 

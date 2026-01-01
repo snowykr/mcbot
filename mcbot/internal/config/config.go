@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -78,6 +79,27 @@ func (c *Config) validate() error {
 	if c.EmbedChannelID == "" {
 		return errors.New("EMBED_CHANNEL_ID is required")
 	}
+	if c.ReadyTimeout <= 0 {
+		return errors.New("READY_TIMEOUT_SECONDS must be positive")
+	}
+	if c.EmbedUpdateTimeout <= 0 {
+		return errors.New("EMBED_UPDATE_TIMEOUT_SECONDS must be positive")
+	}
+	if c.ServerOperationTimeout <= 0 {
+		return errors.New("SERVER_OPERATION_TIMEOUT_SECONDS must be positive")
+	}
+	if c.AutoRecoverInterval <= 0 {
+		return errors.New("AUTO_RECOVER_INTERVAL_SECONDS must be positive")
+	}
+	if c.CrashDetectionInterval <= 0 {
+		return errors.New("CRASH_DETECTION_INTERVAL_SECONDS must be positive")
+	}
+	if c.MaxInspectFailureAttempts < 1 {
+		return errors.New("MAX_INSPECT_FAILURE_ATTEMPTS must be at least 1")
+	}
+	if c.MaxAutoRecoverAttempts < 0 {
+		return errors.New("MAX_AUTO_RECOVER_ATTEMPTS must be non-negative (0 = unlimited)")
+	}
 	return nil
 }
 
@@ -104,6 +126,8 @@ func getEnvBoolOrDefault(key string, defaultVal bool) bool {
 			return true
 		case "false", "0", "no", "off":
 			return false
+		default:
+			log.Printf("[WARN] %s: unrecognized value %q, using default=%v", key, val, defaultVal)
 		}
 	}
 	return defaultVal

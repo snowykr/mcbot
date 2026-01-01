@@ -130,6 +130,12 @@ func serverMonitorLoop(
 	ticker := time.NewTicker(cfg.AutoRecoverInterval)
 	defer ticker.Stop()
 
+	type restartOutcome struct {
+		attempt int
+		success bool
+	}
+	outcomeCh := make(chan restartOutcome, 1)
+
 	var autoRestartInProgress atomic.Bool
 	var consecutiveFailures int
 
@@ -138,6 +144,13 @@ func serverMonitorLoop(
 		case <-ctx.Done():
 			log.Println("[MONITOR] 서버 모니터링 종료")
 			return
+
+		case outcome := <-outcomeCh:
+			if outcome.success {
+				consecutiveFailures = 0
+				log.Printf("[LIFECYCLE] event=auto_restart_succeeded attempt=%d", outcome.attempt)
+			}
+
 		case <-ticker.C:
 			if autoRestartInProgress.Load() {
 				continue
@@ -168,7 +181,7 @@ func serverMonitorLoop(
 				log.Printf("[MONITOR] 크래시 상태 임베드 업데이트 실패: %v", err)
 			}
 
-			go func(attempt int) {
+			go func(attempt int, outCh chan<- restartOutcome) {
 				defer autoRestartInProgress.Store(false)
 
 				resultCh := controller.Start(context.Background())
@@ -185,9 +198,10 @@ func serverMonitorLoop(
 					}
 
 					if result.Success {
-						log.Printf("[LIFECYCLE] event=auto_restart_succeeded attempt=%d ready_duration=%.2fs",
-							attempt, result.ReadyDuration.Seconds())
-						consecutiveFailures = 0
+						select {
+						case outCh <- restartOutcome{attempt: attempt, success: true}:
+						default:
+						}
 					} else {
 						log.Printf("[LIFECYCLE] event=auto_restart_failed attempt=%d reason=%s",
 							attempt, result.ErrorMessage)
@@ -201,7 +215,7 @@ func serverMonitorLoop(
 				if err := statusEmbed.Update(context.Background()); err != nil {
 					log.Printf("[MONITOR] 재시작 후 임베드 업데이트 실패: %v", err)
 				}
-			}(consecutiveFailures)
+			}(consecutiveFailures, outcomeCh)
 		}
 	}
 }

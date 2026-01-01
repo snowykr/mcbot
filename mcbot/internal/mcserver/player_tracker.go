@@ -9,7 +9,7 @@ import (
 )
 
 type LogSubscriber interface {
-	Subscribe() <-chan dockerctl.LogLine
+	Subscribe() Subscription
 }
 
 type PlayerTracker struct {
@@ -18,6 +18,7 @@ type PlayerTracker struct {
 	joinPattern  *regexp.Regexp
 	leavePattern *regexp.Regexp
 	onChange     func([]string)
+	subscription *Subscription
 }
 
 func NewPlayerTracker(subscriber LogSubscriber, joinPattern, leavePattern string) (*PlayerTracker, error) {
@@ -31,14 +32,16 @@ func NewPlayerTracker(subscriber LogSubscriber, joinPattern, leavePattern string
 		return nil, err
 	}
 
+	sub := subscriber.Subscribe()
+
 	tracker := &PlayerTracker{
 		players:      make(map[string]struct{}),
 		joinPattern:  joinRegex,
 		leavePattern: leaveRegex,
+		subscription: &sub,
 	}
 
-	logCh := subscriber.Subscribe()
-	go tracker.processLogs(logCh)
+	go tracker.processLogs(sub.Ch)
 
 	return tracker, nil
 }

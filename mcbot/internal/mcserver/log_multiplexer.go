@@ -75,19 +75,36 @@ func (m *LogMultiplexer) run(ctx context.Context, since time.Time) {
 	}
 }
 
-func (m *LogMultiplexer) Subscribe() <-chan dockerctl.LogLine {
+type Subscription struct {
+	Ch          <-chan dockerctl.LogLine
+	Unsubscribe func()
+}
+
+func (m *LogMultiplexer) Subscribe() Subscription {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.closed {
 		ch := make(chan dockerctl.LogLine)
 		close(ch)
-		return ch
+		return Subscription{Ch: ch, Unsubscribe: func() {}}
 	}
 
 	ch := make(chan dockerctl.LogLine, 100)
 	m.subscribers = append(m.subscribers, ch)
-	return ch
+
+	unsubscribe := func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for i, sub := range m.subscribers {
+			if sub == ch {
+				m.subscribers = append(m.subscribers[:i], m.subscribers[i+1:]...)
+				break
+			}
+		}
+	}
+
+	return Subscription{Ch: ch, Unsubscribe: unsubscribe}
 }
 
 func (m *LogMultiplexer) Stop() {

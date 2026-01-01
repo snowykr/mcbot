@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/snowy/mcbot/internal/config"
@@ -46,9 +47,10 @@ type Controller struct {
 	onStateChange            StateChangeCallback
 	syncWatcherCancel        context.CancelFunc
 	containerWatcherCancel   context.CancelFunc
-	runtimeLogCh             <-chan dockerctl.LogLine
-	shutdownIntentFromInside bool
+	runtimeLogSub            *Subscription
+	shutdownIntentFromInside atomic.Bool
 	watchersRunning          bool
+	watchersWg               sync.WaitGroup
 	watchersMu               sync.Mutex
 }
 
@@ -172,11 +174,12 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 		logCtx, logCancel := context.WithTimeout(context.Background(), c.cfg.ReadyTimeout)
 		defer logCancel()
 
-		logCh := c.logMux.Subscribe()
+		sub := c.logMux.Subscribe()
+		defer sub.Unsubscribe()
 
 		for {
 			select {
-			case logLine, ok := <-logCh:
+			case logLine, ok := <-sub.Ch:
 				if !ok {
 					c.stateManager.SetError(fmt.Errorf("log stream ended unexpectedly"))
 					c.lifecycleLogger.OnServerStartFailed(ReasonLogStreamEndedUnexpectedly, nil)
@@ -323,8 +326,7 @@ func (c *Controller) Status(ctx context.Context) StatusResult {
 
 	if !containerState.Running && info.State == state.StateRunning {
 		c.handleCrash(ReasonStatusContainerNotRunning, fmt.Errorf("server stopped unexpectedly"), containerState.Exists)
-		info.State = state.StateCrashed
-		info.LastError = fmt.Errorf("server stopped unexpectedly")
+		info = c.stateManager.GetInfo()
 	}
 
 	return StatusResult{
@@ -369,14 +371,18 @@ func (c *Controller) SyncState(ctx context.Context) error {
 	currentState := c.stateManager.GetState()
 
 	if containerState.Exists && containerState.Running {
-		if currentState == state.StateStopped || currentState == state.StateError || currentState == state.StateCrashed {
+		needsStartupSync := currentState == state.StateStopped ||
+			currentState == state.StateError ||
+			currentState == state.StateCrashed
+
+		if needsStartupSync {
 			c.stateManager.SetState(state.StateStarting)
 			c.notifyStateChange(state.StateStarting)
 		}
 
 		c.logMux.Start(containerState.StartedAt)
 
-		if currentState == state.StateStopped || currentState == state.StateError || currentState == state.StateCrashed {
+		if needsStartupSync {
 			c.startSyncWatcher(containerState.StartedAt)
 		}
 	} else {
@@ -407,12 +413,13 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 		}
 	}()
 
-	logCh := c.logMux.Subscribe()
+	sub := c.logMux.Subscribe()
+	defer sub.Unsubscribe()
 	logutil.Debugf("[SYNC_WATCHER] 외부 시작 서버 감시 시작 (타임아웃: %v)", c.cfg.ReadyTimeout)
 
 	for {
 		select {
-		case logLine, ok := <-logCh:
+		case logLine, ok := <-sub.Ch:
 			if !ok {
 				currentState := c.stateManager.GetState()
 				if currentState == state.StateStarting {
@@ -528,48 +535,74 @@ func (c *Controller) handleCrash(reason string, err error, containerExists bool)
 
 func (c *Controller) StartRuntimeWatchers(ctx context.Context) {
 	c.watchersMu.Lock()
-	defer c.watchersMu.Unlock()
 
 	if c.watchersRunning {
+		c.watchersMu.Unlock()
 		logutil.Debugf("[RUNTIME] 런타임 감시가 이미 실행 중입니다")
 		return
 	}
 
 	logutil.Infof("[RUNTIME] 런타임 감시 시작 (컨테이너: %s)", c.cfg.MCContainerName)
 
-	c.runtimeLogCh = c.logMux.Subscribe()
+	sub := c.logMux.Subscribe()
+	c.runtimeLogSub = &sub
 
 	watchCtx, cancel := context.WithCancel(ctx)
 	c.containerWatcherCancel = cancel
 	c.watchersRunning = true
+	c.shutdownIntentFromInside.Store(false)
 
+	c.watchersWg.Add(2)
 	go c.runtimeLogWatcherLoop(watchCtx)
 	go c.containerWatchLoop(watchCtx)
 
+	go c.watchersSupervisor()
+
+	c.watchersMu.Unlock()
 	logutil.Debugf("[RUNTIME] 런타임 감시 시작 완료 (로그 워처 + 컨테이너 워처)")
+}
+
+func (c *Controller) watchersSupervisor() {
+	c.watchersWg.Wait()
+
+	c.watchersMu.Lock()
+	defer c.watchersMu.Unlock()
+
+	if c.runtimeLogSub != nil {
+		c.runtimeLogSub.Unsubscribe()
+		c.runtimeLogSub = nil
+	}
+
+	c.watchersRunning = false
+	c.containerWatcherCancel = nil
+	c.shutdownIntentFromInside.Store(false)
+
+	logutil.Debugf("[RUNTIME] 워처 supervisor: 모든 워처 종료 완료, 상태 정리됨")
 }
 
 func (c *Controller) StopRuntimeWatchers() {
 	c.watchersMu.Lock()
-	defer c.watchersMu.Unlock()
 
 	if !c.watchersRunning {
+		c.watchersMu.Unlock()
 		return
 	}
 
-	if c.containerWatcherCancel != nil {
-		c.containerWatcherCancel()
-		c.containerWatcherCancel = nil
+	cancel := c.containerWatcherCancel
+	c.watchersMu.Unlock()
+
+	if cancel != nil {
+		cancel()
 	}
-	c.watchersRunning = false
-	logutil.Infof("[RUNTIME] 런타임 감시 중지")
+
+	c.watchersWg.Wait()
+
+	logutil.Infof("[RUNTIME] 런타임 감시 중지 완료 (supervisor가 정리 수행)")
 }
 
 func (c *Controller) runtimeLogWatcherLoop(ctx context.Context) {
 	defer func() {
-		c.watchersMu.Lock()
-		c.watchersRunning = false
-		c.watchersMu.Unlock()
+		c.watchersWg.Done()
 		logutil.Debugf("[LOG_WATCHER] 런타임 로그 감시 종료")
 	}()
 
@@ -581,7 +614,7 @@ func (c *Controller) runtimeLogWatcherLoop(ctx context.Context) {
 			logutil.Debugf("[LOG_WATCHER] 런타임 로그 감시 종료 (context done)")
 			return
 
-		case logLine, ok := <-c.runtimeLogCh:
+		case logLine, ok := <-c.runtimeLogSub.Ch:
 			if !ok {
 				logutil.Debugf("[LOG_WATCHER] 로그 채널 닫힘")
 				return
@@ -603,7 +636,7 @@ func (c *Controller) runtimeLogWatcherLoop(ctx context.Context) {
 			}
 
 			if isShutdownLog(logLine.Text) {
-				c.shutdownIntentFromInside = true
+				c.shutdownIntentFromInside.Store(true)
 				logutil.Infof("[LOG_WATCHER] 서버 내부 종료 시작 감지")
 			}
 		}
@@ -612,9 +645,7 @@ func (c *Controller) runtimeLogWatcherLoop(ctx context.Context) {
 
 func (c *Controller) containerWatchLoop(ctx context.Context) {
 	defer func() {
-		c.watchersMu.Lock()
-		c.watchersRunning = false
-		c.watchersMu.Unlock()
+		c.watchersWg.Done()
 		logutil.Debugf("[CONTAINER_WATCHER] 컨테이너 상태 감시 종료")
 	}()
 
@@ -651,18 +682,19 @@ func (c *Controller) containerWatchLoop(ctx context.Context) {
 
 			consecutiveInspectFailures = 0
 
+			shutdownIntent := c.shutdownIntentFromInside.Load()
 			logutil.Debugf("[CONTAINER_WATCHER] tick - state=%s exists=%v running=%v shutdownIntent=%v",
-				currentState.Korean(), containerState.Exists, containerState.Running, c.shutdownIntentFromInside)
+				currentState.Korean(), containerState.Exists, containerState.Running, shutdownIntent)
 
 			if currentState != state.StateRunning {
 				continue
 			}
 
 			if !containerState.Running {
-				if c.shutdownIntentFromInside {
+				if shutdownIntent {
 					logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료로 인한 컨테이너 종료 - 정상 종료로 처리")
 					c.handleNormalStop()
-					c.shutdownIntentFromInside = false
+					c.shutdownIntentFromInside.Store(false)
 					return
 				}
 
