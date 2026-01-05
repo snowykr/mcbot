@@ -137,6 +137,13 @@ func (h *IntegrationTestHelper) ContainerID() (string, error) {
 	return validIDs[0], nil
 }
 
+func shortID(id string) string {
+	if len(id) <= 12 {
+		return id
+	}
+	return id[:12]
+}
+
 func (h *IntegrationTestHelper) ContainerName() (string, error) {
 	h.t.Helper()
 
@@ -203,7 +210,7 @@ func (h *IntegrationTestHelper) StopContainer() error {
 		return fmt.Errorf("컨테이너 ID 조회 실패: %w", err)
 	}
 
-	h.t.Logf("[ACTION] 컨테이너 중지: %s", containerID[:12])
+	h.t.Logf("[ACTION] 컨테이너 중지: %s", shortID(containerID))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -224,7 +231,7 @@ func (h *IntegrationTestHelper) KillContainer() error {
 		return fmt.Errorf("컨테이너 ID 조회 실패: %w", err)
 	}
 
-	h.t.Logf("[ACTION] 컨테이너 강제 종료: %s", containerID[:12])
+	h.t.Logf("[ACTION] 컨테이너 강제 종료: %s", shortID(containerID))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

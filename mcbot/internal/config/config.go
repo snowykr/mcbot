@@ -88,7 +88,7 @@ func (c *Config) validate() error {
 	if c.ServerOperationTimeout <= 0 {
 		return errors.New("SERVER_OPERATION_TIMEOUT_SECONDS must be positive")
 	}
-	if c.AutoRecoverInterval <= 0 {
+	if c.AutoRecoverEnabled && c.AutoRecoverInterval <= 0 {
 		return errors.New("AUTO_RECOVER_INTERVAL_SECONDS must be positive")
 	}
 	if c.CrashDetectionInterval <= 0 {

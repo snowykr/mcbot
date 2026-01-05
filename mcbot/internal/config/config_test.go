@@ -122,15 +122,29 @@ func TestValidate_DurationFields(t *testing.T) {
 			errorMsg:    "SERVER_OPERATION_TIMEOUT_SECONDS must be positive",
 		},
 		{
-			name: "Zero AutoRecoverInterval",
+			name: "Zero AutoRecoverInterval with AutoRecoverEnabled=true",
 			modifier: func(c *Config) {
 				c.ReadyTimeout = 1
 				c.EmbedUpdateTimeout = 1
 				c.ServerOperationTimeout = 1
+				c.AutoRecoverEnabled = true
 				c.AutoRecoverInterval = 0
 			},
 			expectError: true,
 			errorMsg:    "AUTO_RECOVER_INTERVAL_SECONDS must be positive",
+		},
+		{
+			name: "Zero AutoRecoverInterval with AutoRecoverEnabled=false (should pass)",
+			modifier: func(c *Config) {
+				c.ReadyTimeout = 1
+				c.EmbedUpdateTimeout = 1
+				c.ServerOperationTimeout = 1
+				c.AutoRecoverEnabled = false
+				c.AutoRecoverInterval = 0
+				c.CrashDetectionInterval = 1
+				c.MaxInspectFailureAttempts = 1
+			},
+			expectError: false,
 		},
 		{
 			name: "Zero CrashDetectionInterval",

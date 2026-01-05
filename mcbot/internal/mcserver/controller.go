@@ -711,5 +711,6 @@ func (c *Controller) Shutdown() {
 	if c.syncWatcherCancel != nil {
 		c.syncWatcherCancel()
 	}
+	c.playerTracker.Close()
 	c.logMux.Close()
 }

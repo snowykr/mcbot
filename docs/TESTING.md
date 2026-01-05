@@ -26,9 +26,6 @@ go test ./internal/dockerctl
 
 # 상세 출력과 함께 실행
 go test -v ./...
-
-# 타임아웃 설정 (무한 루프 방지)
-gtimeout 60 go test ./...
 ```
 
 ### 테스트 커버리지
@@ -65,7 +62,7 @@ make test-integration
 
 # 직접 실행
 cd mcbot
-gtimeout 600s go test -tags=integration -v ./internal/mcserver/...
+go test -tags=integration -v ./internal/mcserver/...
 
 # 상세 로그와 함께 실행
 make test-integration-verbose
@@ -168,12 +165,6 @@ make test-integration-verbose
 - **RCON**: 활성화 (테스트 명령 실행용, 컨테이너 내부에서만 접근)
 
 ### 문제 해결
-
-#### 테스트 타임아웃
-```bash
-# 타임아웃 시간 늘리기
-gtimeout 900s go test -tags=integration -v ./internal/mcserver/...
-```
 
 #### 테스트 중단 후 잔여 리소스 정리
 테스트가 `Ctrl+C` 등으로 중단된 경우, 다음 명령으로 모든 테스트 리소스를 정리할 수 있습니다:
@@ -627,8 +618,8 @@ ports:
 ### 전체 테스트 스위트 실행
 
 ```bash
-# 타임아웃 설정과 함께 전체 테스트 실행
-gtimeout 120 go test -v ./...
+# 전체 테스트 실행
+go test -v ./...
 
 # 실패 시 즉시 중단
 go test -v -failfast ./...
