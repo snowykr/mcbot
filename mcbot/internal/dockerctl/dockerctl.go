@@ -25,8 +25,10 @@ func InspectContainer(ctx context.Context, containerName string) (*ContainerStat
 	output, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			stderr := string(exitErr.Stderr)
-			if strings.Contains(stderr, "No such object") || strings.Contains(stderr, "Error: No such") {
+			stderr := strings.ToLower(string(exitErr.Stderr))
+			if strings.Contains(stderr, "no such object") ||
+				strings.Contains(stderr, "no such container") ||
+				strings.Contains(stderr, "error: no such") {
 				return &ContainerState{Exists: false}, nil
 			}
 		}
