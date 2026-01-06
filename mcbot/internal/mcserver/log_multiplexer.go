@@ -11,7 +11,8 @@ import (
 
 type LogMultiplexer struct {
 	containerName string
-	subscribers   []chan dockerctl.LogLine
+	subscribers   map[uint64]chan dockerctl.LogLine
+	nextSubID     uint64
 	mu            sync.RWMutex
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -23,7 +24,7 @@ type LogMultiplexer struct {
 func NewLogMultiplexer(containerName string) *LogMultiplexer {
 	return &LogMultiplexer{
 		containerName: containerName,
-		subscribers:   make([]chan dockerctl.LogLine, 0),
+		subscribers:   make(map[uint64]chan dockerctl.LogLine),
 	}
 }
 
@@ -60,8 +61,10 @@ func (m *LogMultiplexer) run(ctx context.Context, since time.Time) {
 
 	for logLine := range logCh {
 		m.mu.RLock()
-		subs := make([]chan dockerctl.LogLine, len(m.subscribers))
-		copy(subs, m.subscribers)
+		subs := make([]chan dockerctl.LogLine, 0, len(m.subscribers))
+		for _, ch := range m.subscribers {
+			subs = append(subs, ch)
+		}
 		m.mu.RUnlock()
 
 		for _, sub := range subs {
@@ -91,17 +94,14 @@ func (m *LogMultiplexer) Subscribe() Subscription {
 	}
 
 	ch := make(chan dockerctl.LogLine, 100)
-	m.subscribers = append(m.subscribers, ch)
+	subID := m.nextSubID
+	m.nextSubID++
+	m.subscribers[subID] = ch
 
 	unsubscribe := func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		for i, sub := range m.subscribers {
-			if sub == ch {
-				m.subscribers = append(m.subscribers[:i], m.subscribers[i+1:]...)
-				break
-			}
-		}
+		delete(m.subscribers, subID)
 	}
 
 	return Subscription{Ch: ch, Unsubscribe: unsubscribe}

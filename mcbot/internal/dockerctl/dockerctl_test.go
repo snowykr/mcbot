@@ -209,50 +209,20 @@ func TestInspectContainer_StderrPatternMatching(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			exitErr := &exec.ExitError{
-				Stderr: []byte(tc.stderrVariant),
-			}
-
+			exitErr := &exec.ExitError{Stderr: []byte(tc.stderrVariant)}
 			stderr := string(exitErr.Stderr)
 			t.Logf("Testing stderr pattern: %q", stderr)
 
-			lowerStderr := ""
-			for _, c := range stderr {
-				if c >= 'A' && c <= 'Z' {
-					lowerStderr += string(c + 32)
-				} else {
-					lowerStderr += string(c)
+			isNoSuch := isNoSuchContainerError(stderr)
+			if tc.shouldBeExists {
+				if isNoSuch {
+					t.Fatalf("Expected container to exist for stderr %q", stderr)
 				}
+				return
 			}
 
-			isNoSuchPattern := false
-			if len(lowerStderr) >= len("no such object") {
-				for i := 0; i <= len(lowerStderr)-len("no such object"); i++ {
-					if lowerStderr[i:i+len("no such object")] == "no such object" {
-						isNoSuchPattern = true
-						break
-					}
-				}
-			}
-			if !isNoSuchPattern && len(lowerStderr) >= len("no such container") {
-				for i := 0; i <= len(lowerStderr)-len("no such container"); i++ {
-					if lowerStderr[i:i+len("no such container")] == "no such container" {
-						isNoSuchPattern = true
-						break
-					}
-				}
-			}
-			if !isNoSuchPattern && len(lowerStderr) >= len("error: no such") {
-				for i := 0; i <= len(lowerStderr)-len("error: no such"); i++ {
-					if lowerStderr[i:i+len("error: no such")] == "error: no such" {
-						isNoSuchPattern = true
-						break
-					}
-				}
-			}
-
-			if !isNoSuchPattern {
-				t.Errorf("Pattern matching failed for stderr: %q", stderr)
+			if !isNoSuch {
+				t.Fatalf("Expected 'no such' pattern to be detected for stderr %q", stderr)
 			}
 		})
 	}

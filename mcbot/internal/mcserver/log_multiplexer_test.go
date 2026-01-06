@@ -634,5 +634,15 @@ func TestLogMultiplexer_ConcurrentUnsubscribe(t *testing.T) {
 		t.Fatalf("Expected 0 subscribers after concurrent unsubscribe, got %d", count)
 	}
 
+	for i, sub := range subscriptions {
+		select {
+		case _, ok := <-sub.Ch:
+			if !ok {
+				t.Fatalf("Subscription channel %d was closed after concurrent unsubscribe", i)
+			}
+		default:
+		}
+	}
+
 	t.Log("Concurrent unsubscribe completed without race")
 }

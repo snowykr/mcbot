@@ -46,6 +46,7 @@ type Controller struct {
 	lifecycleLogger          LifecycleLogger
 	onStateChange            StateChangeCallback
 	syncWatcherCancel        context.CancelFunc
+	syncWatcherMu            sync.Mutex
 	containerWatcherCancel   context.CancelFunc
 	runtimeLogSub            *Subscription
 	shutdownIntentFromInside atomic.Bool
@@ -395,22 +396,26 @@ func (c *Controller) SyncState(ctx context.Context) error {
 }
 
 func (c *Controller) startSyncWatcher(containerStartedAt time.Time) {
+	c.syncWatcherMu.Lock()
 	if c.syncWatcherCancel != nil {
 		c.syncWatcherCancel()
 	}
 
 	watchCtx, cancel := context.WithTimeout(context.Background(), c.cfg.ReadyTimeout)
 	c.syncWatcherCancel = cancel
+	c.syncWatcherMu.Unlock()
 
 	go c.syncWatcherLoop(watchCtx, containerStartedAt)
 }
 
 func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt time.Time) {
 	defer func() {
+		c.syncWatcherMu.Lock()
 		if c.syncWatcherCancel != nil {
 			c.syncWatcherCancel()
 			c.syncWatcherCancel = nil
 		}
+		c.syncWatcherMu.Unlock()
 	}()
 
 	sub := c.logMux.Subscribe()
@@ -515,7 +520,7 @@ func (c *Controller) handleCrash(reason string, err error, containerExists bool)
 	}
 
 	if currentState != state.StateRunning {
-		logutil.Debugf("[CRASH] handleCrash skipped - not in Running state: %s (invariant: only call from Running)", currentState.Korean())
+		logutil.Infof("[CRASH][WARN] handleCrash called outside Running state: %s (invariant violation, skipping)", currentState.Korean())
 		return
 	}
 
@@ -693,6 +698,20 @@ func (c *Controller) containerWatchLoop(ctx context.Context) {
 			if !containerState.Running {
 				if shutdownIntent {
 					logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료로 인한 컨테이너 종료 - 정상 종료로 처리")
+					c.handleNormalStop()
+					c.shutdownIntentFromInside.Store(false)
+					return
+				}
+
+				select {
+				case <-time.After(200 * time.Millisecond):
+				case <-ctx.Done():
+					return
+				}
+
+				shutdownIntent = c.shutdownIntentFromInside.Load()
+				if shutdownIntent {
+					logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료 감지(지연 확인) - 정상 종료로 처리")
 					c.handleNormalStop()
 					c.shutdownIntentFromInside.Store(false)
 					return

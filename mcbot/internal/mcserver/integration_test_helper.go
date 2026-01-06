@@ -170,6 +170,11 @@ func (h *IntegrationTestHelper) ContainerName() (string, error) {
 func (h *IntegrationTestHelper) WaitForServerReady(timeout time.Duration) {
 	h.t.Helper()
 
+	readyPatterns, err := newReadyMatchers()
+	if err != nil {
+		h.t.Fatalf("ready 패턴 초기화 실패: %v", err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -195,8 +200,13 @@ func (h *IntegrationTestHelper) WaitForServerReady(timeout time.Duration) {
 			}
 
 			logs := string(output)
-			if strings.Contains(logs, "Done (") || strings.Contains(logs, "Time elapsed:") {
-				return
+			for _, line := range strings.Split(logs, "\n") {
+				if matched, _ := matchesReadyPattern(line, readyPatterns); matched {
+					return
+				}
+				if strings.Contains(line, "Time elapsed:") {
+					return
+				}
 			}
 		}
 	}
