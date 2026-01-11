@@ -30,7 +30,6 @@ func TestController_StateChangeWorker_Restart(t *testing.T) {
 		wg.Done()
 	}
 
-	// 1. Initial run
 	wg.Add(1)
 	controller.SetOnStateChange(callback)
 	controller.notifyStateChange(state.StateRunning)
@@ -39,11 +38,10 @@ func TestController_StateChangeWorker_Restart(t *testing.T) {
 		t.Fatal("Timed out waiting for first state change")
 	}
 
-	// 2. Shutdown and Restart
-	controller.Shutdown()
+	controller.stopStateChangeWorker()
 
 	wg.Add(1)
-	controller.SetOnStateChange(callback) // Should restart the worker
+	controller.SetOnStateChange(callback)
 	controller.notifyStateChange(state.StateStopped)
 
 	if !waitWithTimeout(&wg, 1*time.Second) {
@@ -224,4 +222,87 @@ func TestStateChange_StopDisablesNotifications(t *testing.T) {
 		t.Errorf("Callbacks should not increase after stopStateChangeWorker: before=%d, after=%d",
 			countBeforeStop, countAfterStop)
 	}
+}
+
+func TestNotifyStateChange_AfterShutdown_IsNoOp(t *testing.T) {
+	cfg := &config.Config{
+		MCContainerName:        "test-mc-shutdown-noop",
+		CrashDetectionInterval: 5 * time.Second,
+	}
+	stateManager := state.NewManager()
+	controller, err := NewController(cfg, stateManager)
+	if err != nil {
+		t.Fatalf("Failed to create controller: %v", err)
+	}
+
+	var callCount int
+	var mu sync.Mutex
+
+	controller.SetOnStateChange(func(s state.ServerState) {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+	})
+
+	controller.notifyStateChange(state.StateRunning)
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	countBeforeShutdown := callCount
+	mu.Unlock()
+
+	if countBeforeShutdown != 1 {
+		t.Errorf("Expected 1 callback before shutdown, got %d", countBeforeShutdown)
+	}
+
+	controller.Shutdown()
+
+	for i := 0; i < 100; i++ {
+		controller.notifyStateChange(state.StateCrashed)
+		controller.notifyStateChange(state.StateStopped)
+		controller.notifyStateChange(state.StateRunning)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	countAfterShutdown := callCount
+	mu.Unlock()
+
+	if countAfterShutdown != countBeforeShutdown {
+		t.Errorf("Callbacks should not increase after Shutdown: before=%d, after=%d",
+			countBeforeShutdown, countAfterShutdown)
+	}
+}
+
+func TestNotifyStateChange_AfterShutdown_ConcurrentSafe(t *testing.T) {
+	cfg := &config.Config{
+		MCContainerName:        "test-mc-shutdown-race",
+		CrashDetectionInterval: 5 * time.Second,
+	}
+	stateManager := state.NewManager()
+	controller, err := NewController(cfg, stateManager)
+	if err != nil {
+		t.Fatalf("Failed to create controller: %v", err)
+	}
+
+	controller.SetOnStateChange(func(s state.ServerState) {})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			controller.notifyStateChange(state.StateRunning)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		time.Sleep(1 * time.Millisecond)
+		controller.Shutdown()
+	}()
+
+	wg.Wait()
 }

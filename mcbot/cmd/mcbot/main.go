@@ -126,6 +126,7 @@ func serverMonitorLoop(
 	if !cfg.AutoRecoverEnabled {
 		log.Println("[MONITOR] 자동 복구가 비활성화되어 있습니다")
 		<-ctx.Done()
+		performFinalUpdate(statusEmbed)
 		return
 	}
 
@@ -135,24 +136,24 @@ func serverMonitorLoop(
 	ticker := time.NewTicker(cfg.AutoRecoverInterval)
 	defer ticker.Stop()
 
-	type restartOutcome struct {
-		attempt int
-		success bool
-		reason  string
-	}
 	outcomeCh := make(chan restartOutcome, 1)
 
-	var restarting bool
+	restartSem := make(chan struct{}, 1)
+
 	var consecutiveAttempts int
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[MONITOR] 서버 모니터링 종료")
+			log.Println("[MONITOR] 서버 모니터링 종료 중...")
+			drainRestartGoroutine(restartSem, outcomeCh, 500*time.Millisecond)
+			performFinalUpdate(statusEmbed)
+			log.Println("[MONITOR] 서버 모니터링 종료 완료")
 			return
 
 		case outcome := <-outcomeCh:
-			restarting = false
+			<-restartSem
+
 			if outcome.success {
 				consecutiveAttempts = 0
 				log.Printf("[LIFECYCLE] event=auto_restart_succeeded attempt=%d", outcome.attempt)
@@ -160,14 +161,23 @@ func serverMonitorLoop(
 				log.Printf("[LIFECYCLE] event=auto_restart_failed attempt=%d reason=%s", outcome.attempt, outcome.reason)
 			}
 
+			updateCtx, updateCancel := context.WithTimeout(ctx, cfg.EmbedUpdateTimeout)
+			if err := statusEmbed.Update(updateCtx); err != nil {
+				log.Printf("[MONITOR] 재시작 결과 임베드 업데이트 실패: %v", err)
+			}
+			updateCancel()
+
 		case <-ticker.C:
-			if restarting {
+			select {
+			case restartSem <- struct{}{}:
+			default:
 				continue
 			}
 
 			status := controller.Status(ctx)
 
 			if status.State != state.StateCrashed {
+				<-restartSem
 				if consecutiveAttempts > 0 {
 					consecutiveAttempts = 0
 				}
@@ -175,55 +185,110 @@ func serverMonitorLoop(
 			}
 
 			if cfg.MaxAutoRecoverAttempts > 0 && consecutiveAttempts >= cfg.MaxAutoRecoverAttempts {
+				<-restartSem
 				log.Printf("[MONITOR] 최대 자동 복구 시도 횟수(%d회) 초과, 자동 복구 중단",
 					cfg.MaxAutoRecoverAttempts)
 				continue
 			}
 
-			restarting = true
 			consecutiveAttempts++
 
 			log.Printf("[LIFECYCLE] event=auto_restart_scheduled attempt=%d/%d",
 				consecutiveAttempts, cfg.MaxAutoRecoverAttempts)
 
-			if err := statusEmbed.Update(ctx); err != nil {
+			updateCtx, updateCancel := context.WithTimeout(ctx, cfg.EmbedUpdateTimeout)
+			if err := statusEmbed.Update(updateCtx); err != nil {
 				log.Printf("[MONITOR] 크래시 상태 임베드 업데이트 실패: %v", err)
 			}
+			updateCancel()
 
-			go func(attempt int, outCh chan<- restartOutcome) {
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("[MONITOR] Auto-restart goroutine recovered from panic: %v", r)
-						outCh <- restartOutcome{attempt: attempt, success: false, reason: "panic"}
-					}
-				}()
-
-				resultCh := controller.Start(context.Background())
-
-				waitCtx, waitCancel := context.WithTimeout(context.Background(), cfg.ServerOperationTimeout)
-				defer waitCancel()
-
-				select {
-				case result, ok := <-resultCh:
-					if !ok {
-						outCh <- restartOutcome{attempt: attempt, success: false, reason: "channel_closed"}
-						return
-					}
-
-					if result.Success {
-						outCh <- restartOutcome{attempt: attempt, success: true}
-					} else {
-						outCh <- restartOutcome{attempt: attempt, success: false, reason: result.ErrorMessage}
-					}
-
-				case <-waitCtx.Done():
-					outCh <- restartOutcome{attempt: attempt, success: false, reason: "timeout"}
-				}
-
-				if err := statusEmbed.Update(context.Background()); err != nil {
-					log.Printf("[MONITOR] 재시작 후 임베드 업데이트 실패: %v", err)
-				}
-			}(consecutiveAttempts, outcomeCh)
+			go runRestartOperation(ctx, controller, cfg.ServerOperationTimeout, consecutiveAttempts, outcomeCh)
 		}
+	}
+}
+
+func runRestartOperation(
+	ctx context.Context,
+	controller *mcserver.Controller,
+	timeout time.Duration,
+	attempt int,
+	outcomeCh chan<- restartOutcome,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[MONITOR] Auto-restart goroutine recovered from panic: %v", r)
+			trySendOutcome(ctx, outcomeCh, restartOutcome{attempt: attempt, success: false, reason: "panic"})
+		}
+	}()
+
+	resultCh := controller.Start(context.Background())
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), timeout)
+	defer waitCancel()
+
+	var outcome restartOutcome
+	outcome.attempt = attempt
+
+	select {
+	case result, ok := <-resultCh:
+		if !ok {
+			outcome.success = false
+			outcome.reason = "channel_closed"
+		} else if result.Success {
+			outcome.success = true
+		} else {
+			outcome.success = false
+			outcome.reason = result.ErrorMessage
+		}
+
+	case <-waitCtx.Done():
+		outcome.success = false
+		outcome.reason = "timeout"
+
+	case <-ctx.Done():
+		outcome.success = false
+		outcome.reason = "monitor_shutdown"
+	}
+
+	trySendOutcome(ctx, outcomeCh, outcome)
+}
+
+type restartOutcome struct {
+	attempt int
+	success bool
+	reason  string
+}
+
+func trySendOutcome(ctx context.Context, outcomeCh chan<- restartOutcome, outcome restartOutcome) {
+	select {
+	case outcomeCh <- outcome:
+		return
+	default:
+	}
+
+	select {
+	case outcomeCh <- outcome:
+	case <-ctx.Done():
+	}
+}
+
+func drainRestartGoroutine(sem <-chan struct{}, outcomeCh <-chan restartOutcome, graceTimeout time.Duration) {
+	select {
+	case <-sem:
+		select {
+		case <-outcomeCh:
+			log.Println("[MONITOR] 진행 중인 재시작 작업 결과 수신 완료")
+		case <-time.After(graceTimeout):
+			log.Println("[MONITOR] 진행 중인 재시작 작업 결과 대기 타임아웃")
+		}
+	default:
+	}
+}
+
+func performFinalUpdate(statusEmbed *discord.StatusEmbedManager) {
+	if err := statusEmbed.UpdateToOffline(); err != nil {
+		log.Printf("[MONITOR] 봇 오프라인 상태 업데이트 실패: %v", err)
+	} else {
+		log.Println("[MONITOR] 봇 오프라인 상태 업데이트 완료")
 	}
 }

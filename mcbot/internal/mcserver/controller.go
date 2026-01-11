@@ -86,8 +86,10 @@ type Controller struct {
 	// - The worker goroutine is stopped via context cancellation in stopStateChangeWorker().
 	// - When the Controller is GC'd, the channel becomes unreachable and is garbage collected.
 	// - This is NOT a memory leak: Go's GC handles unreferenced channels correctly.
+	// - After Shutdown(), notifyStateChange becomes a no-op (enforced by shutdownComplete flag).
 	stateChangeEventCh   chan state.ServerState
 	stateChangeDropCount atomic.Uint64
+	shutdownComplete     atomic.Bool
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
@@ -143,6 +145,10 @@ func (c *Controller) ensureStateChangeWorkerStarted() {
 }
 
 func (c *Controller) notifyStateChange(newState state.ServerState) {
+	if c.shutdownComplete.Load() {
+		return
+	}
+
 	c.stateChangeMu.RLock()
 	cb := c.onStateChange
 	ch := c.stateChangeEventCh
@@ -1080,6 +1086,8 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 }
 
 func (c *Controller) Shutdown() {
+	c.shutdownComplete.Store(true)
+
 	c.StopRuntimeWatchers()
 
 	c.syncWatcherMu.Lock()

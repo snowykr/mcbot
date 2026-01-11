@@ -14,6 +14,7 @@ const (
 	ColorSuccess = 0x00FF00
 	ColorError   = 0xFF0000
 	ColorWarning = 0xFFCC00
+	ColorOffline = 0x808080 // 봇 오프라인 상태용 회색
 
 	ComponentIDToggle            = "mcserver_toggle"
 	ComponentIDConfirmStopPrefix = "mcserver_confirm_stop:"
@@ -190,5 +191,32 @@ func BuildToggleButton(p mcserver.PresenceState) discordgo.Button {
 		Style:    style,
 		CustomID: ComponentIDToggle,
 		Disabled: disabled,
+	}
+}
+
+func EmbedBotOffline() *discordgo.MessageEmbed {
+	return &discordgo.MessageEmbed{
+		Title:       "🎮 마인크래프트 서버 상태",
+		Description: "⚫ **봇 오프라인**",
+		Color:       ColorOffline,
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:  "모니터링 중단",
+				Value: "봇이 종료되어 서버 상태를 확인할 수 없습니다.\n봇이 다시 온라인이 되면 상태가 업데이트됩니다.",
+			},
+		},
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: EmbedMarkerFooter,
+		},
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+}
+
+func BuildOfflineButton() discordgo.Button {
+	return discordgo.Button{
+		Label:    "봇 오프라인",
+		Style:    discordgo.SecondaryButton,
+		CustomID: ComponentIDToggle,
+		Disabled: true,
 	}
 }
