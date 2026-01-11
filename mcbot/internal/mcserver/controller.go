@@ -37,6 +37,12 @@ type StatusResult struct {
 
 type StateChangeCallback func(newState state.ServerState)
 
+// ShutdownIntentGracePeriod is the maximum time to wait for the log watcher
+// to process shutdown intent after container stop is detected.
+// This allows the log pipeline (docker logs -> multiplexer -> watcher) to deliver
+// the "Stopping server" log line before we declare a crash.
+const ShutdownIntentGracePeriod = 2 * time.Second
+
 type Controller struct {
 	cfg                      *config.Config
 	stateManager             *state.Manager
@@ -53,10 +59,14 @@ type Controller struct {
 	watchersRunning          bool
 	watchersWg               sync.WaitGroup
 	watchersMu               sync.Mutex
-	stateChangeWorkerCtx     context.Context
-	stateChangeWorkerCancel  context.CancelFunc
-	stateChangeWorkerWg      sync.WaitGroup
-	stateChangeWorkerOnce    sync.Once
+	// logWatcherDoneCh is closed when runtimeLogWatcherLoop finishes processing.
+	// containerWatchLoop uses this to wait for log watcher to drain before deciding crash vs normal shutdown.
+	// Created fresh on each StartRuntimeWatchers call; nil when watchers not running.
+	logWatcherDoneCh        chan struct{}
+	stateChangeWorkerCtx    context.Context
+	stateChangeWorkerCancel context.CancelFunc
+	stateChangeWorkerWg     sync.WaitGroup
+	stateChangeMu           sync.RWMutex
 	// stateChangeEventCh: best-effort notification channel for state changes.
 	// Non-blocking send; drops events when buffer is full (logged via stateChangeDropCount).
 	// Listeners should NOT treat these as source of truth; query stateManager for authoritative state.
@@ -98,26 +108,35 @@ func NewControllerWithLogger(cfg *config.Config, stateManager *state.Manager, lo
 }
 
 func (c *Controller) SetOnStateChange(callback StateChangeCallback) {
+	c.stateChangeMu.Lock()
 	c.onStateChange = callback
+	c.stateChangeMu.Unlock()
 	c.ensureStateChangeWorkerStarted()
 }
 
 func (c *Controller) ensureStateChangeWorkerStarted() {
-	c.stateChangeWorkerOnce.Do(func() {
-		if c.stateChangeEventCh == nil {
-			c.stateChangeEventCh = make(chan state.ServerState, 10)
-		}
-		if c.stateChangeWorkerCtx == nil {
-			c.stateChangeWorkerCtx, c.stateChangeWorkerCancel = context.WithCancel(context.Background())
-		}
-		c.startStateChangeWorkerInternal()
-	})
+	c.stateChangeMu.Lock()
+	defer c.stateChangeMu.Unlock()
+
+	if c.stateChangeEventCh == nil {
+		c.stateChangeEventCh = make(chan state.ServerState, 10)
+	}
+
+	if c.stateChangeWorkerCtx == nil || c.stateChangeWorkerCtx.Err() != nil {
+		c.stateChangeWorkerCtx, c.stateChangeWorkerCancel = context.WithCancel(context.Background())
+		c.startStateChangeWorkerInternalLocked()
+	}
 }
 
 func (c *Controller) notifyStateChange(newState state.ServerState) {
-	if c.onStateChange != nil && c.stateChangeEventCh != nil {
+	c.stateChangeMu.RLock()
+	cb := c.onStateChange
+	ch := c.stateChangeEventCh
+	c.stateChangeMu.RUnlock()
+
+	if cb != nil && ch != nil {
 		select {
-		case c.stateChangeEventCh <- newState:
+		case ch <- newState:
 		default:
 			dropCount := c.stateChangeDropCount.Add(1)
 			logutil.Infof("[STATE_CHANGE] WARNING: Event channel full, dropped notification for %s (total drops: %d)", newState.Korean(), dropCount)
@@ -129,7 +148,7 @@ func (c *Controller) StartStateChangeWorker(_ context.Context) {
 	c.ensureStateChangeWorkerStarted()
 }
 
-func (c *Controller) startStateChangeWorkerInternal() {
+func (c *Controller) startStateChangeWorkerInternalLocked() {
 	c.stateChangeWorkerWg.Add(1)
 	go func() {
 		defer func() {
@@ -146,14 +165,18 @@ func (c *Controller) startStateChangeWorkerInternal() {
 			case <-c.stateChangeWorkerCtx.Done():
 				return
 			case newState := <-c.stateChangeEventCh:
-				if c.onStateChange != nil {
+				c.stateChangeMu.RLock()
+				cb := c.onStateChange
+				c.stateChangeMu.RUnlock()
+
+				if cb != nil {
 					func() {
 						defer func() {
 							if r := recover(); r != nil {
 								logutil.Infof("[STATE_CHANGE] Callback panic recovered: %v", r)
 							}
 						}()
-						c.onStateChange(newState)
+						cb(newState)
 					}()
 				}
 			}
@@ -162,8 +185,12 @@ func (c *Controller) startStateChangeWorkerInternal() {
 }
 
 func (c *Controller) stopStateChangeWorker() {
-	if c.stateChangeWorkerCancel != nil {
-		c.stateChangeWorkerCancel()
+	c.stateChangeMu.Lock()
+	cancel := c.stateChangeWorkerCancel
+	c.stateChangeMu.Unlock()
+
+	if cancel != nil {
+		cancel()
 		c.stateChangeWorkerWg.Wait()
 	}
 }
@@ -797,10 +824,11 @@ func (c *Controller) StartRuntimeWatchers(ctx context.Context) {
 	c.containerWatcherCancel = cancel
 	c.watchersRunning = true
 	c.shutdownIntentFromInside.Store(false)
+	c.logWatcherDoneCh = make(chan struct{})
 
 	c.watchersWg.Add(2)
-	go c.runtimeLogWatcherLoop(watchCtx)
-	go c.containerWatchLoop(watchCtx)
+	go c.runtimeLogWatcherLoop(watchCtx, c.logWatcherDoneCh)
+	go c.containerWatchLoop(watchCtx, c.logWatcherDoneCh)
 
 	go c.watchersSupervisor()
 
@@ -821,6 +849,7 @@ func (c *Controller) watchersSupervisor() {
 
 	c.watchersRunning = false
 	c.containerWatcherCancel = nil
+	c.logWatcherDoneCh = nil
 	c.shutdownIntentFromInside.Store(false)
 
 	logutil.Debugf("[RUNTIME] 워처 supervisor: 모든 워처 종료 완료, 상태 정리됨")
@@ -846,12 +875,13 @@ func (c *Controller) StopRuntimeWatchers() {
 	logutil.Infof("[RUNTIME] 런타임 감시 중지 완료 (supervisor가 정리 수행)")
 }
 
-func (c *Controller) runtimeLogWatcherLoop(ctx context.Context) {
+func (c *Controller) runtimeLogWatcherLoop(ctx context.Context, doneCh chan struct{}) {
+	defer close(doneCh)
+	defer c.watchersWg.Done()
 	defer func() {
 		if r := recover(); r != nil {
 			logutil.Infof("[LOG_WATCHER] Recovered from panic: %v", r)
 		}
-		c.watchersWg.Done()
 		logutil.Debugf("[LOG_WATCHER] 런타임 로그 감시 종료")
 	}()
 
@@ -896,7 +926,20 @@ func (c *Controller) runtimeLogWatcherLoop(ctx context.Context) {
 	}
 }
 
-func (c *Controller) containerWatchLoop(ctx context.Context) {
+func (c *Controller) handleNormalShutdown(currentState state.ServerState, containerExists bool) {
+	result := c.reconcileState(reconcileInput{
+		currentState:     currentState,
+		containerExists:  containerExists,
+		containerRunning: false,
+		shutdownIntent:   true,
+		reason:           ReasonRuntimeNormalShutdown,
+		err:              nil,
+	})
+	c.applyReconcileResult(result, ReasonRuntimeNormalShutdown, nil, containerExists)
+	c.shutdownIntentFromInside.Store(false)
+}
+
+func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-chan struct{}) {
 	defer func() {
 		if r := recover(); r != nil {
 			logutil.Infof("[CONTAINER_WATCHER] Recovered from panic: %v", r)
@@ -955,29 +998,26 @@ func (c *Controller) containerWatchLoop(ctx context.Context) {
 			}
 
 			if !containerState.Running {
-				for attempt := 0; attempt < 5; attempt++ {
-					if c.shutdownIntentFromInside.Load() {
-						logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료 감지 (재확인 %d회) - 정상 종료로 처리", attempt+1)
-						result := c.reconcileState(reconcileInput{
-							currentState:     currentState,
-							containerExists:  containerState.Exists,
-							containerRunning: containerState.Running,
-							shutdownIntent:   true,
-							reason:           ReasonRuntimeNormalShutdown,
-							err:              nil,
-						})
-						c.applyReconcileResult(result, ReasonRuntimeNormalShutdown, nil, containerState.Exists)
-						c.shutdownIntentFromInside.Store(false)
-						return
-					}
+				if c.shutdownIntentFromInside.Load() {
+					logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료 감지 (즉시) - 정상 종료로 처리")
+					c.handleNormalShutdown(currentState, containerState.Exists)
+					return
+				}
 
-					if attempt < 4 {
-						select {
-						case <-time.After(50 * time.Millisecond):
-						case <-ctx.Done():
-							return
-						}
-					}
+				logutil.Debugf("[CONTAINER_WATCHER] 컨테이너 종료 감지, 로그 워처 종료 또는 타임아웃 대기 (최대 %v)", ShutdownIntentGracePeriod)
+				select {
+				case <-logWatcherDoneCh:
+					logutil.Debugf("[CONTAINER_WATCHER] 로그 워처 종료됨, intent 재확인")
+				case <-time.After(ShutdownIntentGracePeriod):
+					logutil.Debugf("[CONTAINER_WATCHER] grace period 타임아웃")
+				case <-ctx.Done():
+					return
+				}
+
+				if c.shutdownIntentFromInside.Load() {
+					logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료 감지 (대기 후) - 정상 종료로 처리")
+					c.handleNormalShutdown(currentState, containerState.Exists)
+					return
 				}
 
 				logutil.Infof("[CONTAINER_WATCHER] 비정상 종료 감지 - exists=%v", containerState.Exists)

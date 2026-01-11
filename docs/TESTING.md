@@ -85,6 +85,7 @@ make test-integration-verbose
 - 서버 내부에서 `/stop` 명령 실행 시 shutdown 로그 감지
 - `shutdownIntentFromInside` 플래그가 true로 설정됨
 - 컨테이너 종료 후 상태가 `StateStopped`로 전이 (crashed가 아님)
+- **이벤트 기반 종료 판별**: container watcher가 로그 watcher의 종료 신호(`logWatcherDoneCh`)를 기다린 후 intent 재확인
 
 **시나리오**:
 1. 테스트 컨테이너 시작 및 준비 대기
@@ -93,6 +94,11 @@ make test-integration-verbose
 4. RCON으로 `stop` 명령 실행
 5. 컨테이너 종료 대기
 6. 최종 상태가 `StateStopped`인지 확인
+
+**Shutdown Intent 판별 메커니즘 (2026-01-11 개선)**:
+- 기존: 5회 × 50ms polling 루프 (총 250ms)
+- 현재: 이벤트 기반 대기 (`logWatcherDoneCh` close 또는 `ShutdownIntentGracePeriod` 타임아웃, 최대 2초)
+- 로그 파이프라인 지연으로 인한 정상 종료 오탐 방지
 
 #### 2. Runtime Watcher - 예기치 않은 종료
 **파일**: `integration_test.go::TestIntegration_RuntimeWatcher_UnexpectedStop`

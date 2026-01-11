@@ -135,6 +135,7 @@ func serverMonitorLoop(
 	type restartOutcome struct {
 		attempt int
 		success bool
+		reason  string
 	}
 	outcomeCh := make(chan restartOutcome, 1)
 
@@ -153,6 +154,8 @@ func serverMonitorLoop(
 			if outcome.success {
 				consecutiveAttempts = 0
 				log.Printf("[LIFECYCLE] event=auto_restart_succeeded attempt=%d", outcome.attempt)
+			} else {
+				log.Printf("[LIFECYCLE] event=auto_restart_failed attempt=%d reason=%s", outcome.attempt, outcome.reason)
 			}
 
 		case <-ticker.C:
@@ -201,21 +204,18 @@ func serverMonitorLoop(
 				select {
 				case result, ok := <-resultCh:
 					if !ok {
-						log.Printf("[LIFECYCLE] event=auto_restart_failed attempt=%d reason=channel_closed",
-							attempt)
+						outCh <- restartOutcome{attempt: attempt, success: false, reason: "channel_closed"}
 						return
 					}
 
 					if result.Success {
 						outCh <- restartOutcome{attempt: attempt, success: true}
 					} else {
-						log.Printf("[LIFECYCLE] event=auto_restart_failed attempt=%d reason=%s",
-							attempt, result.ErrorMessage)
+						outCh <- restartOutcome{attempt: attempt, success: false, reason: result.ErrorMessage}
 					}
 
 				case <-waitCtx.Done():
-					log.Printf("[LIFECYCLE] event=auto_restart_failed attempt=%d reason=timeout",
-						attempt)
+					outCh <- restartOutcome{attempt: attempt, success: false, reason: "timeout"}
 				}
 
 				if err := statusEmbed.Update(context.Background()); err != nil {
