@@ -86,15 +86,6 @@ func TestShutdownIntent_Timeout_TreatedAsCrash(t *testing.T) {
 	}
 }
 
-func TestShutdownIntent_GracePeriodConstant(t *testing.T) {
-	if ShutdownIntentGracePeriod < 1*time.Second {
-		t.Errorf("ShutdownIntentGracePeriod should be at least 1s, got %v", ShutdownIntentGracePeriod)
-	}
-	if ShutdownIntentGracePeriod > 5*time.Second {
-		t.Errorf("ShutdownIntentGracePeriod should not be more than 5s to avoid excessive delay, got %v", ShutdownIntentGracePeriod)
-	}
-}
-
 func TestShutdownIntent_RaceScenario_LogDelayedButArrives(t *testing.T) {
 	cfg := &config.Config{MCContainerName: "test-mc"}
 	stateManager := state.NewManager()

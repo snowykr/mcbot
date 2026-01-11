@@ -41,6 +41,10 @@ type StateChangeCallback func(newState state.ServerState)
 // to process shutdown intent after container stop is detected.
 // This allows the log pipeline (docker logs -> multiplexer -> watcher) to deliver
 // the "Stopping server" log line before we declare a crash.
+//
+// Constraints: 1s <= value <= 5s
+//   - Below 1s: Log pipeline may not deliver shutdown intent in time, causing false crash detection.
+//   - Above 5s: Excessive delay before crash notification to users.
 const ShutdownIntentGracePeriod = 2 * time.Second
 
 type Controller struct {
