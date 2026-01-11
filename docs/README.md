@@ -243,11 +243,12 @@ mcbot은 대표적인 Minecraft 서버 이미지의 "서버 준비 완료" 로�
 - `runtime_container_stopped`: 런타임 중 컨테이너가 예기치 않게 종료됨
 - `runtime_inspect_failed_repeatedly`: 컨테이너 상태 확인이 연속으로 실패
 - `runtime_failure_*`: 런타임 로그에서 실패 패턴 감지 (예: 메모리 부족)
-- `status_container_not_running`: 상태 조회 시 컨테이너가 실행 중이 아님
+- `runtime_normal_shutdown`: 서버 내부에서 정상 종료 시작 후 종료됨
 - `sync_detected_unexpected_stop`: 동기화 중 예기치 않은 종료 감지
 - `sync_log_stream_ended`: 시작 중 로그 스트림이 종료됨
 - `sync_container_inspect_failed`: 시작 중 컨테이너 상태 확인 실패
 - `sync_container_stopped`: 시작 중 컨테이너가 종료됨
+- `sync_timeout`: 시작 중 준비 완료 타임아웃 초과
 - `log_stream_ended_unexpectedly`: 로그 스트림이 예기치 않게 종료됨
 
 **규칙**: 새로운 크래시 원인을 추가할 때는 반드시 `crash_reason.go`에 상수로 정의하고, 문자열 리터럴 대신 상수를 참조해야 합니다.

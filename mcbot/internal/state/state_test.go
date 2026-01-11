@@ -3,6 +3,7 @@ package state
 import (
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestTryStartTransition(t *testing.T) {
@@ -255,5 +256,162 @@ func TestSetStoppedWithErrorFromError(t *testing.T) {
 
 	if m.GetLastError() != newErr {
 		t.Errorf("Expected lastError to be updated to %v, got %v", newErr, m.GetLastError())
+	}
+}
+
+func TestFailureCandidate_SetAndGet(t *testing.T) {
+	m := NewManager()
+
+	if m.GetFailureCandidate() != nil {
+		t.Error("Expected nil failure candidate initially")
+	}
+
+	candidate := &FailureCandidate{
+		PatternName: "jvm_insufficient_memory",
+		Message:     "Java 런타임에 할당할 메모리가 부족합니다.",
+		DetectedAt:  time.Now(),
+		RawLog:      "There is insufficient memory for the Java Runtime Environment",
+	}
+	m.SetFailureCandidate(candidate)
+
+	got := m.GetFailureCandidate()
+	if got == nil {
+		t.Fatal("Expected non-nil failure candidate")
+	}
+	if got.PatternName != candidate.PatternName {
+		t.Errorf("Expected PatternName %s, got %s", candidate.PatternName, got.PatternName)
+	}
+	if got.Message != candidate.Message {
+		t.Errorf("Expected Message %s, got %s", candidate.Message, got.Message)
+	}
+}
+
+func TestFailureCandidate_TTLExpiration(t *testing.T) {
+	m := NewManager()
+	m.SetFailureCandidateTTL(50 * time.Millisecond)
+
+	candidate := &FailureCandidate{
+		PatternName: "test_pattern",
+		Message:     "test message",
+		DetectedAt:  time.Now(),
+	}
+	m.SetFailureCandidate(candidate)
+
+	if m.GetFailureCandidate() == nil {
+		t.Error("Expected non-nil failure candidate before TTL expiration")
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	if m.GetFailureCandidate() != nil {
+		t.Error("Expected nil failure candidate after TTL expiration")
+	}
+}
+
+func TestFailureCandidate_NewestOverwrite(t *testing.T) {
+	m := NewManager()
+
+	first := &FailureCandidate{
+		PatternName: "first_pattern",
+		Message:     "first message",
+		DetectedAt:  time.Now(),
+	}
+	m.SetFailureCandidate(first)
+
+	second := &FailureCandidate{
+		PatternName: "second_pattern",
+		Message:     "second message",
+		DetectedAt:  time.Now(),
+	}
+	m.SetFailureCandidate(second)
+
+	got := m.GetFailureCandidate()
+	if got == nil {
+		t.Fatal("Expected non-nil failure candidate")
+	}
+	if got.PatternName != "second_pattern" {
+		t.Errorf("Expected newest pattern 'second_pattern', got %s", got.PatternName)
+	}
+}
+
+func TestFailureCandidate_ClearFailureCandidate(t *testing.T) {
+	m := NewManager()
+
+	candidate := &FailureCandidate{
+		PatternName: "test_pattern",
+		Message:     "test message",
+		DetectedAt:  time.Now(),
+	}
+	m.SetFailureCandidate(candidate)
+
+	if m.GetFailureCandidate() == nil {
+		t.Error("Expected non-nil failure candidate before clear")
+	}
+
+	m.ClearFailureCandidate()
+
+	if m.GetFailureCandidate() != nil {
+		t.Error("Expected nil failure candidate after clear")
+	}
+}
+
+func TestFailureCandidate_ConsumeFailureCandidate(t *testing.T) {
+	m := NewManager()
+
+	candidate := &FailureCandidate{
+		PatternName: "test_pattern",
+		Message:     "test message",
+		DetectedAt:  time.Now(),
+	}
+	m.SetFailureCandidate(candidate)
+
+	consumed := m.ConsumeFailureCandidate()
+	if consumed == nil {
+		t.Fatal("Expected non-nil consumed failure candidate")
+	}
+	if consumed.PatternName != "test_pattern" {
+		t.Errorf("Expected PatternName 'test_pattern', got %s", consumed.PatternName)
+	}
+
+	if m.GetFailureCandidate() != nil {
+		t.Error("Expected nil failure candidate after consume")
+	}
+}
+
+func TestFailureCandidate_ConsumeAfterTTLExpiration(t *testing.T) {
+	m := NewManager()
+	m.SetFailureCandidateTTL(50 * time.Millisecond)
+
+	candidate := &FailureCandidate{
+		PatternName: "test_pattern",
+		Message:     "test message",
+		DetectedAt:  time.Now(),
+	}
+	m.SetFailureCandidate(candidate)
+
+	time.Sleep(60 * time.Millisecond)
+
+	consumed := m.ConsumeFailureCandidate()
+	if consumed != nil {
+		t.Error("Expected nil consumed failure candidate after TTL expiration")
+	}
+}
+
+func TestFailureCandidate_IncludedInInfo(t *testing.T) {
+	m := NewManager()
+
+	candidate := &FailureCandidate{
+		PatternName: "test_pattern",
+		Message:     "test message",
+		DetectedAt:  time.Now(),
+	}
+	m.SetFailureCandidate(candidate)
+
+	info := m.GetInfo()
+	if info.FailureCandidate == nil {
+		t.Fatal("Expected FailureCandidate in Info")
+	}
+	if info.FailureCandidate.PatternName != "test_pattern" {
+		t.Errorf("Expected PatternName 'test_pattern' in Info, got %s", info.FailureCandidate.PatternName)
 	}
 }

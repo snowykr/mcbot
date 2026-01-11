@@ -57,17 +57,35 @@ func (s ServerState) Korean() string {
 	}
 }
 
+// FailureCandidate represents a detected failure pattern that may explain a crash.
+// This is stored as a "candidate" until the container actually stops, at which point
+// it becomes the crash reason. TTL-based expiration prevents stale candidates from
+// being incorrectly attributed to later crashes.
+type FailureCandidate struct {
+	PatternName string
+	Message     string
+	DetectedAt  time.Time
+	RawLog      string
+}
+
+// DefaultFailureCandidateTTL is the default time-to-live for failure candidates.
+// If the container doesn't crash within this duration, the candidate is considered stale.
+const DefaultFailureCandidateTTL = 2 * time.Minute
+
 type Manager struct {
-	mu                sync.RWMutex
-	state             ServerState
-	lastStartTime     time.Time
-	lastReadyDuration time.Duration
-	lastError         error
+	mu                  sync.RWMutex
+	state               ServerState
+	lastStartTime       time.Time
+	lastReadyDuration   time.Duration
+	lastError           error
+	failureCandidate    *FailureCandidate
+	failureCandidateTTL time.Duration
 }
 
 func NewManager() *Manager {
 	return &Manager{
-		state: StateStopped,
+		state:               StateStopped,
+		failureCandidateTTL: DefaultFailureCandidateTTL,
 	}
 }
 
@@ -253,6 +271,7 @@ type Info struct {
 	LastStartTime     time.Time
 	LastReadyDuration time.Duration
 	LastError         error
+	FailureCandidate  *FailureCandidate
 }
 
 func (m *Manager) GetInfo() Info {
@@ -263,5 +282,52 @@ func (m *Manager) GetInfo() Info {
 		LastStartTime:     m.lastStartTime,
 		LastReadyDuration: m.lastReadyDuration,
 		LastError:         m.lastError,
+		FailureCandidate:  m.getValidFailureCandidateLocked(),
 	}
+}
+
+func (m *Manager) SetFailureCandidate(candidate *FailureCandidate) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failureCandidate = candidate
+	logutil.Debugf("[STATE] SetFailureCandidate: pattern=%s message=%s", candidate.PatternName, candidate.Message)
+}
+
+func (m *Manager) GetFailureCandidate() *FailureCandidate {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getValidFailureCandidateLocked()
+}
+
+func (m *Manager) getValidFailureCandidateLocked() *FailureCandidate {
+	if m.failureCandidate == nil {
+		return nil
+	}
+	if time.Since(m.failureCandidate.DetectedAt) > m.failureCandidateTTL {
+		return nil
+	}
+	return m.failureCandidate
+}
+
+func (m *Manager) ClearFailureCandidate() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failureCandidate != nil {
+		logutil.Debugf("[STATE] ClearFailureCandidate: cleared pattern=%s", m.failureCandidate.PatternName)
+	}
+	m.failureCandidate = nil
+}
+
+func (m *Manager) ConsumeFailureCandidate() *FailureCandidate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	candidate := m.getValidFailureCandidateLocked()
+	m.failureCandidate = nil
+	return candidate
+}
+
+func (m *Manager) SetFailureCandidateTTL(ttl time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failureCandidateTTL = ttl
 }

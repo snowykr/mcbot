@@ -43,7 +43,7 @@ type Controller struct {
 	readyPatterns            []readyPattern
 	logMux                   *LogMultiplexer
 	playerTracker            *PlayerTracker
-	lifecycleLogger          LifecycleLogger
+	lifecycleLogger          LifecycleLogger // never nil; initialized to NoopLifecycleLogger if not provided
 	onStateChange            StateChangeCallback
 	syncWatcherCancel        context.CancelFunc
 	syncWatcherMu            sync.Mutex
@@ -57,8 +57,13 @@ type Controller struct {
 	stateChangeWorkerCancel  context.CancelFunc
 	stateChangeWorkerWg      sync.WaitGroup
 	stateChangeWorkerOnce    sync.Once
-	stateChangeEventCh       chan state.ServerState
-	stateChangeDropCount     atomic.Uint64
+	// stateChangeEventCh: best-effort notification channel for state changes.
+	// Non-blocking send; drops events when buffer is full (logged via stateChangeDropCount).
+	// Listeners should NOT treat these as source of truth; query stateManager for authoritative state.
+	// Buffer size 10: absorbs normal bursts during crash/recover cycles; drop is acceptable.
+	// This channel is intentionally never closed to avoid send-on-closed-channel panics during shutdown.
+	stateChangeEventCh   chan state.ServerState
+	stateChangeDropCount atomic.Uint64
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
@@ -160,10 +165,6 @@ func (c *Controller) stopStateChangeWorker() {
 	if c.stateChangeWorkerCancel != nil {
 		c.stateChangeWorkerCancel()
 		c.stateChangeWorkerWg.Wait()
-		if c.stateChangeEventCh != nil {
-			close(c.stateChangeEventCh)
-			c.stateChangeEventCh = nil
-		}
 	}
 }
 
@@ -556,7 +557,7 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 				continue
 			}
 
-			containerState, err := dockerctl.InspectContainer(context.Background(), c.cfg.MCContainerName)
+			containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
 			if err != nil {
 				logutil.Debugf("[SYNC_WATCHER] 컨테이너 상태 확인 실패: %v", err)
 				continue
@@ -579,14 +580,14 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 		case <-ctx.Done():
 			currentState := c.stateManager.GetState()
 			if currentState == state.StateStarting {
-				c.checkContainerAndDecideState(containerStartedAt)
+				c.handleReadyTimeoutFallback(containerStartedAt)
 			}
 			return
 		}
 	}
 }
 
-func (c *Controller) checkContainerAndDecideState(containerStartedAt time.Time) {
+func (c *Controller) handleReadyTimeoutFallback(containerStartedAt time.Time) {
 	containerState, err := dockerctl.InspectContainer(context.Background(), c.cfg.MCContainerName)
 	if err != nil {
 		c.applyStartupFailure(ReasonSyncContainerInspectFailed, fmt.Errorf("container inspect failed: %w", err))
@@ -702,6 +703,7 @@ func (c *Controller) reconcileState(input reconcileInput) reconcileResult {
 }
 
 func (c *Controller) applyStartupSuccess(readyDuration time.Duration, loadSeconds float64) {
+	c.stateManager.ClearFailureCandidate()
 	c.stateManager.SetRunning(readyDuration)
 	c.notifyStateChange(state.StateRunning)
 	c.lifecycleLogger.OnServerStarted(readyDuration, loadSeconds)
@@ -744,19 +746,33 @@ func (c *Controller) applyReconcileResult(result reconcileResult, reason string,
 	case reconcileNoAction:
 
 	case reconcileTransitionToCrashed:
-		c.stateManager.SetCrashed(err)
+		failureCandidate := c.stateManager.ConsumeFailureCandidate()
+		finalReason := reason
+		finalErr := err
+		if failureCandidate != nil {
+			finalReason = ReasonRuntimeFailurePrefix + failureCandidate.PatternName
+			if err != nil {
+				finalErr = fmt.Errorf("%s (detected failure: %s)", err.Error(), failureCandidate.Message)
+			} else {
+				finalErr = fmt.Errorf("detected failure: %s", failureCandidate.Message)
+			}
+			logutil.Infof("[RECONCILE] 크래시 원인 후보 첨부: %s - %s", failureCandidate.PatternName, failureCandidate.Message)
+		}
+		c.stateManager.SetCrashed(finalErr)
 		c.notifyStateChange(state.StateCrashed)
 		info := c.stateManager.GetInfo()
-		c.lifecycleLogger.OnServerCrashed(reason, info, containerExists)
-		logutil.Infof("[RECONCILE] Transitioned to Crashed: reason=%s container_exists=%v", reason, containerExists)
+		c.lifecycleLogger.OnServerCrashed(finalReason, info, containerExists)
+		logutil.Infof("[RECONCILE] Transitioned to Crashed: reason=%s container_exists=%v", finalReason, containerExists)
 
 	case reconcileTransitionToStopped:
+		c.stateManager.ClearFailureCandidate()
 		c.stateManager.SetStopped()
 		c.notifyStateChange(state.StateStopped)
 		c.lifecycleLogger.OnServerStopped()
 		logutil.Infof("[RECONCILE] Transitioned to Stopped")
 
 	case reconcileTransitionToRunning:
+		c.stateManager.ClearFailureCandidate()
 		c.stateManager.SetRunning(result.readyDuration)
 		c.notifyStateChange(state.StateRunning)
 		logutil.Infof("[RECONCILE] Transitioned to Running (duration=%v)", result.readyDuration)
@@ -863,22 +879,13 @@ func (c *Controller) runtimeLogWatcherLoop(ctx context.Context) {
 			}
 
 			if failure := checkFailurePatterns(logLine.Text); failure != nil {
-				failureErr := fmt.Errorf("runtime failure: %s", failure.Message)
-				containerState, err := dockerctl.InspectContainer(context.Background(), c.cfg.MCContainerName)
-				containerExists := true
-				if err == nil {
-					containerExists = containerState.Exists
-				}
-				result := c.reconcileState(reconcileInput{
-					currentState:     currentState,
-					containerExists:  containerExists,
-					containerRunning: false,
-					shutdownIntent:   false,
-					reason:           ReasonRuntimeFailurePrefix + failure.PatternName,
-					err:              failureErr,
+				c.stateManager.SetFailureCandidate(&state.FailureCandidate{
+					PatternName: failure.PatternName,
+					Message:     failure.Message,
+					DetectedAt:  time.Now(),
+					RawLog:      logLine.Text,
 				})
-				c.applyReconcileResult(result, ReasonRuntimeFailurePrefix+failure.PatternName, failureErr, containerExists)
-				return
+				logutil.Infof("[LOG_WATCHER] 실패 패턴 감지 (원인 후보로 저장): %s - %s", failure.PatternName, failure.Message)
 			}
 
 			if isShutdownLog(logLine.Text) {

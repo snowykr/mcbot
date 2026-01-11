@@ -139,7 +139,9 @@ func serverMonitorLoop(
 	outcomeCh := make(chan restartOutcome, 1)
 
 	var autoRestartInProgress atomic.Bool
-	var consecutiveFailures int
+	// consecutiveAttempts: 크래시 이후 연속으로 시도된 재시작 횟수.
+	// 성공 시 또는 상태가 Crashed가 아닐 때 0으로 리셋된다.
+	var consecutiveAttempts int
 
 	for {
 		select {
@@ -149,7 +151,7 @@ func serverMonitorLoop(
 
 		case outcome := <-outcomeCh:
 			if outcome.success {
-				consecutiveFailures = 0
+				consecutiveAttempts = 0
 				log.Printf("[LIFECYCLE] event=auto_restart_succeeded attempt=%d", outcome.attempt)
 			}
 
@@ -161,23 +163,23 @@ func serverMonitorLoop(
 			status := controller.Status(ctx)
 
 			if status.State != state.StateCrashed {
-				if consecutiveFailures > 0 {
-					consecutiveFailures = 0
+				if consecutiveAttempts > 0 {
+					consecutiveAttempts = 0
 				}
 				continue
 			}
 
-			if cfg.MaxAutoRecoverAttempts > 0 && consecutiveFailures >= cfg.MaxAutoRecoverAttempts {
+			if cfg.MaxAutoRecoverAttempts > 0 && consecutiveAttempts >= cfg.MaxAutoRecoverAttempts {
 				log.Printf("[MONITOR] 최대 자동 복구 시도 횟수(%d회) 초과, 자동 복구 중단",
 					cfg.MaxAutoRecoverAttempts)
 				continue
 			}
 
 			autoRestartInProgress.Store(true)
-			consecutiveFailures++
+			consecutiveAttempts++
 
 			log.Printf("[LIFECYCLE] event=auto_restart_scheduled attempt=%d/%d",
-				consecutiveFailures, cfg.MaxAutoRecoverAttempts)
+				consecutiveAttempts, cfg.MaxAutoRecoverAttempts)
 
 			if err := statusEmbed.Update(ctx); err != nil {
 				log.Printf("[MONITOR] 크래시 상태 임베드 업데이트 실패: %v", err)
@@ -205,10 +207,7 @@ func serverMonitorLoop(
 					}
 
 					if result.Success {
-						select {
-						case outCh <- restartOutcome{attempt: attempt, success: true}:
-						default:
-						}
+						outCh <- restartOutcome{attempt: attempt, success: true}
 					} else {
 						log.Printf("[LIFECYCLE] event=auto_restart_failed attempt=%d reason=%s",
 							attempt, result.ErrorMessage)
@@ -222,7 +221,7 @@ func serverMonitorLoop(
 				if err := statusEmbed.Update(context.Background()); err != nil {
 					log.Printf("[MONITOR] 재시작 후 임베드 업데이트 실패: %v", err)
 				}
-			}(consecutiveFailures, outcomeCh)
+			}(consecutiveAttempts, outcomeCh)
 		}
 	}
 }
