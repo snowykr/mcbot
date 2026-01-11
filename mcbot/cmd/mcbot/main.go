@@ -66,6 +66,8 @@ func main() {
 		log.Printf("봇이 준비되었습니다: %s#%s", r.User.Username, r.User.Discriminator)
 
 		ctx := context.Background()
+		controller.StartStateChangeWorker(ctx)
+
 		if err := controller.SyncState(ctx); err != nil {
 			log.Printf("초기 상태 동기화 실패: %v", err)
 		} else {
@@ -182,7 +184,12 @@ func serverMonitorLoop(
 			}
 
 			go func(attempt int, outCh chan<- restartOutcome) {
-				defer autoRestartInProgress.Store(false)
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[MONITOR] Auto-restart goroutine recovered from panic: %v", r)
+					}
+					autoRestartInProgress.Store(false)
+				}()
 
 				resultCh := controller.Start(context.Background())
 

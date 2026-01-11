@@ -9,9 +9,16 @@ import (
 	"github.com/snowy/mcbot/internal/dockerctl"
 )
 
+type subscriber struct {
+	ch        chan dockerctl.LogLine
+	mu        sync.Mutex
+	closed    bool
+	closeOnce sync.Once
+}
+
 type LogMultiplexer struct {
 	containerName string
-	subscribers   map[uint64]chan dockerctl.LogLine
+	subscribers   map[uint64]*subscriber
 	nextSubID     uint64
 	mu            sync.RWMutex
 	ctx           context.Context
@@ -24,7 +31,7 @@ type LogMultiplexer struct {
 func NewLogMultiplexer(containerName string) *LogMultiplexer {
 	return &LogMultiplexer{
 		containerName: containerName,
-		subscribers:   make(map[uint64]chan dockerctl.LogLine),
+		subscribers:   make(map[uint64]*subscriber),
 	}
 }
 
@@ -61,19 +68,26 @@ func (m *LogMultiplexer) run(ctx context.Context, since time.Time) {
 
 	for logLine := range logCh {
 		m.mu.RLock()
-		subs := make([]chan dockerctl.LogLine, 0, len(m.subscribers))
-		for _, ch := range m.subscribers {
-			subs = append(subs, ch)
+		subs := make([]*subscriber, 0, len(m.subscribers))
+		for _, sub := range m.subscribers {
+			subs = append(subs, sub)
 		}
 		m.mu.RUnlock()
 
 		for _, sub := range subs {
+			sub.mu.Lock()
+			if sub.closed {
+				sub.mu.Unlock()
+				continue
+			}
 			select {
-			case sub <- logLine:
+			case sub.ch <- logLine:
 			case <-ctx.Done():
+				sub.mu.Unlock()
 				return
 			default:
 			}
+			sub.mu.Unlock()
 		}
 	}
 }
@@ -93,18 +107,32 @@ func (m *LogMultiplexer) Subscribe() Subscription {
 		return Subscription{Ch: ch, Unsubscribe: func() {}}
 	}
 
-	ch := make(chan dockerctl.LogLine, 100)
+	s := &subscriber{ch: make(chan dockerctl.LogLine, 100)}
 	subID := m.nextSubID
 	m.nextSubID++
-	m.subscribers[subID] = ch
+	m.subscribers[subID] = s
+
+	var once sync.Once
 
 	unsubscribe := func() {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		delete(m.subscribers, subID)
+		once.Do(func() {
+			m.mu.Lock()
+			delete(m.subscribers, subID)
+			m.mu.Unlock()
+
+			s.closeOnce.Do(func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if s.closed {
+					return
+				}
+				s.closed = true
+				close(s.ch)
+			})
+		})
 	}
 
-	return Subscription{Ch: ch, Unsubscribe: unsubscribe}
+	return Subscription{Ch: s.ch, Unsubscribe: unsubscribe}
 }
 
 func (m *LogMultiplexer) Stop() {
@@ -131,6 +159,11 @@ func (m *LogMultiplexer) Close() {
 	m.closed = true
 	cancel := m.cancel
 	isRunning := m.running
+	subs := make([]*subscriber, 0, len(m.subscribers))
+	for _, sub := range m.subscribers {
+		subs = append(subs, sub)
+	}
+	m.subscribers = nil
 	m.mu.Unlock()
 
 	if isRunning && cancel != nil {
@@ -138,10 +171,15 @@ func (m *LogMultiplexer) Close() {
 		m.wg.Wait()
 	}
 
-	m.mu.Lock()
-	for _, sub := range m.subscribers {
-		close(sub)
+	for _, sub := range subs {
+		sub.closeOnce.Do(func() {
+			sub.mu.Lock()
+			defer sub.mu.Unlock()
+			if sub.closed {
+				return
+			}
+			sub.closed = true
+			close(sub.ch)
+		})
 	}
-	m.subscribers = nil
-	m.mu.Unlock()
 }

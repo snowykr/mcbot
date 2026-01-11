@@ -587,7 +587,7 @@ func TestLogMultiplexer_UnsubscribeIdempotent(t *testing.T) {
 	t.Log("Multiple unsubscribe calls are safe (idempotent)")
 }
 
-func TestLogMultiplexer_UnsubscribeDoesNotCloseChannel(t *testing.T) {
+func TestLogMultiplexer_UnsubscribeClosesChannel(t *testing.T) {
 	mux := NewLogMultiplexer("test_container")
 	mux.Start(time.Now())
 	defer mux.Close()
@@ -597,11 +597,11 @@ func TestLogMultiplexer_UnsubscribeDoesNotCloseChannel(t *testing.T) {
 
 	select {
 	case _, ok := <-sub.Ch:
-		if !ok {
-			t.Fatal("Channel should not be closed after Unsubscribe")
+		if ok {
+			t.Fatal("Channel should be closed after Unsubscribe")
 		}
 	case <-time.After(100 * time.Millisecond):
-		t.Log("Channel remains open after Unsubscribe as expected")
+		t.Fatal("Expected subscription channel to be closed after Unsubscribe")
 	}
 }
 
@@ -637,10 +637,11 @@ func TestLogMultiplexer_ConcurrentUnsubscribe(t *testing.T) {
 	for i, sub := range subscriptions {
 		select {
 		case _, ok := <-sub.Ch:
-			if !ok {
-				t.Fatalf("Subscription channel %d was closed after concurrent unsubscribe", i)
+			if ok {
+				t.Fatalf("Subscription channel %d should be closed after concurrent unsubscribe", i)
 			}
-		default:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("Timeout waiting for subscription channel %d to close", i)
 		}
 	}
 

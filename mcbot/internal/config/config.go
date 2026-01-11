@@ -127,7 +127,7 @@ func getEnvBoolOrDefault(key string, defaultVal bool) bool {
 		case "false", "0", "no", "off":
 			return false
 		default:
-			log.Printf("[WARN] %s: unrecognized value %q for %s, using default value %v", key, val, key, defaultVal)
+			log.Printf("[WARN] unrecognized boolean value %q for %s, using default %v", val, key, defaultVal)
 		}
 	}
 	return defaultVal
