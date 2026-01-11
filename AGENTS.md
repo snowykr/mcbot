@@ -21,9 +21,9 @@ make nuke               # Remove containers + volumes
 
 # Unit tests
 make test               # go test ./...
-make test-race          # go test -race ./...
+make test-race          # go test -race ./... (ALWAYS run before PR)
 
-# Integration tests (require Docker)
+# Integration tests (require Docker, ~5-10 min)
 make test-integration   # -tags=integration
 make test-all           # test-race + test-integration
 
@@ -33,6 +33,10 @@ cd mcbot && go test -v -run TestIntegration_ -tags=integration ./internal/mcserv
 
 # Run tests in a specific package
 cd mcbot && go test -v ./internal/discord/...
+cd mcbot && go test -v ./internal/mcserver/...
+
+# Clean up stale test containers
+make test-integration-clean
 ```
 
 ## Project Structure
@@ -72,25 +76,13 @@ import (
 - **Packages**: short, lowercase, no underscores
 - **Types/Constants**: PascalCase (`ServerState`, `StateStopped`)
 - **Test functions**: `Test<Type>_<Scenario>` (e.g., `TestControllerStart_FromStoppedState`)
-
-### Type Definitions
-```go
-type ServerState int
-
-const (
-    StateStopped ServerState = iota
-    StateStarting
-    StateRunning
-)
-
-func (s ServerState) String() string { ... }
-func (s ServerState) Korean() string { ... }  // Korean localization
-```
+- **Interfaces**: Define at the consumer, not provider (see `ServerController` in handler.go)
 
 ### Error Handling
 - Return `error` as last return value
 - Wrap errors with context: `fmt.Errorf("failed to X: %w", err)`
 - Use custom error types for state transitions (`TransitionError`)
+- Never suppress errors with `_ = err`
 
 ### Concurrency Patterns
 - `sync.Mutex` / `sync.RWMutex` for shared state
@@ -99,11 +91,12 @@ func (s ServerState) Korean() string { ... }  // Korean localization
 - `sync.WaitGroup` for goroutine coordination
 
 ```go
-// Async operation pattern
-func (c *Controller) Start(ctx context.Context) <-chan StartResult {
+// Async operation pattern (standard in this codebase)
+func (c *Controller) Start(_ context.Context) <-chan StartResult {
     resultCh := make(chan StartResult, 1)
     go func() {
         defer close(resultCh)
+        // ... operation logic
         resultCh <- result
     }()
     return resultCh
@@ -121,11 +114,7 @@ logutil.Debugf("[STATE] Debug info")        // Only when MCBOT_DEBUG=true
 - Unit tests: `*_test.go` without build tags
 - Integration tests: `//go:build integration` tag
 - Always `defer controller.Shutdown()` after creating controllers
-
-### Docker Interaction
-- Uses `exec.CommandContext` with docker CLI (not Docker SDK)
-- Container inspection via `docker inspect` with format templates
-- Log following via `docker logs -f --since`
+- Use `-race` flag to detect race conditions
 
 ### Configuration
 All config via environment variables with defaults in code:
@@ -143,9 +132,42 @@ Running -> Stopping (on stop) | Crashed (on unexpected stop)
 Stopping -> Stopped (on success)
 ```
 
+### Crash Reason Constants
+All crash reasons are defined in `internal/mcserver/crash_reason.go`:
+```go
+const (
+    ReasonRuntimeContainerStopped        = "runtime_container_stopped"
+    ReasonRuntimeInspectFailedRepeatedly = "runtime_inspect_failed_repeatedly"
+    ReasonRuntimeFailurePrefix           = "runtime_failure_"
+    ReasonRuntimeNormalShutdown          = "runtime_normal_shutdown"
+    ReasonSyncDetectedUnexpectedStop     = "sync_detected_unexpected_stop"
+    // ... see file for full list
+)
+```
+**Rule**: Always use these constants, never string literals.
+
+## Key Architecture Decisions
+
+### Context Lifecycle Separation
+- Discord interaction context and server operation context are fully separated
+- `Controller.Start/Stop` ignore external context and use `context.Background()`
+- This ensures server operations continue even if Discord request times out
+
+### LogMultiplexer Lifecycle
+- Subscriber channels persist across Start/Stop cycles (only closed on Close)
+- Stop() cancels the current FollowLogs but keeps channels open for reconnection
+- Close() is called only in Controller.Shutdown()
+
+### Shutdown Intent Detection
+- Uses `shutdownIntentFromInside` atomic bool to distinguish crash vs graceful shutdown
+- Container watcher waits for log watcher to finish (via `logWatcherDoneCh`) before deciding
+- Grace period (`ShutdownIntentGracePeriod = 2s`) prevents false crash detection
+
 ## Don'ts
+
 - Don't use Docker SDK - this project uses CLI for simplicity
 - Don't suppress errors with `_ = err`
 - Don't use global state - pass dependencies via constructors
 - Don't block the main goroutine - use async patterns
 - Don't skip `defer controller.Shutdown()` in tests
+- Don't use string literals for crash reasons - use constants from `crash_reason.go`
