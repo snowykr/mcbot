@@ -2,6 +2,7 @@ package dockerctl
 
 import (
 	"context"
+	"os/exec"
 	"sync"
 	"testing"
 	"time"
@@ -149,4 +150,80 @@ func TestFollowLogs_NoPanicOnRapidCancellation(t *testing.T) {
 	}
 
 	t.Log("No panic occurred during rapid cancellation tests")
+}
+
+func TestInspectContainer_NonExistentContainer(t *testing.T) {
+	ctx := context.Background()
+
+	state, err := InspectContainer(ctx, "test_container_that_definitely_does_not_exist_12345")
+
+	if err != nil {
+		t.Fatalf("Expected no error for non-existent container, got: %v", err)
+	}
+
+	if state == nil {
+		t.Fatal("Expected ContainerState to be returned, got nil")
+	}
+
+	if state.Exists {
+		t.Error("Expected Exists to be false for non-existent container")
+	}
+
+	if state.Running {
+		t.Error("Expected Running to be false for non-existent container")
+	}
+}
+
+func TestInspectContainer_StderrPatternMatching(t *testing.T) {
+	testCases := []struct {
+		name           string
+		stderrVariant  string
+		shouldBeExists bool
+	}{
+		{
+			name:           "Docker 'No such object' (capitalized)",
+			stderrVariant:  "Error: No such object: test-container",
+			shouldBeExists: false,
+		},
+		{
+			name:           "Docker 'no such object' (lowercase)",
+			stderrVariant:  "error: no such object: test-container",
+			shouldBeExists: false,
+		},
+		{
+			name:           "Docker 'No such container'",
+			stderrVariant:  "Error: No such container: test-container",
+			shouldBeExists: false,
+		},
+		{
+			name:           "Docker 'no such container' (lowercase)",
+			stderrVariant:  "error: no such container: test-container",
+			shouldBeExists: false,
+		},
+		{
+			name:           "Mixed case 'No Such Object'",
+			stderrVariant:  "Error: No Such Object: test-container",
+			shouldBeExists: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			exitErr := &exec.ExitError{Stderr: []byte(tc.stderrVariant)}
+			stderr := string(exitErr.Stderr)
+			t.Logf("Testing stderr pattern: %q", stderr)
+
+			isNoSuch := isNoSuchContainerError(stderr)
+			if tc.shouldBeExists {
+				if isNoSuch {
+					t.Fatalf("Expected container to exist for stderr %q", stderr)
+				}
+				return
+			}
+
+			if !isNoSuch {
+				t.Fatalf("Expected 'no such' pattern to be detected for stderr %q", stderr)
+			}
+		})
+	}
 }

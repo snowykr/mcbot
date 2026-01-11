@@ -1,0 +1,39 @@
+services:
+  mc-test:
+    image: itzg/minecraft-server
+    tty: true
+    stdin_open: true
+    restart: "no"
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.20.1"
+      TYPE: "VANILLA"
+      ONLINE_MODE: "FALSE"
+      
+      # 테스트용 경량 설정
+      MEMORY: "1G"
+      INIT_MEMORY: "512M"
+      
+      # 빠른 시작을 위한 설정
+      DIFFICULTY: "peaceful"
+      MAX_PLAYERS: "2"
+      VIEW_DISTANCE: "4"
+      SIMULATION_DISTANCE: "4"
+      
+      # 로그 출력 최적화
+      ENABLE_ROLLING_LOGS: "false"
+      
+      # 테스트 시나리오용 설정
+      ENABLE_RCON: "true"
+      RCON_PASSWORD: "test"
+      
+    volumes:
+      - mc-test-data:/data
+    
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+volumes:
+  mc-test-data:

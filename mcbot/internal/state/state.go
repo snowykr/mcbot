@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/snowy/mcbot/internal/logutil"
 )
 
 type ServerState int
@@ -14,6 +16,7 @@ const (
 	StateRunning
 	StateStopping
 	StateError
+	StateCrashed
 )
 
 func (s ServerState) String() string {
@@ -28,6 +31,8 @@ func (s ServerState) String() string {
 		return "stopping"
 	case StateError:
 		return "error"
+	case StateCrashed:
+		return "crashed"
 	default:
 		return "unknown"
 	}
@@ -45,22 +50,42 @@ func (s ServerState) Korean() string {
 		return "종료 중"
 	case StateError:
 		return "오류"
+	case StateCrashed:
+		return "종료됨(크래시)"
 	default:
 		return "알 수 없음"
 	}
 }
 
+// FailureCandidate represents a detected failure pattern that may explain a crash.
+// This is stored as a "candidate" until the container actually stops, at which point
+// it becomes the crash reason. TTL-based expiration prevents stale candidates from
+// being incorrectly attributed to later crashes.
+type FailureCandidate struct {
+	PatternName string
+	Message     string
+	DetectedAt  time.Time
+	RawLog      string
+}
+
+// DefaultFailureCandidateTTL is the default time-to-live for failure candidates.
+// If the container doesn't crash within this duration, the candidate is considered stale.
+const DefaultFailureCandidateTTL = 2 * time.Minute
+
 type Manager struct {
-	mu                sync.RWMutex
-	state             ServerState
-	lastStartTime     time.Time
-	lastReadyDuration time.Duration
-	lastError         error
+	mu                  sync.RWMutex
+	state               ServerState
+	lastStartTime       time.Time
+	lastReadyDuration   time.Duration
+	lastError           error
+	failureCandidate    *FailureCandidate
+	failureCandidateTTL time.Duration
 }
 
 func NewManager() *Manager {
 	return &Manager{
-		state: StateStopped,
+		state:               StateStopped,
+		failureCandidateTTL: DefaultFailureCandidateTTL,
 	}
 }
 
@@ -73,7 +98,9 @@ func (m *Manager) GetState() ServerState {
 func (m *Manager) SetState(s ServerState) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	oldState := m.state
 	m.state = s
+	logutil.Debugf("[STATE] SetState: %s -> %s", oldState.Korean(), m.state.Korean())
 }
 
 func (m *Manager) TryTransition(from, to ServerState) bool {
@@ -115,7 +142,7 @@ func (m *Manager) TryStartTransition() error {
 			CurrentState: m.state,
 			Message:      "서버가 종료 중입니다. 종료가 완료된 후 다시 시도해주세요.",
 		}
-	case StateStopped, StateError:
+	case StateStopped, StateError, StateCrashed:
 		m.state = StateStarting
 		m.lastStartTime = time.Now()
 		m.lastError = nil
@@ -131,7 +158,7 @@ func (m *Manager) TryStartTransition() error {
 func (m *Manager) SetStarting() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.state != StateStopped && m.state != StateError {
+	if m.state != StateStopped && m.state != StateError && m.state != StateCrashed {
 		return false
 	}
 	m.state = StateStarting
@@ -143,8 +170,10 @@ func (m *Manager) SetStarting() bool {
 func (m *Manager) SetRunning(readyDuration time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	oldState := m.state
 	m.state = StateRunning
 	m.lastReadyDuration = readyDuration
+	logutil.Debugf("[STATE] SetRunning: %s -> %s (duration: %v)", oldState.Korean(), m.state.Korean(), readyDuration)
 }
 
 func (m *Manager) TryStopTransition() error {
@@ -167,7 +196,7 @@ func (m *Manager) TryStopTransition() error {
 			CurrentState: m.state,
 			Message:      "서버가 시작 중입니다. 시작이 완료된 후 다시 시도해주세요.",
 		}
-	case StateRunning, StateError:
+	case StateRunning, StateError, StateCrashed:
 		m.state = StateStopping
 		return nil
 	default:
@@ -191,7 +220,9 @@ func (m *Manager) SetStopping() bool {
 func (m *Manager) SetStopped() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	oldState := m.state
 	m.state = StateStopped
+	logutil.Debugf("[STATE] SetStopped: %s -> %s", oldState.Korean(), m.state.Korean())
 }
 
 func (m *Manager) SetStoppedWithError(err error) {
@@ -206,6 +237,15 @@ func (m *Manager) SetError(err error) {
 	defer m.mu.Unlock()
 	m.state = StateError
 	m.lastError = err
+}
+
+func (m *Manager) SetCrashed(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	oldState := m.state
+	m.state = StateCrashed
+	m.lastError = err
+	logutil.Infof("[STATE] SetCrashed: %s -> %s (err: %v)", oldState.Korean(), m.state.Korean(), err)
 }
 
 func (m *Manager) GetLastStartTime() time.Time {
@@ -231,6 +271,7 @@ type Info struct {
 	LastStartTime     time.Time
 	LastReadyDuration time.Duration
 	LastError         error
+	FailureCandidate  *FailureCandidate
 }
 
 func (m *Manager) GetInfo() Info {
@@ -241,5 +282,52 @@ func (m *Manager) GetInfo() Info {
 		LastStartTime:     m.lastStartTime,
 		LastReadyDuration: m.lastReadyDuration,
 		LastError:         m.lastError,
+		FailureCandidate:  m.getValidFailureCandidateLocked(),
 	}
+}
+
+func (m *Manager) SetFailureCandidate(candidate *FailureCandidate) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failureCandidate = candidate
+	logutil.Debugf("[STATE] SetFailureCandidate: pattern=%s message=%s", candidate.PatternName, candidate.Message)
+}
+
+func (m *Manager) GetFailureCandidate() *FailureCandidate {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getValidFailureCandidateLocked()
+}
+
+func (m *Manager) getValidFailureCandidateLocked() *FailureCandidate {
+	if m.failureCandidate == nil {
+		return nil
+	}
+	if time.Since(m.failureCandidate.DetectedAt) > m.failureCandidateTTL {
+		return nil
+	}
+	return m.failureCandidate
+}
+
+func (m *Manager) ClearFailureCandidate() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failureCandidate != nil {
+		logutil.Debugf("[STATE] ClearFailureCandidate: cleared pattern=%s", m.failureCandidate.PatternName)
+	}
+	m.failureCandidate = nil
+}
+
+func (m *Manager) ConsumeFailureCandidate() *FailureCandidate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	candidate := m.getValidFailureCandidateLocked()
+	m.failureCandidate = nil
+	return candidate
+}
+
+func (m *Manager) SetFailureCandidateTTL(ttl time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failureCandidateTTL = ttl
 }

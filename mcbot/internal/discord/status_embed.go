@@ -206,3 +206,37 @@ func (m *StatusEmbedManager) UpdateWithPresence(presence mcserver.PresenceState)
 
 	return fmt.Errorf("메시지 업데이트 재시도 횟수 초과: unknown message 에러가 지속됨")
 }
+
+func (m *StatusEmbedManager) UpdateToOffline() error {
+	m.mu.RLock()
+	msgID := m.messageID
+	m.mu.RUnlock()
+
+	if msgID == "" {
+		log.Printf("상시 임베드가 아직 초기화되지 않아 오프라인 업데이트를 건너뜁니다")
+		return nil
+	}
+
+	embed := EmbedBotOffline()
+	button := BuildOfflineButton()
+
+	embeds := []*discordgo.MessageEmbed{embed}
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{button},
+		},
+	}
+
+	_, err := m.session.ChannelMessageEditComplex(&discordgo.MessageEdit{
+		Channel:    m.cfg.EmbedChannelID,
+		ID:         msgID,
+		Embeds:     &embeds,
+		Components: &components,
+	})
+
+	if err != nil {
+		return fmt.Errorf("오프라인 상태 업데이트 실패: %w", err)
+	}
+
+	return nil
+}

@@ -19,8 +19,11 @@ func newMockLogMultiplexer() *mockLogMultiplexer {
 	}
 }
 
-func (m *mockLogMultiplexer) Subscribe() <-chan dockerctl.LogLine {
-	return m.ch
+func (m *mockLogMultiplexer) Subscribe() Subscription {
+	return Subscription{
+		Ch:          m.ch,
+		Unsubscribe: func() {},
+	}
 }
 
 func (m *mockLogMultiplexer) sendLog(text string) {

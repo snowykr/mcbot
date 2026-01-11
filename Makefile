@@ -34,3 +34,35 @@ nuke:
 
 logs:
 	docker compose logs -f
+
+# 테스트 관련 타겟
+.PHONY: test test-race test-integration test-integration-verbose test-integration-clean test-all
+
+test:
+	cd $(GO_DIR) && go test ./...
+
+test-race:
+	cd $(GO_DIR) && go test -race ./...
+
+test-integration:
+	cd $(GO_DIR) && go test -tags=integration -v ./internal/mcserver/...
+
+test-integration-verbose:
+	cd $(GO_DIR) && go test -tags=integration -v -count=1 ./internal/mcserver/...
+
+test-integration-clean:
+	@echo "통합 테스트 잔여 리소스 정리 중..."
+	@for network in $$(docker network ls --filter "name=mcbot_test_" --format "{{.Name}}"); do \
+		project=$$(echo $$network | sed 's/_default$$//'); \
+		if [ "$$project" != "$$network" ]; then \
+			echo "프로젝트 정리: $$project"; \
+			docker compose -p $$project -f docker-compose.test.yml down -v --remove-orphans 2>/dev/null || true; \
+		fi; \
+	done
+	@echo "남은 리소스 강제 정리 중..."
+	@docker ps -a --filter "name=mcbot_test_" --format "{{.Names}}" | xargs -r docker rm -f 2>/dev/null || true
+	@docker network ls --filter "name=mcbot_test_" --format "{{.Name}}" | xargs -r docker network rm 2>/dev/null || true
+	@docker volume ls --filter "name=mcbot_test_" --format "{{.Name}}" | xargs -r docker volume rm 2>/dev/null || true
+	@echo "정리 완료"
+
+test-all: test-race test-integration
