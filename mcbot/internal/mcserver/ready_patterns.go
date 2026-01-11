@@ -42,3 +42,17 @@ func newReadyMatchers() ([]readyPattern, error) {
 func parseLoadSeconds(s string) (float64, error) {
 	return strconv.ParseFloat(s, 64)
 }
+
+func matchesReadyPattern(logText string, patterns []readyPattern) (bool, float64) {
+	for _, pattern := range patterns {
+		matches := pattern.re.FindStringSubmatch(logText)
+		if len(matches) >= 2 {
+			loadSeconds, err := parseLoadSeconds(matches[1])
+			if err != nil {
+				continue
+			}
+			return true, loadSeconds
+		}
+	}
+	return false, 0
+}

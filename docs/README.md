@@ -6,7 +6,7 @@
 
 ### 상시 임베드 메시지
 - 지정된 채널에 서버 상태를 실시간으로 표시하는 고정 메시지
-- 서버 상태 표시: 🟢 열림 / 🟡 여는중, 닫는중 / 🔴 닫힘
+- 서버 상태 표시: 🟢 열림 / 🟡 여는중, 닫는중 / 🔴 닫힘, 크래시 / ⚫ 봇 오프라인
 - 현재 접속 중인 플레이어 목록 실시간 업데이트
 - 메시지가 삭제되거나 누락된 경우 자동으로 새 메시지를 생성하여 복구
 - 버튼을 통한 서버 시작/종료 제어
@@ -18,11 +18,17 @@
     - 다른 사용자는 해당 확인/취소 버튼을 사용할 수 없음
   - `서버 여는중` - 서버 시작 중일 때 표시 (비활성화)
   - `서버 닫는중` - 서버 종료 중일 때 표시 (비활성화)
+  - `봇 오프라인` - 봇이 종료되었을 때 표시 (비활성화, 회색)
 
 ### 자동 상태 동기화
 - 컨테이너가 이미 실행 중인 상태에서 봇만 재시작돼도 로그 스트림을 재연결
 - 재연결된 로그를 기반으로 플레이어 트래커가 즉시 join/leave 이벤트를 수집
 - 버튼 인터랙션은 서버 상태 enum(`internal/state`)에 기반해 안전하게 분기
+
+### 봇 오프라인 상태 표시
+- 봇이 정상 종료될 때 상시 임베드가 "⚫ 봇 오프라인" 상태로 변경됨
+- 버튼이 "봇 오프라인"으로 표시되고 비활성화되어 사용자에게 봇 상태를 명확히 전달
+- 봇이 다시 시작되면 자동으로 현재 서버 상태로 업데이트됨
 
 ## 사전 요구사항
 
@@ -164,6 +170,12 @@ docker compose up -d mcbot
 | `EMBED_UPDATE_TIMEOUT_SECONDS` | ❌ | `10`                      | 임베드 메시지 업데이트 타임아웃 (초, Discord로 상태 임베드를 전송/수정할 때의 최대 대기 시간) |
 | `MC_JOIN_LOG_PATTERN` | ❌ | `]: (.+) joined the game` | 플레이어 접속 로그 패턴 (정규식) |
 | `MC_LEAVE_LOG_PATTERN` | ❌ | `]: (.+) left the game`   | 플레이어 퇴장 로그 패턴 (정규식) |
+| `AUTO_RECOVER_ENABLED` | ❌ | `true` | 크래시 후 자동 복구 활성화 여부 |
+| `AUTO_RECOVER_INTERVAL_SECONDS` | ❌ | `30` | 자동 복구 시도 간격 (초) |
+| `MAX_AUTO_RECOVER_ATTEMPTS` | ❌ | `3` | 최대 자동 복구 시도 횟수 |
+| `CRASH_DETECTION_INTERVAL_SECONDS` | ❌ | `2` | 컨테이너 상태 감시 주기 (초) |
+| `MAX_INSPECT_FAILURE_ATTEMPTS` | ❌ | `3` | 컨테이너 상태 확인 연속 실패 허용 횟수 |
+| `MCBOT_DEBUG` | ❌ | `false` | 디버그 로그 활성화 (`true` 또는 `1`로 설정) |
 
 ### 서버 준비 완료 자동 감지
 
@@ -202,11 +214,12 @@ mcbot은 대표적인 Minecraft 서버 이미지의 "서버 준비 완료" 로�
 - **StateRunning**: 서버 실행 중
 - **StateStopping**: 서버 종료 중
 - **StateError**: 실제 런타임 예외 발생 (docker 명령 실패, 타임아웃 등)
+- **StateCrashed**: 런타임 중 비정상 종료 감지 (크래시)
 
 ### 상태 전이 규칙
 
-- `Stopped` 또는 `Error` → `Start` 가능
-- `Running` 또는 `Error` → `Stop` 가능
+- `Stopped`, `Error`, `Crashed` → `Start` 가능
+- `Running`, `Error`, `Crashed` → `Stop` 가능
 - 전환 중 상태(`Starting`, `Stopping`)에서는 다른 명령 거부
 
 ### 에러 처리 원칙 (2024-12-23 개선)
@@ -225,6 +238,26 @@ mcbot은 대표적인 Minecraft 서버 이미지의 "서버 준비 완료" 로�
 - 서버 라이프사이클 상태와 인프라 provisioning 상태를 분리
 - Start/Stop 간 일관성 확보: 컨테이너 없음은 모두 Stopped로 처리
 - `StateError`는 실제 예외 상황에만 사용하여 의미 명확화
+
+### 크래시 감지 및 reason 규약
+
+런타임 중 서버 크래시가 감지되면 `StateCrashed` 상태로 전이되며, 크래시 원인을 나타내는 `reason` 문자열이 로그에 기록됩니다.
+
+**reason 값은 `internal/mcserver/crash_reason.go`에 상수로 정의**되어 있으며, 로그 분석 및 모니터링 호환성을 위해 값 자체는 안정적으로 유지됩니다.
+
+**정의된 reason 상수:**
+- `runtime_container_stopped`: 런타임 중 컨테이너가 예기치 않게 종료됨
+- `runtime_inspect_failed_repeatedly`: 컨테이너 상태 확인이 연속으로 실패
+- `runtime_failure_*`: 런타임 로그에서 실패 패턴 감지 (예: 메모리 부족)
+- `runtime_normal_shutdown`: 서버 내부에서 정상 종료 시작 후 종료됨
+- `sync_detected_unexpected_stop`: 동기화 중 예기치 않은 종료 감지
+- `sync_log_stream_ended`: 시작 중 로그 스트림이 종료됨
+- `sync_container_inspect_failed`: 시작 중 컨테이너 상태 확인 실패
+- `sync_container_stopped`: 시작 중 컨테이너가 종료됨
+- `sync_timeout`: 시작 중 준비 완료 타임아웃 초과
+- `log_stream_ended_unexpectedly`: 로그 스트림이 예기치 않게 종료됨
+
+**규칙**: 새로운 크래시 원인을 추가할 때는 반드시 `crash_reason.go`에 상수로 정의하고, 문자열 리터럴 대신 상수를 참조해야 합니다.
 
 ## 프로젝트 구조
 

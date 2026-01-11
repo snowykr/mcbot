@@ -9,7 +9,7 @@ import (
 )
 
 type LogSubscriber interface {
-	Subscribe() <-chan dockerctl.LogLine
+	Subscribe() Subscription
 }
 
 type PlayerTracker struct {
@@ -18,6 +18,10 @@ type PlayerTracker struct {
 	joinPattern  *regexp.Regexp
 	leavePattern *regexp.Regexp
 	onChange     func([]string)
+	subscription *Subscription
+	done         chan struct{}
+	wg           sync.WaitGroup
+	closeOnce    sync.Once
 }
 
 func NewPlayerTracker(subscriber LogSubscriber, joinPattern, leavePattern string) (*PlayerTracker, error) {
@@ -31,52 +35,67 @@ func NewPlayerTracker(subscriber LogSubscriber, joinPattern, leavePattern string
 		return nil, err
 	}
 
+	sub := subscriber.Subscribe()
+
 	tracker := &PlayerTracker{
 		players:      make(map[string]struct{}),
 		joinPattern:  joinRegex,
 		leavePattern: leaveRegex,
+		subscription: &sub,
+		done:         make(chan struct{}),
 	}
 
-	logCh := subscriber.Subscribe()
-	go tracker.processLogs(logCh)
+	tracker.wg.Add(1)
+	go tracker.processLogs(sub.Ch)
 
 	return tracker, nil
 }
 
 func (t *PlayerTracker) processLogs(logCh <-chan dockerctl.LogLine) {
-	for logLine := range logCh {
-		if logLine.Err != nil {
-			continue
-		}
+	defer t.wg.Done()
 
-		if matches := t.joinPattern.FindStringSubmatch(logLine.Text); len(matches) >= 2 {
-			playerName := matches[1]
-			t.mu.Lock()
-			t.players[playerName] = struct{}{}
-			players := t.getPlayersLocked()
-			callback := t.onChange
-			t.mu.Unlock()
-
-			log.Printf("플레이어 접속: %s (현재 %d명)", playerName, len(players))
-
-			if callback != nil {
-				callback(players)
+	for {
+		select {
+		case <-t.done:
+			return
+		case logLine, ok := <-logCh:
+			if !ok {
+				return
 			}
-			continue
-		}
 
-		if matches := t.leavePattern.FindStringSubmatch(logLine.Text); len(matches) >= 2 {
-			playerName := matches[1]
-			t.mu.Lock()
-			delete(t.players, playerName)
-			players := t.getPlayersLocked()
-			callback := t.onChange
-			t.mu.Unlock()
+			if logLine.Err != nil {
+				continue
+			}
 
-			log.Printf("플레이어 퇴장: %s (현재 %d명)", playerName, len(players))
+			if matches := t.joinPattern.FindStringSubmatch(logLine.Text); len(matches) >= 2 {
+				playerName := matches[1]
+				t.mu.Lock()
+				t.players[playerName] = struct{}{}
+				players := t.getPlayersLocked()
+				callback := t.onChange
+				t.mu.Unlock()
 
-			if callback != nil {
-				callback(players)
+				log.Printf("플레이어 접속: %s (현재 %d명)", playerName, len(players))
+
+				if callback != nil {
+					callback(players)
+				}
+				continue
+			}
+
+			if matches := t.leavePattern.FindStringSubmatch(logLine.Text); len(matches) >= 2 {
+				playerName := matches[1]
+				t.mu.Lock()
+				delete(t.players, playerName)
+				players := t.getPlayersLocked()
+				callback := t.onChange
+				t.mu.Unlock()
+
+				log.Printf("플레이어 퇴장: %s (현재 %d명)", playerName, len(players))
+
+				if callback != nil {
+					callback(players)
+				}
 			}
 		}
 	}
@@ -112,4 +131,16 @@ func (t *PlayerTracker) Clear() {
 	if callback != nil {
 		callback(players)
 	}
+}
+
+func (t *PlayerTracker) Close() {
+	t.closeOnce.Do(func() {
+		close(t.done)
+
+		if t.subscription != nil {
+			t.subscription.Unsubscribe()
+		}
+
+		t.wg.Wait()
+	})
 }

@@ -2,9 +2,12 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/snowy/mcbot/internal/logutil"
 )
 
 type Config struct {
@@ -18,6 +21,12 @@ type Config struct {
 	MCLeaveLogPattern      string
 	EmbedUpdateTimeout     time.Duration
 	ServerOperationTimeout time.Duration
+	AutoRecoverEnabled     bool
+	AutoRecoverInterval    time.Duration
+	MaxAutoRecoverAttempts int
+
+	CrashDetectionInterval    time.Duration
+	MaxInspectFailureAttempts int
 }
 
 func Load() (*Config, error) {
@@ -40,6 +49,18 @@ func Load() (*Config, error) {
 	serverOpTimeoutSec := getEnvIntOrDefault("SERVER_OPERATION_TIMEOUT_SECONDS", 720)
 	cfg.ServerOperationTimeout = time.Duration(serverOpTimeoutSec) * time.Second
 
+	cfg.AutoRecoverEnabled = getEnvBoolOrDefault("AUTO_RECOVER_ENABLED", true)
+
+	autoRecoverIntervalSec := getEnvIntOrDefault("AUTO_RECOVER_INTERVAL_SECONDS", 30)
+	cfg.AutoRecoverInterval = time.Duration(autoRecoverIntervalSec) * time.Second
+
+	cfg.MaxAutoRecoverAttempts = getEnvIntOrDefault("MAX_AUTO_RECOVER_ATTEMPTS", 3)
+
+	crashDetectionIntervalSec := getEnvIntOrDefault("CRASH_DETECTION_INTERVAL_SECONDS", 2)
+	cfg.CrashDetectionInterval = time.Duration(crashDetectionIntervalSec) * time.Second
+
+	cfg.MaxInspectFailureAttempts = getEnvIntOrDefault("MAX_INSPECT_FAILURE_ATTEMPTS", 3)
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -60,6 +81,38 @@ func (c *Config) validate() error {
 	if c.EmbedChannelID == "" {
 		return errors.New("EMBED_CHANNEL_ID is required")
 	}
+	if c.ReadyTimeout <= 0 {
+		return errors.New("READY_TIMEOUT_SECONDS must be positive")
+	}
+	if c.EmbedUpdateTimeout <= 0 {
+		return errors.New("EMBED_UPDATE_TIMEOUT_SECONDS must be positive")
+	}
+	if c.ServerOperationTimeout <= 0 {
+		return errors.New("SERVER_OPERATION_TIMEOUT_SECONDS must be positive")
+	}
+	if c.StopTimeoutSeconds < 0 {
+		return errors.New("STOP_TIMEOUT_SECONDS must be non-negative (0 = immediate stop)")
+	}
+	stopTimeoutBuffer := 30 * time.Second
+	minServerOpTimeout := time.Duration(c.StopTimeoutSeconds)*time.Second + stopTimeoutBuffer
+	if c.ServerOperationTimeout < minServerOpTimeout {
+		return fmt.Errorf("SERVER_OPERATION_TIMEOUT_SECONDS (%v) must be at least STOP_TIMEOUT_SECONDS + %v (minimum: %v)",
+			c.ServerOperationTimeout, stopTimeoutBuffer, minServerOpTimeout)
+	}
+	if c.AutoRecoverEnabled {
+		if c.AutoRecoverInterval <= 0 {
+			return errors.New("AUTO_RECOVER_INTERVAL_SECONDS must be positive")
+		}
+		if c.MaxAutoRecoverAttempts < 0 {
+			return errors.New("MAX_AUTO_RECOVER_ATTEMPTS must be non-negative (0 = unlimited)")
+		}
+	}
+	if c.CrashDetectionInterval <= 0 {
+		return errors.New("CRASH_DETECTION_INTERVAL_SECONDS must be positive")
+	}
+	if c.MaxInspectFailureAttempts < 1 {
+		return errors.New("MAX_INSPECT_FAILURE_ATTEMPTS must be at least 1")
+	}
 	return nil
 }
 
@@ -74,6 +127,20 @@ func getEnvIntOrDefault(key string, defaultVal int) int {
 	if val := os.Getenv(key); val != "" {
 		if intVal, err := strconv.Atoi(val); err == nil {
 			return intVal
+		}
+	}
+	return defaultVal
+}
+
+func getEnvBoolOrDefault(key string, defaultVal bool) bool {
+	if val := os.Getenv(key); val != "" {
+		switch val {
+		case "true", "1", "yes", "on":
+			return true
+		case "false", "0", "no", "off":
+			return false
+		default:
+			logutil.Infof("[WARN] unrecognized boolean value %q for %s, using default %v", val, key, defaultVal)
 		}
 	}
 	return defaultVal

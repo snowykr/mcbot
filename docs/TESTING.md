@@ -3,12 +3,13 @@
 ## 목차
 
 1. [자동화된 테스트](#자동화된-테스트)
-2. [컴포넌트별 자동화 테스트 전략](#컴포넌트별-자동화-테스트-전략)
-3. [수동 검증 시나리오](#수동-검증-시나리오)
-4. [회귀 테스트](#회귀-테스트)
-5. [테스트 체크리스트](#테스트-체크리스트)
-6. [문제 해결](#문제-해결)
-7. [참고 사항](#참고-사항)
+2. [통합 테스트](#통합-테스트)
+3. [컴포넌트별 자동화 테스트 전략](#컴포넌트별-자동화-테스트-전략)
+4. [수동 검증 시나리오](#수동-검증-시나리오)
+5. [회귀 테스트](#회귀-테스트)
+6. [테스트 체크리스트](#테스트-체크리스트)
+7. [문제 해결](#문제-해결)
+8. [참고 사항](#참고-사항)
 
 ## 자동화된 테스트
 
@@ -25,9 +26,6 @@ go test ./internal/dockerctl
 
 # 상세 출력과 함께 실행
 go test -v ./...
-
-# 타임아웃 설정 (무한 루프 방지)
-gtimeout 60 go test ./...
 ```
 
 ### 테스트 커버리지
@@ -40,6 +38,167 @@ go test -cover ./...
 go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
+
+## 통합 테스트
+
+### 개요
+
+통합 테스트는 실제 Docker 컨테이너를 사용하여 엔드투엔드 시나리오를 검증합니다. 단위 테스트와 달리 실제 마인크래프트 서버 컨테이너와 상호작용하여 워처, 상태 전이, 자동 복구 등의 동작을 검증합니다.
+
+### 격리 및 안전성
+
+통합 테스트는 **운영 환경과 완전히 격리**되어 실행됩니다:
+
+- **프로젝트 격리**: 각 테스트 실행마다 유니크한 프로젝트명(`mcbot_test_<timestamp>`) 사용
+- **네트워크 격리**: 테스트 전용 네트워크 생성 (운영의 `mcbot_default`와 분리)
+- **리소스 격리**: 컨테이너/볼륨/네트워크가 운영 환경과 충돌하지 않음
+- **자동 정리**: 테스트 성공/실패 시 항상 `docker compose down -v --remove-orphans` 수행
+
+### 실행 방법
+
+```bash
+# Makefile 사용 (권장)
+make test-integration
+
+# 직접 실행
+cd mcbot
+go test -tags=integration -v ./internal/mcserver/...
+
+# 상세 로그와 함께 실행
+make test-integration-verbose
+```
+
+### 주의사항
+
+- **Docker 필수**: 통합 테스트는 Docker가 설치되어 있어야 합니다
+- **시간 소요**: 각 테스트마다 컨테이너를 시작/종료하므로 5-10분 정도 소요됩니다
+- **리소스**: 테스트용 경량 설정(1GB 메모리)을 사용하지만, 여러 테스트가 순차 실행되므로 시스템 리소스를 고려하세요
+- **로컬 전용**: CI 통합은 별도 작업이며, 현재는 로컬 수동 실행만 지원합니다
+- **운영 환경 안전**: 운영 compose를 띄운 상태에서도 통합 테스트 실행 가능 (프로젝트 격리)
+
+### 테스트 시나리오
+
+#### 1. Runtime Watcher - Shutdown Log 감지
+**파일**: `integration_test.go::TestIntegration_RuntimeWatcher_ShutdownLog`
+
+**검증 내용**:
+- 서버 내부에서 `/stop` 명령 실행 시 shutdown 로그 감지
+- `shutdownIntentFromInside` 플래그가 true로 설정됨
+- 컨테이너 종료 후 상태가 `StateStopped`로 전이 (crashed가 아님)
+- **이벤트 기반 종료 판별**: container watcher가 로그 watcher의 종료 신호(`logWatcherDoneCh`)를 기다린 후 intent 재확인
+
+**시나리오**:
+1. 테스트 컨테이너 시작 및 준비 대기
+2. Controller를 `StateRunning`으로 설정
+3. Runtime watcher 시작
+4. RCON으로 `stop` 명령 실행
+5. 컨테이너 종료 대기
+6. 최종 상태가 `StateStopped`인지 확인
+
+**Shutdown Intent 판별 메커니즘 (2026-01-11 개선)**:
+- 기존: 5회 × 50ms polling 루프 (총 250ms)
+- 현재: 이벤트 기반 대기 (`logWatcherDoneCh` close 또는 `ShutdownIntentGracePeriod` 타임아웃, 최대 2초)
+- 로그 파이프라인 지연으로 인한 정상 종료 오탐 방지
+
+#### 2. Runtime Watcher - 예기치 않은 종료
+**파일**: `integration_test.go::TestIntegration_RuntimeWatcher_UnexpectedStop`
+
+**검증 내용**:
+- Shutdown 로그 없이 컨테이너가 강제 종료되면 crashed 처리
+- `docker stop`으로 강제 종료 시 `StateCrashed`로 전이
+
+**시나리오**:
+1. 테스트 컨테이너 시작 및 준비 대기
+2. Controller를 `StateRunning`으로 설정
+3. Runtime watcher 시작
+4. `docker stop`으로 컨테이너 강제 종료
+5. 최종 상태가 `StateCrashed`인지 확인
+
+#### 3. Sync Watcher - 외부 시작 감지
+**파일**: `integration_test.go::TestIntegration_SyncWatcher_ExternalStart`
+
+**검증 내용**:
+- 외부에서 컨테이너를 시작했을 때 자동 감지
+- Ready 패턴 매칭 후 `StateRunning`으로 전이
+- Sync watcher가 정상 동작
+
+**시나리오**:
+1. 컨테이너를 종료된 상태로 시작
+2. `SyncState()` 호출로 초기 상태 확인 (`StateStopped`)
+3. 외부에서 `docker start` 실행
+4. `SyncState()` 재호출로 `StateStarting` 전이 확인
+5. Ready 로그 대기
+6. 최종 상태가 `StateRunning`인지 확인
+
+#### 4. Container Watcher - Inspect 연속 실패
+**파일**: `integration_test.go::TestIntegration_ContainerWatcher_InspectFailure`
+
+**검증 내용**:
+- 존재하지 않는 컨테이너에 대한 inspect 연속 실패 감지
+- `MaxInspectFailureAttempts` 임계치 도달 시 crashed 처리
+
+**시나리오**:
+1. 존재하지 않는 컨테이너명으로 Controller 생성
+2. `StateRunning`으로 설정
+3. Runtime watcher 시작 (inspect 실패 반복)
+4. 설정된 임계치(2회) 도달 후 `StateCrashed` 전이 확인
+
+#### 5. Watcher 재시작 - 크래시 후 복구
+**파일**: `integration_test.go::TestIntegration_WatcherRestart_AfterCrash`
+
+**검증 내용**:
+- Watcher가 크래시로 종료된 후에도 재시작 가능
+- Supervisor goroutine이 `watchersRunning` 상태를 올바르게 정리
+- 동일 Controller 인스턴스에서 여러 번 watcher 시작/종료 가능
+
+**시나리오**:
+1. 테스트 컨테이너 시작 및 준비 대기
+2. Runtime watcher 시작
+3. 컨테이너 강제 종료로 crashed 상태 유발
+4. Watcher 자동 종료 대기
+5. 컨테이너 재시작
+6. Runtime watcher 재시작 시도
+7. 정상적으로 재시작되는지 확인
+
+### 테스트 환경 구성
+
+통합 테스트는 `docker-compose.test.yml`을 사용합니다:
+
+- **컨테이너명**: 동적 생성 (프로젝트명 기반, 예: `mcbot_test_<timestamp>-mc-test-1`)
+- **포트**: 외부 포트 노출 없음 (docker exec를 통한 RCON 사용)
+- **메모리**: 1GB (빠른 시작을 위한 경량 설정)
+- **버전**: Minecraft 1.20.1 Vanilla
+- **RCON**: 활성화 (테스트 명령 실행용, 컨테이너 내부에서만 접근)
+
+### 문제 해결
+
+#### 테스트 중단 후 잔여 리소스 정리
+테스트가 `Ctrl+C` 등으로 중단된 경우, 다음 명령으로 모든 테스트 리소스를 정리할 수 있습니다:
+```bash
+# Makefile 사용 (권장)
+make test-integration-clean
+
+# 수동 정리
+docker ps -a --filter "name=mcbot_test_" --format "{{.Names}}" | xargs docker rm -f
+docker network ls --filter "name=mcbot_test_" --format "{{.Name}}" | xargs docker network rm
+docker volume ls --filter "name=mcbot_test_" --format "{{.Name}}" | xargs docker volume rm
+```
+
+#### 포트 관련 참고사항
+통합 테스트는 기본적으로 외부 포트를 노출하지 않으므로 포트 충돌이 발생하지 않습니다.
+만약 외부 접근이 필요한 경우 `docker-compose.test.yml`에 포트 매핑을 추가할 수 있습니다:
+```yaml
+ports:
+  - "25567:25565"  # 원하는 포트로 설정
+```
+
+#### 테스트 실패 시 디버깅
+테스트가 실패하면 자동으로 다음 정보가 출력됩니다:
+- Docker Compose PS 상태
+- 컨테이너 로그 (마지막 100줄)
+- 컨테이너 상태 정보 (inspect)
+
+이 정보를 활용하여 실패 원인을 파악할 수 있습니다.
 
 ## 컴포넌트별 자동화 테스트 전략
 
@@ -90,7 +249,47 @@ go tool cover -html=coverage.out
 - 버튼 클릭 요청이 취소되어도 서버 작업은 계속 진행
 - 대기 타임아웃은 Discord 핸들러에서 별도 관리 (`ServerOperationTimeout`)
 
+**handleCrash invariant (2026-01-01)**:
+- `handleCrash()`는 **오직 `StateRunning` 상태에서만 호출**되어야 함
+- 모든 호출 경로(런타임 워처, 컨테이너 워처, 상태 조회)에서 `StateRunning` 가드가 선행됨
+- 함수 내부에서 `currentState != StateRunning`이면 invariant 위반으로 간주하고 로그 후 return
+- 이 계약은 코드 리뷰 및 테스트에서 검증되어야 함
+
 **연결된 수동 시나리오**: `1.3 중복 요청 방지`, `3.2 비정상 상태에서의 명령 거부`, `1.1 버튼 클릭 - 서버 시작`
+
+### Controller Shutdown Safety 테스트
+
+**파일**: `internal/mcserver/controller_worker_test.go`
+
+**책임**:
+- Controller 종료 시 상태 변경 알림의 안전한 중단 검증
+- `shutdownComplete` 플래그 동작 확인
+- 동시성 안전성 보장
+
+**검증 포인트**:
+- **Shutdown 후 notify no-op**: `Shutdown()` 호출 후 `notifyStateChange()`가 아무 동작도 하지 않음
+  - 콜백 호출 횟수가 Shutdown 전후로 동일해야 함
+  - 100회 반복 호출해도 콜백 미호출
+- **동시성 안전성**: Shutdown과 notifyStateChange 동시 호출 시 panic/race 없음
+  - 한 goroutine에서 1000회 notifyStateChange 호출
+  - 다른 goroutine에서 Shutdown 호출
+  - `-race` 플래그로 검증
+- **State Change Worker 재시작**: `stopStateChangeWorker()` 후 `SetOnStateChange()`로 worker 재시작 가능
+- **stopStateChangeWorker vs Shutdown**: 
+  - `stopStateChangeWorker()`는 worker만 중지, 재시작 가능
+  - `Shutdown()`은 전체 종료, `shutdownComplete=true` 설정, 재시작 불가
+
+**Shutdown 안전성 보장 메커니즘**:
+1. `shutdownComplete atomic.Bool` 플래그: Shutdown 시 즉시 true로 설정
+2. `notifyStateChange()` 첫 줄에서 `shutdownComplete` 체크 → true면 즉시 return
+3. `stateChangeEventCh`는 닫지 않음 (닫으면 send 시 panic)
+4. `shutdownComplete` 플래그가 post-shutdown send를 방지
+
+**테스트 함수**:
+- `TestNotifyStateChange_AfterShutdown_IsNoOp`: Shutdown 후 notify가 no-op인지 검증
+- `TestNotifyStateChange_AfterShutdown_ConcurrentSafe`: 동시 호출 시 race 없음
+- `TestController_StateChangeWorker_Restart`: Worker 재시작 가능
+- `TestStateChange_StopDisablesNotifications`: stopStateChangeWorker 후 알림 비활성화
 
 ### 상태 임베드 관리 테스트
 
@@ -459,8 +658,8 @@ go tool cover -html=coverage.out
 ### 전체 테스트 스위트 실행
 
 ```bash
-# 타임아웃 설정과 함께 전체 테스트 실행
-gtimeout 120 go test -v ./...
+# 전체 테스트 실행
+go test -v ./...
 
 # 실패 시 즉시 중단
 go test -v -failfast ./...
@@ -536,14 +735,16 @@ go tool pprof mem.prof
 ### 코드 품질 유지
 
 ```bash
-# Race detector 활성화
+# 필수: 정적 분석 (프로젝트 표준)
+go vet ./...
+
+# 필수: Race detector 활성화 (동시성 버그 검출)
 go test -race ./...
 
-# 정적 분석
-go vet ./...
-staticcheck ./...
-
-# 코드 포맷팅
+# 필수: 코드 포맷팅
 go fmt ./...
-goimports -w .
+
+# 선택: 추가 정적 분석 도구 (별도 설치 필요)
+# staticcheck ./...
+# goimports -w .
 ```
