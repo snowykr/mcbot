@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -88,6 +89,15 @@ func (c *Config) validate() error {
 	}
 	if c.ServerOperationTimeout <= 0 {
 		return errors.New("SERVER_OPERATION_TIMEOUT_SECONDS must be positive")
+	}
+	if c.StopTimeoutSeconds < 0 {
+		return errors.New("STOP_TIMEOUT_SECONDS must be non-negative (0 = immediate stop)")
+	}
+	stopTimeoutBuffer := 30 * time.Second
+	minServerOpTimeout := time.Duration(c.StopTimeoutSeconds)*time.Second + stopTimeoutBuffer
+	if c.ServerOperationTimeout < minServerOpTimeout {
+		return fmt.Errorf("SERVER_OPERATION_TIMEOUT_SECONDS (%v) must be at least STOP_TIMEOUT_SECONDS + %v (minimum: %v)",
+			c.ServerOperationTimeout, stopTimeoutBuffer, minServerOpTimeout)
 	}
 	if c.AutoRecoverEnabled {
 		if c.AutoRecoverInterval <= 0 {

@@ -3,6 +3,7 @@ package mcserver
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,11 +67,15 @@ type Controller struct {
 	// logWatcherDoneCh is closed when runtimeLogWatcherLoop finishes processing.
 	// containerWatchLoop uses this to wait for log watcher to drain before deciding crash vs normal shutdown.
 	// Created fresh on each StartRuntimeWatchers call; nil when watchers not running.
-	logWatcherDoneCh        chan struct{}
-	stateChangeWorkerCtx    context.Context
-	stateChangeWorkerCancel context.CancelFunc
-	stateChangeWorkerWg     sync.WaitGroup
-	stateChangeMu           sync.RWMutex
+	logWatcherDoneCh chan struct{}
+	// watchersSupervisorDoneCh is closed when watchersSupervisor completes cleanup.
+	// StopRuntimeWatchers waits on this to guarantee all cleanup is done before returning.
+	// Created fresh on each StartRuntimeWatchers call; nil when watchers not running.
+	watchersSupervisorDoneCh chan struct{}
+	stateChangeWorkerCtx     context.Context
+	stateChangeWorkerCancel  context.CancelFunc
+	stateChangeWorkerWg      sync.WaitGroup
+	stateChangeMu            sync.RWMutex
 	// stateChangeEventCh: best-effort notification channel for state changes.
 	// Non-blocking send; drops events when buffer is full (logged via stateChangeDropCount).
 	// Listeners should NOT treat these as source of truth; query stateManager for authoritative state.
@@ -196,6 +201,8 @@ func (c *Controller) startStateChangeWorkerInternalLocked() {
 func (c *Controller) stopStateChangeWorker() {
 	c.stateChangeMu.Lock()
 	cancel := c.stateChangeWorkerCancel
+	c.onStateChange = nil
+	c.stateChangeWorkerCancel = nil
 	c.stateChangeMu.Unlock()
 
 	if cancel != nil {
@@ -834,18 +841,27 @@ func (c *Controller) StartRuntimeWatchers(ctx context.Context) {
 	c.watchersRunning = true
 	c.shutdownIntentFromInside.Store(false)
 	c.logWatcherDoneCh = make(chan struct{})
+	c.watchersSupervisorDoneCh = make(chan struct{})
 
 	c.watchersWg.Add(2)
 	go c.runtimeLogWatcherLoop(watchCtx, c.logWatcherDoneCh)
 	go c.containerWatchLoop(watchCtx, c.logWatcherDoneCh)
 
-	go c.watchersSupervisor()
+	supervisorDoneCh := c.watchersSupervisorDoneCh
+	go c.watchersSupervisor(supervisorDoneCh)
 
 	c.watchersMu.Unlock()
 	logutil.Debugf("[RUNTIME] 런타임 감시 시작 완료 (로그 워처 + 컨테이너 워처)")
 }
 
-func (c *Controller) watchersSupervisor() {
+func (c *Controller) watchersSupervisor(doneCh chan struct{}) {
+	defer close(doneCh)
+	defer func() {
+		if r := recover(); r != nil {
+			logutil.Infof("[RUNTIME] watchersSupervisor recovered from panic: %v\n%s", r, debug.Stack())
+		}
+	}()
+
 	c.watchersWg.Wait()
 
 	c.watchersMu.Lock()
@@ -859,6 +875,7 @@ func (c *Controller) watchersSupervisor() {
 	c.watchersRunning = false
 	c.containerWatcherCancel = nil
 	c.logWatcherDoneCh = nil
+	c.watchersSupervisorDoneCh = nil
 	c.shutdownIntentFromInside.Store(false)
 
 	logutil.Debugf("[RUNTIME] 워처 supervisor: 모든 워처 종료 완료, 상태 정리됨")
@@ -873,6 +890,7 @@ func (c *Controller) StopRuntimeWatchers() {
 	}
 
 	cancel := c.containerWatcherCancel
+	supervisorDoneCh := c.watchersSupervisorDoneCh
 	c.watchersMu.Unlock()
 
 	if cancel != nil {
@@ -881,7 +899,11 @@ func (c *Controller) StopRuntimeWatchers() {
 
 	c.watchersWg.Wait()
 
-	logutil.Infof("[RUNTIME] 런타임 감시 중지 완료 (supervisor가 정리 수행)")
+	if supervisorDoneCh != nil {
+		<-supervisorDoneCh
+	}
+
+	logutil.Infof("[RUNTIME] 런타임 감시 중지 완료 (cleanup 완료 보장됨)")
 }
 
 func (c *Controller) runtimeLogWatcherLoop(ctx context.Context, doneCh chan struct{}) {

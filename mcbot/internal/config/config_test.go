@@ -1,7 +1,9 @@
 package config
 
 import (
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidate_RequiredFields(t *testing.T) {
@@ -74,10 +76,12 @@ func TestValidate_RequiredFields(t *testing.T) {
 
 func TestValidate_DurationFields(t *testing.T) {
 	baseConfig := Config{
-		DiscordToken:    "token",
-		MCContainerName: "mc-server",
-		McbotRoleName:   "마크봇",
-		EmbedChannelID:  "123456",
+		DiscordToken:           "token",
+		MCContainerName:        "mc-server",
+		McbotRoleName:          "마크봇",
+		EmbedChannelID:         "123456",
+		StopTimeoutSeconds:     10,
+		ServerOperationTimeout: 60 * time.Second,
 	}
 
 	tests := []struct {
@@ -126,7 +130,8 @@ func TestValidate_DurationFields(t *testing.T) {
 			modifier: func(c *Config) {
 				c.ReadyTimeout = 1
 				c.EmbedUpdateTimeout = 1
-				c.ServerOperationTimeout = 1
+				c.ServerOperationTimeout = 60 * time.Second
+				c.StopTimeoutSeconds = 10
 				c.AutoRecoverEnabled = true
 				c.AutoRecoverInterval = 0
 			},
@@ -138,7 +143,8 @@ func TestValidate_DurationFields(t *testing.T) {
 			modifier: func(c *Config) {
 				c.ReadyTimeout = 1
 				c.EmbedUpdateTimeout = 1
-				c.ServerOperationTimeout = 1
+				c.ServerOperationTimeout = 60 * time.Second
+				c.StopTimeoutSeconds = 10
 				c.AutoRecoverEnabled = false
 				c.AutoRecoverInterval = 0
 				c.CrashDetectionInterval = 1
@@ -151,7 +157,8 @@ func TestValidate_DurationFields(t *testing.T) {
 			modifier: func(c *Config) {
 				c.ReadyTimeout = 1
 				c.EmbedUpdateTimeout = 1
-				c.ServerOperationTimeout = 1
+				c.ServerOperationTimeout = 60 * time.Second
+				c.StopTimeoutSeconds = 10
 				c.AutoRecoverInterval = 1
 				c.CrashDetectionInterval = 0
 			},
@@ -189,7 +196,8 @@ func TestValidate_AttemptFields(t *testing.T) {
 		EmbedChannelID:         "123456",
 		ReadyTimeout:           1,
 		EmbedUpdateTimeout:     1,
-		ServerOperationTimeout: 1,
+		ServerOperationTimeout: 60 * time.Second,
+		StopTimeoutSeconds:     10,
 		AutoRecoverEnabled:     true,
 		AutoRecoverInterval:    1,
 		CrashDetectionInterval: 1,
@@ -312,6 +320,89 @@ func TestGetEnvBoolOrDefault(t *testing.T) {
 			result := getEnvBoolOrDefault(key, tt.defaultVal)
 			if result != tt.expected {
 				t.Errorf("Expected %v, got %v", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestValidate_StopTimeoutSeconds(t *testing.T) {
+	validConfig := Config{
+		DiscordToken:              "token",
+		MCContainerName:           "mc-server",
+		McbotRoleName:             "마크봇",
+		EmbedChannelID:            "123456",
+		ReadyTimeout:              60 * time.Second,
+		EmbedUpdateTimeout:        10 * time.Second,
+		ServerOperationTimeout:    150 * time.Second,
+		StopTimeoutSeconds:        120,
+		AutoRecoverEnabled:        false,
+		CrashDetectionInterval:    2 * time.Second,
+		MaxInspectFailureAttempts: 3,
+	}
+
+	tests := []struct {
+		name        string
+		modifier    func(*Config)
+		expectError bool
+		errContains string
+	}{
+		{
+			name: "Negative StopTimeoutSeconds",
+			modifier: func(c *Config) {
+				c.StopTimeoutSeconds = -1
+			},
+			expectError: true,
+			errContains: "STOP_TIMEOUT_SECONDS must be non-negative",
+		},
+		{
+			name: "Zero StopTimeoutSeconds (allowed - immediate stop)",
+			modifier: func(c *Config) {
+				c.StopTimeoutSeconds = 0
+			},
+			expectError: false,
+		},
+		{
+			name: "Positive StopTimeoutSeconds",
+			modifier: func(c *Config) {
+				c.StopTimeoutSeconds = 60
+			},
+			expectError: false,
+		},
+		{
+			name: "ServerOperationTimeout too small for StopTimeoutSeconds",
+			modifier: func(c *Config) {
+				c.StopTimeoutSeconds = 120
+				c.ServerOperationTimeout = 100 * time.Second
+			},
+			expectError: true,
+			errContains: "SERVER_OPERATION_TIMEOUT_SECONDS",
+		},
+		{
+			name: "ServerOperationTimeout exactly at minimum (StopTimeout + 30s)",
+			modifier: func(c *Config) {
+				c.StopTimeoutSeconds = 60
+				c.ServerOperationTimeout = 90 * time.Second
+			},
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig
+			tt.modifier(&cfg)
+			err := cfg.validate()
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("Expected error but got nil")
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("Expected error containing %q, got %q", tt.errContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Unexpected error: %v", err)
+				}
 			}
 		})
 	}
