@@ -75,7 +75,12 @@ type Controller struct {
 	// Non-blocking send; drops events when buffer is full (logged via stateChangeDropCount).
 	// Listeners should NOT treat these as source of truth; query stateManager for authoritative state.
 	// Buffer size 10: absorbs normal bursts during crash/recover cycles; drop is acceptable.
-	// This channel is intentionally never closed to avoid send-on-closed-channel panics during shutdown.
+	//
+	// Resource lifecycle note:
+	// - This channel is intentionally never closed to avoid send-on-closed-channel panics.
+	// - The worker goroutine is stopped via context cancellation in stopStateChangeWorker().
+	// - When the Controller is GC'd, the channel becomes unreachable and is garbage collected.
+	// - This is NOT a memory leak: Go's GC handles unreferenced channels correctly.
 	stateChangeEventCh   chan state.ServerState
 	stateChangeDropCount atomic.Uint64
 }
@@ -1009,22 +1014,34 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 				}
 
 				logutil.Debugf("[CONTAINER_WATCHER] 컨테이너 종료 감지, 로그 워처 종료 또는 타임아웃 대기 (최대 %v)", ShutdownIntentGracePeriod)
+				ctxCancelledDuringGrace := false
 				select {
 				case <-logWatcherDoneCh:
 					logutil.Debugf("[CONTAINER_WATCHER] 로그 워처 종료됨, intent 재확인")
 				case <-time.After(ShutdownIntentGracePeriod):
 					logutil.Debugf("[CONTAINER_WATCHER] grace period 타임아웃")
 				case <-ctx.Done():
-					return
+					// ctx가 취소되어도 상태 전이는 수행해야 함 (정책: 정확한 상태 전이 보장)
+					// 이 시점에 이미 컨테이너 stop을 감지했으므로, 최종 상태를 확정해야 함
+					logutil.Debugf("[CONTAINER_WATCHER] grace period 중 context 취소됨, 상태 전이는 계속 진행")
+					ctxCancelledDuringGrace = true
 				}
 
+				// ctx가 취소되었어도 상태 전이를 수행 (정책: 상태 일관성 보장)
+				// shutdownIntent 여부로 정상/비정상 종료 판별
 				if c.shutdownIntentFromInside.Load() {
 					logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료 감지 (대기 후) - 정상 종료로 처리")
 					c.handleNormalShutdown(currentState, containerState.Exists)
 					return
 				}
 
-				logutil.Infof("[CONTAINER_WATCHER] 비정상 종료 감지 - exists=%v", containerState.Exists)
+				// ctx 취소 + shutdownIntent=false: 보수적으로 비정상 종료(crash)로 처리
+				// 이유: 거짓 정상종료보다 거짓 crash가 운영상 더 안전함
+				if ctxCancelledDuringGrace {
+					logutil.Infof("[CONTAINER_WATCHER] context 취소 중 비정상 종료로 처리 (보수적 정책) - exists=%v", containerState.Exists)
+				} else {
+					logutil.Infof("[CONTAINER_WATCHER] 비정상 종료 감지 - exists=%v", containerState.Exists)
+				}
 				result := c.reconcileState(reconcileInput{
 					currentState:     currentState,
 					containerExists:  containerState.Exists,

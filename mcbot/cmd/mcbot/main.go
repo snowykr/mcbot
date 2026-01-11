@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -139,9 +138,7 @@ func serverMonitorLoop(
 	}
 	outcomeCh := make(chan restartOutcome, 1)
 
-	var autoRestartInProgress atomic.Bool
-	// consecutiveAttempts: 크래시 이후 연속으로 시도된 재시작 횟수.
-	// 성공 시 또는 상태가 Crashed가 아닐 때 0으로 리셋된다.
+	var restarting bool
 	var consecutiveAttempts int
 
 	for {
@@ -151,6 +148,7 @@ func serverMonitorLoop(
 			return
 
 		case outcome := <-outcomeCh:
+			restarting = false
 			if outcome.success {
 				consecutiveAttempts = 0
 				log.Printf("[LIFECYCLE] event=auto_restart_succeeded attempt=%d", outcome.attempt)
@@ -159,7 +157,7 @@ func serverMonitorLoop(
 			}
 
 		case <-ticker.C:
-			if autoRestartInProgress.Load() {
+			if restarting {
 				continue
 			}
 
@@ -178,7 +176,7 @@ func serverMonitorLoop(
 				continue
 			}
 
-			autoRestartInProgress.Store(true)
+			restarting = true
 			consecutiveAttempts++
 
 			log.Printf("[LIFECYCLE] event=auto_restart_scheduled attempt=%d/%d",
@@ -192,8 +190,8 @@ func serverMonitorLoop(
 				defer func() {
 					if r := recover(); r != nil {
 						log.Printf("[MONITOR] Auto-restart goroutine recovered from panic: %v", r)
+						outCh <- restartOutcome{attempt: attempt, success: false, reason: "panic"}
 					}
-					autoRestartInProgress.Store(false)
 				}()
 
 				resultCh := controller.Start(context.Background())

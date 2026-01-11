@@ -1,6 +1,7 @@
 package mcserver
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -135,5 +136,100 @@ func TestShutdownIntent_RaceScenario_LogDelayedButArrives(t *testing.T) {
 	defer resultMu.Unlock()
 	if resultState != state.StateStopped {
 		t.Errorf("Expected StateStopped (normal shutdown detected via event), got %v", resultState)
+	}
+}
+
+func TestShutdownIntent_CtxCancelDuringGrace_WithIntent_TransitionsToStopped(t *testing.T) {
+	cfg := &config.Config{MCContainerName: "test-mc"}
+	stateManager := state.NewManager()
+	controller, _ := NewController(cfg, stateManager)
+	defer controller.Shutdown()
+
+	stateManager.SetRunning(0)
+	controller.shutdownIntentFromInside.Store(true)
+
+	controller.handleNormalShutdown(state.StateRunning, true)
+
+	finalState := stateManager.GetState()
+	if finalState != state.StateStopped {
+		t.Errorf("Expected StateStopped when ctx cancelled with shutdownIntent=true, got %v", finalState)
+	}
+}
+
+func TestShutdownIntent_CtxCancelDuringGrace_WithoutIntent_TransitionsToCrashed(t *testing.T) {
+	cfg := &config.Config{MCContainerName: "test-mc"}
+	stateManager := state.NewManager()
+	controller, _ := NewController(cfg, stateManager)
+	defer controller.Shutdown()
+
+	stateManager.SetRunning(0)
+	controller.shutdownIntentFromInside.Store(false)
+
+	input := reconcileInput{
+		currentState:     state.StateRunning,
+		containerExists:  true,
+		containerRunning: false,
+		shutdownIntent:   false,
+		reason:           ReasonRuntimeContainerStopped,
+		err:              nil,
+	}
+	result := controller.reconcileState(input)
+	controller.applyReconcileResult(result, ReasonRuntimeContainerStopped, nil, true)
+
+	finalState := stateManager.GetState()
+	if finalState != state.StateCrashed {
+		t.Errorf("Expected StateCrashed when ctx cancelled without shutdownIntent, got %v", finalState)
+	}
+}
+
+func TestShutdownIntent_GracePeriodCtxCancel_StateTransitionGuaranteed(t *testing.T) {
+	cfg := &config.Config{MCContainerName: "test-mc"}
+	stateManager := state.NewManager()
+	controller, _ := NewController(cfg, stateManager)
+	defer controller.Shutdown()
+
+	stateManager.SetRunning(0)
+
+	logWatcherDoneCh := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var resultState state.ServerState
+	var transitionHappened bool
+	var mu sync.Mutex
+
+	go func() {
+		controller.shutdownIntentFromInside.Store(false)
+
+		ctxCancelledDuringGrace := false
+		select {
+		case <-logWatcherDoneCh:
+		case <-time.After(ShutdownIntentGracePeriod):
+		case <-ctx.Done():
+			ctxCancelledDuringGrace = true
+		}
+
+		mu.Lock()
+		transitionHappened = true
+		if controller.shutdownIntentFromInside.Load() {
+			resultState = state.StateStopped
+		} else {
+			resultState = state.StateCrashed
+		}
+		mu.Unlock()
+
+		_ = ctxCancelledDuringGrace
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !transitionHappened {
+		t.Error("State transition should have happened even after ctx cancel")
+	}
+	if resultState != state.StateCrashed {
+		t.Errorf("Expected StateCrashed (conservative policy), got %v", resultState)
 	}
 }

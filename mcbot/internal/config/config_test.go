@@ -190,6 +190,7 @@ func TestValidate_AttemptFields(t *testing.T) {
 		ReadyTimeout:           1,
 		EmbedUpdateTimeout:     1,
 		ServerOperationTimeout: 1,
+		AutoRecoverEnabled:     true,
 		AutoRecoverInterval:    1,
 		CrashDetectionInterval: 1,
 	}
@@ -225,13 +226,23 @@ func TestValidate_AttemptFields(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "Negative MaxAutoRecoverAttempts",
+			name: "Negative MaxAutoRecoverAttempts with AutoRecoverEnabled=true",
 			modifier: func(c *Config) {
 				c.MaxInspectFailureAttempts = 1
+				c.AutoRecoverEnabled = true
 				c.MaxAutoRecoverAttempts = -1
 			},
 			expectError: true,
 			errorMsg:    "MAX_AUTO_RECOVER_ATTEMPTS must be non-negative (0 = unlimited)",
+		},
+		{
+			name: "Negative MaxAutoRecoverAttempts with AutoRecoverEnabled=false (should pass)",
+			modifier: func(c *Config) {
+				c.MaxInspectFailureAttempts = 1
+				c.AutoRecoverEnabled = false
+				c.MaxAutoRecoverAttempts = -1
+			},
+			expectError: false,
 		},
 		{
 			name: "Zero MaxAutoRecoverAttempts (unlimited)",

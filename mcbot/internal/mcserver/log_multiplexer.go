@@ -117,7 +117,9 @@ func (m *LogMultiplexer) Subscribe() Subscription {
 	unsubscribe := func() {
 		once.Do(func() {
 			m.mu.Lock()
-			delete(m.subscribers, subID)
+			if m.subscribers != nil {
+				delete(m.subscribers, subID)
+			}
 			m.mu.Unlock()
 
 			s.closeOnce.Do(func() {

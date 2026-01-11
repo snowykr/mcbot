@@ -647,3 +647,50 @@ func TestLogMultiplexer_ConcurrentUnsubscribe(t *testing.T) {
 
 	t.Log("Concurrent unsubscribe completed without race")
 }
+
+func TestLogMultiplexer_UnsubscribeAfterClose_NoPanic(t *testing.T) {
+	mux := NewLogMultiplexer("test_container")
+	mux.Start(time.Now())
+
+	sub1 := mux.Subscribe()
+	sub2 := mux.Subscribe()
+	sub3 := mux.Subscribe()
+
+	mux.Close()
+
+	sub1.Unsubscribe()
+	sub2.Unsubscribe()
+	sub3.Unsubscribe()
+
+	sub1.Unsubscribe()
+}
+
+func TestLogMultiplexer_ConcurrentCloseAndUnsubscribe_NoPanic(t *testing.T) {
+	mux := NewLogMultiplexer("test_container")
+	mux.Start(time.Now())
+
+	subscriptions := make([]Subscription, 50)
+	for i := 0; i < 50; i++ {
+		subscriptions[i] = mux.Subscribe()
+	}
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(5 * time.Millisecond)
+		mux.Close()
+	}()
+
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			time.Sleep(time.Duration(idx%10) * time.Millisecond)
+			subscriptions[idx].Unsubscribe()
+		}(i)
+	}
+
+	wg.Wait()
+}
