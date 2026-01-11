@@ -257,6 +257,40 @@ ports:
 
 **연결된 수동 시나리오**: `1.3 중복 요청 방지`, `3.2 비정상 상태에서의 명령 거부`, `1.1 버튼 클릭 - 서버 시작`
 
+### Controller Shutdown Safety 테스트
+
+**파일**: `internal/mcserver/controller_worker_test.go`
+
+**책임**:
+- Controller 종료 시 상태 변경 알림의 안전한 중단 검증
+- `shutdownComplete` 플래그 동작 확인
+- 동시성 안전성 보장
+
+**검증 포인트**:
+- **Shutdown 후 notify no-op**: `Shutdown()` 호출 후 `notifyStateChange()`가 아무 동작도 하지 않음
+  - 콜백 호출 횟수가 Shutdown 전후로 동일해야 함
+  - 100회 반복 호출해도 콜백 미호출
+- **동시성 안전성**: Shutdown과 notifyStateChange 동시 호출 시 panic/race 없음
+  - 한 goroutine에서 1000회 notifyStateChange 호출
+  - 다른 goroutine에서 Shutdown 호출
+  - `-race` 플래그로 검증
+- **State Change Worker 재시작**: `stopStateChangeWorker()` 후 `SetOnStateChange()`로 worker 재시작 가능
+- **stopStateChangeWorker vs Shutdown**: 
+  - `stopStateChangeWorker()`는 worker만 중지, 재시작 가능
+  - `Shutdown()`은 전체 종료, `shutdownComplete=true` 설정, 재시작 불가
+
+**Shutdown 안전성 보장 메커니즘**:
+1. `shutdownComplete atomic.Bool` 플래그: Shutdown 시 즉시 true로 설정
+2. `notifyStateChange()` 첫 줄에서 `shutdownComplete` 체크 → true면 즉시 return
+3. `stateChangeEventCh`는 닫지 않음 (닫으면 send 시 panic)
+4. `shutdownComplete` 플래그가 post-shutdown send를 방지
+
+**테스트 함수**:
+- `TestNotifyStateChange_AfterShutdown_IsNoOp`: Shutdown 후 notify가 no-op인지 검증
+- `TestNotifyStateChange_AfterShutdown_ConcurrentSafe`: 동시 호출 시 race 없음
+- `TestController_StateChangeWorker_Restart`: Worker 재시작 가능
+- `TestStateChange_StopDisablesNotifications`: stopStateChangeWorker 후 알림 비활성화
+
 ### 상태 임베드 관리 테스트
 
 **파일**: `internal/discord/status_embed_test.go`

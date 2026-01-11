@@ -163,6 +163,16 @@ const (
 - Container watcher waits for log watcher to finish (via `logWatcherDoneCh`) before deciding
 - Grace period (`ShutdownIntentGracePeriod = 2s`) prevents false crash detection
 
+### Controller Shutdown Safety
+- `shutdownComplete atomic.Bool` flag prevents state change notifications after `Shutdown()`
+- `notifyStateChange()` becomes a no-op once `shutdownComplete` is true
+- Prevents goroutine leaks and channel send panics during graceful shutdown
+- `stateChangeEventCh` is intentionally never closed; the `shutdownComplete` flag guards against post-shutdown sends
+
+### Thread-Safe Debug Logging
+- `logutil.debugEnabled` uses `atomic.Bool` for thread-safe reads/writes
+- Safe to call `logutil.Debugf()` from any goroutine without synchronization
+
 ## Don'ts
 
 - Don't use Docker SDK - this project uses CLI for simplicity
