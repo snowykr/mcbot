@@ -71,6 +71,12 @@ func (t *testStatusEmbedUpdater) getUpdateCalls() []contextInfo {
 	return append([]contextInfo{}, t.updateCalls...)
 }
 
+type testRCONExecutor struct{}
+
+func (t *testRCONExecutor) Execute(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+
 func TestHandleButtonStart_FirstUpdateUsesEmbedTimeout(t *testing.T) {
 	cfg := &config.Config{
 		EmbedUpdateTimeout:     5 * time.Second,
@@ -86,7 +92,7 @@ func TestHandleButtonStart_FirstUpdateUsesEmbedTimeout(t *testing.T) {
 
 	updater := &testStatusEmbedUpdater{}
 
-	handler := NewHandler(cfg, controller, updater)
+	handler := NewHandler(cfg, controller, updater, &testRCONExecutor{})
 
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
@@ -130,7 +136,7 @@ func TestHandleButtonStart_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 
 	updater := &testStatusEmbedUpdater{}
 
-	handler := NewHandler(cfg, controller, updater)
+	handler := NewHandler(cfg, controller, updater, &testRCONExecutor{})
 
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
@@ -208,7 +214,7 @@ func TestHandleButtonStop_FirstUpdateUsesEmbedTimeout(t *testing.T) {
 
 	updater := &testStatusEmbedUpdater{}
 
-	handler := NewHandler(cfg, controller, updater)
+	handler := NewHandler(cfg, controller, updater, &testRCONExecutor{})
 
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
@@ -252,7 +258,7 @@ func TestHandleButtonStop_GoroutineUpdateUsesIndependentContext(t *testing.T) {
 
 	updater := &testStatusEmbedUpdater{}
 
-	handler := NewHandler(cfg, controller, updater)
+	handler := NewHandler(cfg, controller, updater, &testRCONExecutor{})
 
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
@@ -329,7 +335,7 @@ func TestHandleButtonStart_GoroutineContextEventuallyTimesOut(t *testing.T) {
 
 	updater := &testStatusEmbedUpdater{}
 
-	handler := NewHandler(cfg, controller, updater)
+	handler := NewHandler(cfg, controller, updater, &testRCONExecutor{})
 
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
@@ -405,7 +411,7 @@ func TestHandleButtonStart_TimeoutWhenChannelNeverSends(t *testing.T) {
 	}
 
 	updater := &testStatusEmbedUpdater{}
-	handler := NewHandler(cfg, controller, updater)
+	handler := NewHandler(cfg, controller, updater, &testRCONExecutor{})
 
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
@@ -460,7 +466,7 @@ func TestHandleButtonStop_TimeoutWhenChannelNeverSends(t *testing.T) {
 	}
 
 	updater := &testStatusEmbedUpdater{}
-	handler := NewHandler(cfg, controller, updater)
+	handler := NewHandler(cfg, controller, updater, &testRCONExecutor{})
 
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
@@ -515,7 +521,7 @@ func TestHandleButtonStart_ChannelClosedWithoutValue(t *testing.T) {
 	}
 
 	updater := &testStatusEmbedUpdater{}
-	handler := NewHandler(cfg, controller, updater)
+	handler := NewHandler(cfg, controller, updater, &testRCONExecutor{})
 
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
@@ -573,7 +579,7 @@ func TestHandleButtonStop_ChannelClosedWithoutValue(t *testing.T) {
 	}
 
 	updater := &testStatusEmbedUpdater{}
-	handler := NewHandler(cfg, controller, updater)
+	handler := NewHandler(cfg, controller, updater, &testRCONExecutor{})
 
 	mockInteraction := &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{

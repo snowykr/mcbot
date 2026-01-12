@@ -82,6 +82,8 @@ func TestValidate_DurationFields(t *testing.T) {
 		EmbedChannelID:         "123456",
 		StopTimeoutSeconds:     10,
 		ServerOperationTimeout: 60 * time.Second,
+		RCONPassword:           "test",
+		RCONTimeout:            10 * time.Second,
 	}
 
 	tests := []struct {
@@ -201,6 +203,8 @@ func TestValidate_AttemptFields(t *testing.T) {
 		AutoRecoverEnabled:     true,
 		AutoRecoverInterval:    1,
 		CrashDetectionInterval: 1,
+		RCONPassword:           "test",
+		RCONTimeout:            10 * time.Second,
 	}
 
 	tests := []struct {
@@ -267,6 +271,25 @@ func TestValidate_AttemptFields(t *testing.T) {
 				c.MaxAutoRecoverAttempts = 5
 			},
 			expectError: false,
+		},
+		{
+			name: "Zero RCONTimeout when RCON disabled (should pass)",
+			modifier: func(c *Config) {
+				c.MaxInspectFailureAttempts = 1
+				c.RCONPassword = ""
+				c.RCONTimeout = 0
+			},
+			expectError: false,
+		},
+		{
+			name: "Negative RCONTimeout when RCON enabled",
+			modifier: func(c *Config) {
+				c.MaxInspectFailureAttempts = 1
+				c.RCONPassword = "test"
+				c.RCONTimeout = -1
+			},
+			expectError: true,
+			errorMsg:    "RCON_TIMEOUT_SECONDS must be positive",
 		},
 	}
 
@@ -338,6 +361,8 @@ func TestValidate_StopTimeoutSeconds(t *testing.T) {
 		AutoRecoverEnabled:        false,
 		CrashDetectionInterval:    2 * time.Second,
 		MaxInspectFailureAttempts: 3,
+		RCONPassword:              "test",
+		RCONTimeout:               10 * time.Second,
 	}
 
 	tests := []struct {

@@ -27,6 +27,15 @@ type Config struct {
 
 	CrashDetectionInterval    time.Duration
 	MaxInspectFailureAttempts int
+
+	RCONHost     string
+	RCONPort     int
+	RCONPassword string
+	RCONTimeout  time.Duration
+}
+
+func (c *Config) RCONEnabled() bool {
+	return c.RCONPassword != ""
 }
 
 func Load() (*Config, error) {
@@ -60,6 +69,12 @@ func Load() (*Config, error) {
 	cfg.CrashDetectionInterval = time.Duration(crashDetectionIntervalSec) * time.Second
 
 	cfg.MaxInspectFailureAttempts = getEnvIntOrDefault("MAX_INSPECT_FAILURE_ATTEMPTS", 3)
+
+	cfg.RCONHost = getEnvOrDefault("RCON_HOST", "mc-server")
+	cfg.RCONPort = getEnvIntOrDefault("RCON_PORT", 25575)
+	cfg.RCONPassword = os.Getenv("RCON_PASSWORD")
+	rconTimeoutSec := getEnvIntOrDefault("RCON_TIMEOUT_SECONDS", 10)
+	cfg.RCONTimeout = time.Duration(rconTimeoutSec) * time.Second
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -112,6 +127,9 @@ func (c *Config) validate() error {
 	}
 	if c.MaxInspectFailureAttempts < 1 {
 		return errors.New("MAX_INSPECT_FAILURE_ATTEMPTS must be at least 1")
+	}
+	if c.RCONEnabled() && c.RCONTimeout <= 0 {
+		return errors.New("RCON_TIMEOUT_SECONDS must be positive")
 	}
 	return nil
 }

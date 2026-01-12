@@ -30,9 +30,9 @@ services:
       VERSION: "1.20.1"
       TYPE: "FORGE"
       # DIFFICULTY: "peaceful"
-      ENABLE_RCON: "true"
+      RCON_PASSWORD: ${RCON_PASSWORD:-}
       RCON_CMDS_STARTUP: "gamerule keepInventory true"
-      
+
       # --- 성능 최적화---
       MEMORY: "14G"
       INIT_MEMORY: "14G"
@@ -41,7 +41,7 @@ services:
       view-distance: 8
       simulation-distance: 8
       MOTD: "SNOWY'S SERVER"
-      
+
     volumes:
       - ./data:/data
 

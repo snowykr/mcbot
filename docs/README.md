@@ -30,6 +30,14 @@
 - 버튼이 "봇 오프라인"으로 표시되고 비활성화되어 사용자에게 봇 상태를 명확히 전달
 - 봇이 다시 시작되면 자동으로 현재 서버 상태로 업데이트됨
 
+### RCON 명령어 (선택적 기능)
+- `/마크봇 rcon <command>` 슬래시 명령어로 마인크래프트 서버에 직접 명령 실행
+- `마크봇` 역할을 가진 사용자만 사용 가능
+- 서버가 실행 중(Running)일 때만 명령어 실행 가능
+- 응답이 길 경우 자동으로 1800자로 잘림
+- **활성화 조건**: `RCON_PASSWORD` 환경 변수 설정 시 자동 활성화
+- **미설정 시**: 명령어 실행 시 설정 안내 메시지 표시
+
 ## 사전 요구사항
 
 1. Discord 봇 생성 및 토큰 발급
@@ -176,6 +184,10 @@ docker compose up -d mcbot
 | `CRASH_DETECTION_INTERVAL_SECONDS` | ❌ | `2` | 컨테이너 상태 감시 주기 (초) |
 | `MAX_INSPECT_FAILURE_ATTEMPTS` | ❌ | `3` | 컨테이너 상태 확인 연속 실패 허용 횟수 |
 | `MCBOT_DEBUG` | ❌ | `false` | 디버그 로그 활성화 (`true` 또는 `1`로 설정) |
+| `RCON_HOST` | ❌ | `mc-server` | RCON 서버 호스트 (컨테이너 이름 또는 IP) |
+| `RCON_PORT` | ❌ | `25575` | RCON 서버 포트 |
+| `RCON_PASSWORD` | ❌ | - | RCON 비밀번호 (설정 시 Discord `/마크봇 rcon` 명령어 활성화) |
+| `RCON_TIMEOUT_SECONDS` | ❌ | `10` | RCON 명령 타임아웃 (초) |
 
 ### 서버 준비 완료 자동 감지
 
@@ -186,6 +198,30 @@ mcbot은 대표적인 Minecraft 서버 이미지의 "서버 준비 완료" 로�
 - Paper/Spigot 계열
 
 로그에서 로딩 시간(초 단위)을 자동으로 추출하여 Discord 임베드에 표시합니다.
+
+### RCON 설정
+
+RCON은 선택적 기능입니다. `RCON_PASSWORD`를 설정하면 Discord에서 RCON 명령어를 사용할 수 있습니다.
+
+**활성화 방법**: `.env` 파일에 `RCON_PASSWORD`를 설정합니다.
+
+```bash
+# .env 파일
+RCON_PASSWORD=your_secure_password
+```
+
+**동작 방식**:
+- `RCON_PASSWORD` 설정 시:
+  - `mc-server`: 해당 비밀번호로 RCON 인증
+  - `mcbot`: `/마크봇 rcon` 명령어 정상 작동
+- `RCON_PASSWORD` 미설정 시:
+  - `mc-server`: 랜덤 비밀번호로 RCON 작동 (내부 기능 정상 작동, `RCON_CMDS_STARTUP` 포함)
+  - `mcbot`: `/마크봇 rcon` 명령어 실행 시 설정 안내 메시지 표시
+
+**사용 예시**:
+- `/마크봇 rcon list` - 접속 중인 플레이어 목록
+- `/마크봇 rcon say Hello!` - 서버 채팅에 메시지 전송
+- `/마크봇 rcon whitelist add PlayerName` - 화이트리스트 추가
 
 ### 타임아웃 변수 간 차이
 
@@ -292,6 +328,8 @@ mcbot은 대표적인 Minecraft 서버 이미지의 "서버 준비 완료" 로�
     │   │   ├── player_tracker.go       # 플레이어 접속 추적
     │   │   ├── player_tracker_test.go
     │   │   └── presence.go             # 서버 상태 표현
+    │   ├── rcon/                # RCON 클라이언트
+    │   │   └── client.go
     │   └── state/              # 서버 상태 관리
     │       ├── state.go
     │       └── state_test.go
