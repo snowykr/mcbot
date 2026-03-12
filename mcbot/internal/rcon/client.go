@@ -67,6 +67,9 @@ func (c *Client) Execute(ctx context.Context, command string) (string, error) {
 		if errors.Is(err, rcon.ErrAuthFailed) {
 			return "", ErrAuthFailed
 		}
+		if mappedErr := mapTimeoutError(err); mappedErr != nil {
+			return "", mappedErr
+		}
 		return "", fmt.Errorf("%w: %v", ErrConnectionFailed, err)
 	}
 	defer func() {
@@ -78,6 +81,9 @@ func (c *Client) Execute(ctx context.Context, command string) (string, error) {
 	response, err := conn.Execute(command)
 	if err != nil {
 		if mappedErr := mapContextError(ctx.Err()); mappedErr != nil {
+			return "", mappedErr
+		}
+		if mappedErr := mapTimeoutError(err); mappedErr != nil {
 			return "", mappedErr
 		}
 		return "", fmt.Errorf("명령 실행 실패: %w", err)
@@ -97,4 +103,17 @@ func mapContextError(err error) error {
 		return ErrCanceled
 	}
 	return err
+}
+
+func mapTimeoutError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return ErrTimeout
+	}
+
+	return nil
 }

@@ -3,6 +3,7 @@ package rcon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -111,6 +112,29 @@ func TestClientExecute_CommandFailureWrapsError(t *testing.T) {
 	}
 }
 
+func TestMapTimeoutError_WrappedNetTimeout(t *testing.T) {
+	err := fmt.Errorf("wrapped: %w", timeoutNetError{})
+	if !errors.Is(mapTimeoutError(err), ErrTimeout) {
+		t.Fatalf("expected ErrTimeout, got %v", mapTimeoutError(err))
+	}
+}
+
+func TestClientExecute_CommandTimeout(t *testing.T) {
+	server := rcontest.NewServer(rcontest.SetSettings(rcontest.Settings{
+		Password:             "secret",
+		CommandResponseDelay: 500 * time.Millisecond,
+	}))
+	defer server.Close()
+
+	host, port := splitServerAddr(t, server.Addr())
+	client := NewClient(host, port, "secret", 100*time.Millisecond)
+
+	_, err := client.Execute(context.Background(), "list")
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("expected ErrTimeout, got %v", err)
+	}
+}
+
 func splitServerAddr(t *testing.T, addr string) (string, int) {
 	t.Helper()
 
@@ -143,3 +167,9 @@ func unusedLocalPort(t *testing.T) int {
 
 	return addr.Port
 }
+
+type timeoutNetError struct{}
+
+func (timeoutNetError) Error() string   { return "i/o timeout" }
+func (timeoutNetError) Timeout() bool   { return true }
+func (timeoutNetError) Temporary() bool { return false }
