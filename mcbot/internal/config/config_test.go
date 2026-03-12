@@ -487,6 +487,20 @@ func TestValidate_RCONSettingsWhenEnabled(t *testing.T) {
 			expectError: "RCON_HOST is required when RCON is enabled",
 		},
 		{
+			name: "Leading whitespace in host",
+			modifier: func(c *Config) {
+				c.RCONHost = " mc-server"
+			},
+			expectError: "RCON_HOST must not have leading or trailing whitespace",
+		},
+		{
+			name: "Trailing whitespace in host",
+			modifier: func(c *Config) {
+				c.RCONHost = "mc-server "
+			},
+			expectError: "RCON_HOST must not have leading or trailing whitespace",
+		},
+		{
 			name: "Zero port",
 			modifier: func(c *Config) {
 				c.RCONPort = 0
@@ -693,6 +707,74 @@ func TestLoad_RCONPasswordWhitespacePolicy(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.expectErrorText) {
 				t.Fatalf("expected error containing %q, got %q", tt.expectErrorText, err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_RCONHostWhitespacePolicy(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "guild-id")
+	t.Setenv("RCON_PASSWORD", "configured")
+
+	tests := []struct {
+		name            string
+		host            string
+		expectErrorText string
+	}{
+		{name: "Valid host", host: "mc-server"},
+		{name: "Whitespace only host", host: "   \t\n  ", expectErrorText: "RCON_HOST is required when RCON is enabled"},
+		{name: "Leading whitespace", host: " mc-server", expectErrorText: "RCON_HOST must not have leading or trailing whitespace"},
+		{name: "Trailing whitespace", host: "mc-server ", expectErrorText: "RCON_HOST must not have leading or trailing whitespace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RCON_HOST", tt.host)
+
+			_, err := Load()
+			if tt.expectErrorText == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error %q but got nil", tt.expectErrorText)
+			}
+			if !strings.Contains(err.Error(), tt.expectErrorText) {
+				t.Fatalf("expected error containing %q, got %q", tt.expectErrorText, err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_RCONHostWhitespaceValidationSkippedWhenDisabled(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "guild-id")
+	t.Setenv("RCON_HOST", " mc-server")
+
+	tests := []struct {
+		name     string
+		password string
+	}{
+		{name: "Empty password", password: ""},
+		{name: "Whitespace only password", password: "   \t\n  "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RCON_PASSWORD", tt.password)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.RCONEnabled() {
+				t.Fatal("expected RCON to be disabled")
 			}
 		})
 	}

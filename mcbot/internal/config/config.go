@@ -161,8 +161,12 @@ func (c *Config) validate() error {
 		return errors.New("MAX_INSPECT_FAILURE_ATTEMPTS must be at least 1")
 	}
 	if c.RCONEnabled() {
-		if strings.TrimSpace(c.RCONHost) == "" {
+		trimmedRCONHost := strings.TrimSpace(c.RCONHost)
+		if trimmedRCONHost == "" {
 			return errors.New("RCON_HOST is required when RCON is enabled")
+		}
+		if c.RCONHost != trimmedRCONHost {
+			return errors.New("RCON_HOST must not have leading or trailing whitespace")
 		}
 		if c.RCONPort < 1 || c.RCONPort > 65535 {
 			return errors.New("RCON_PORT must be between 1 and 65535 when RCON is enabled")
