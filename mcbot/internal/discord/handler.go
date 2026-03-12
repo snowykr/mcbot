@@ -523,8 +523,9 @@ func (h *Handler) respondEphemeral(s *discordgo.Session, i *discordgo.Interactio
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: content,
-			Flags:   discordgo.MessageFlagsEphemeral,
+			Content:         content,
+			Flags:           discordgo.MessageFlagsEphemeral,
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
 		},
 	})
 	if err != nil {
@@ -576,7 +577,8 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Flags: discordgo.MessageFlagsEphemeral,
+			Flags:           discordgo.MessageFlagsEphemeral,
+			AllowedMentions: &discordgo.MessageAllowedMentions{},
 		},
 	})
 	if err != nil {
@@ -599,20 +601,35 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 		log.Printf("[RCON] 실행 성공 (User: %s, Command: %s)", username, command)
 		content = "✅ 명령 실행 완료"
 		if response != "" {
-			const maxResponseRunes = 1800
-			runes := []rune(response)
-			if len(runes) > maxResponseRunes {
-				response = string(runes[:maxResponseRunes]) + "\n... (응답이 너무 길어 잘렸습니다)"
-			}
-			content += "\n```txt\n" + response + "\n```"
+			content += "\n```txt\n" + formatRCONResponse(response) + "\n```"
 		}
 	}
 
 	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content: content,
-		Flags:   discordgo.MessageFlagsEphemeral,
+		Content:         content,
+		Flags:           discordgo.MessageFlagsEphemeral,
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
 	})
 	if err != nil {
 		log.Printf("[RCON] followup 메시지 전송 실패: %v", err)
 	}
+}
+
+func formatRCONResponse(response string) string {
+	const maxResponseRunes = 1800
+	const truncatedSuffix = "\n... (응답이 너무 길어 잘렸습니다)"
+
+	safe := strings.ReplaceAll(response, "```", "``\u200b`")
+	runes := []rune(safe)
+	if len(runes) <= maxResponseRunes {
+		return safe
+	}
+
+	suffixRunes := []rune(truncatedSuffix)
+	truncateAt := maxResponseRunes - len(suffixRunes)
+	if truncateAt < 0 {
+		truncateAt = 0
+	}
+
+	return string(runes[:truncateAt]) + truncatedSuffix
 }

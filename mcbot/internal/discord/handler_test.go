@@ -2,6 +2,11 @@ package discord
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -71,10 +76,169 @@ func (t *testStatusEmbedUpdater) getUpdateCalls() []contextInfo {
 	return append([]contextInfo{}, t.updateCalls...)
 }
 
-type testRCONExecutor struct{}
+type testRCONExecutor struct {
+	response    string
+	err         error
+	lastCtx     context.Context
+	lastCommand string
+}
 
-func (t *testRCONExecutor) Execute(_ context.Context, _ string) (string, error) {
-	return "", nil
+func (t *testRCONExecutor) Execute(ctx context.Context, command string) (string, error) {
+	t.lastCtx = ctx
+	t.lastCommand = command
+	return t.response, t.err
+}
+
+type recordedDiscordRequest struct {
+	Method string
+	Path   string
+	Body   []byte
+}
+
+type discordAPITestServer struct {
+	server   *httptest.Server
+	mu       sync.Mutex
+	requests []recordedDiscordRequest
+}
+
+func newDiscordAPITestSession(t *testing.T) (*discordgo.Session, *discordAPITestServer) {
+	t.Helper()
+
+	testServer := &discordAPITestServer{}
+	testServer.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("failed to read request body: %v", err)
+		}
+
+		testServer.mu.Lock()
+		testServer.requests = append(testServer.requests, recordedDiscordRequest{
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Body:   body,
+		})
+		testServer.mu.Unlock()
+
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/callback"):
+			w.WriteHeader(http.StatusNoContent)
+		case strings.Contains(r.URL.Path, "/webhooks/"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"followup-message-id"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(testServer.server.Close)
+
+	restore := overrideDiscordEndpoints(testServer.server.URL)
+	t.Cleanup(restore)
+
+	session, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("failed to create discord session: %v", err)
+	}
+	session.Client = testServer.server.Client()
+
+	return session, testServer
+}
+
+func overrideDiscordEndpoints(baseURL string) func() {
+	oldEndpointDiscord := discordgo.EndpointDiscord
+	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointWebhooks := discordgo.EndpointWebhooks
+	oldEndpointApplications := discordgo.EndpointApplications
+
+	discordgo.EndpointDiscord = baseURL + "/"
+	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointWebhooks = discordgo.EndpointAPI + "webhooks/"
+	discordgo.EndpointApplications = discordgo.EndpointAPI + "applications"
+
+	return func() {
+		discordgo.EndpointDiscord = oldEndpointDiscord
+		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointWebhooks = oldEndpointWebhooks
+		discordgo.EndpointApplications = oldEndpointApplications
+	}
+}
+
+func (s *discordAPITestServer) recordedRequests() []recordedDiscordRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	requests := make([]recordedDiscordRequest, len(s.requests))
+	copy(requests, s.requests)
+	return requests
+}
+
+func addGuildRole(t *testing.T, session *discordgo.Session, guildID, roleID, roleName string) {
+	t.Helper()
+
+	err := session.State.GuildAdd(&discordgo.Guild{
+		ID: guildID,
+		Roles: []*discordgo.Role{{
+			ID:   roleID,
+			Name: roleName,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("failed to add guild state: %v", err)
+	}
+}
+
+func newApplicationCommandInteraction(commandName string, options []*discordgo.ApplicationCommandInteractionDataOption, roles []string) *discordgo.InteractionCreate {
+	return &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:      "interaction-id",
+			AppID:   "application-id",
+			Token:   "interaction-token",
+			Type:    discordgo.InteractionApplicationCommand,
+			GuildID: "guild-id",
+			Member: &discordgo.Member{
+				Roles: roles,
+				User: &discordgo.User{
+					ID:       "user-id",
+					Username: "test-user",
+				},
+			},
+			Data: discordgo.ApplicationCommandInteractionData{
+				Name:    commandName,
+				Options: options,
+			},
+		},
+	}
+}
+
+func newRCONInteraction(command string, roles []string) *discordgo.InteractionCreate {
+	return newApplicationCommandInteraction("마크봇", []*discordgo.ApplicationCommandInteractionDataOption{{
+		Name: "rcon",
+		Type: discordgo.ApplicationCommandOptionSubCommand,
+		Options: []*discordgo.ApplicationCommandInteractionDataOption{{
+			Name:  "command",
+			Type:  discordgo.ApplicationCommandOptionString,
+			Value: command,
+		}},
+	}}, roles)
+}
+
+func decodeInteractionResponse(t *testing.T, body []byte) discordgo.InteractionResponse {
+	t.Helper()
+
+	var response discordgo.InteractionResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatalf("failed to decode interaction response: %v", err)
+	}
+	return response
+}
+
+func decodeWebhookParams(t *testing.T, body []byte) discordgo.WebhookParams {
+	t.Helper()
+
+	var params discordgo.WebhookParams
+	if err := json.Unmarshal(body, &params); err != nil {
+		t.Fatalf("failed to decode webhook params: %v", err)
+	}
+	return params
 }
 
 func TestHandleButtonStart_FirstUpdateUsesEmbedTimeout(t *testing.T) {
@@ -118,6 +282,133 @@ func TestHandleButtonStart_FirstUpdateUsesEmbedTimeout(t *testing.T) {
 
 	if firstCall.isCancelled {
 		t.Error("First Update context should not be cancelled")
+	}
+}
+
+func TestHandleInteraction_UnknownApplicationCommandRespondsEphemeral(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	handler := NewHandler(&config.Config{}, &testServerController{}, &testStatusEmbedUpdater{}, nil)
+
+	interaction := newApplicationCommandInteraction("unknown", nil, nil)
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Data == nil || response.Data.Content != "알 수 없는 명령어입니다." {
+		t.Fatalf("unexpected interaction response: %+v", response.Data)
+	}
+	if response.Data.AllowedMentions == nil || len(response.Data.AllowedMentions.Parse) != 0 {
+		t.Fatalf("expected allowed mentions to be disabled, got %+v", response.Data.AllowedMentions)
+	}
+}
+
+func TestHandleInteraction_RCONDisabledRespondsEphemeral(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇"}, &testServerController{}, &testStatusEmbedUpdater{}, nil)
+	interaction := newRCONInteraction("list", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Data == nil || !strings.Contains(response.Data.Content, "RCON이 활성화되지 않았습니다") {
+		t.Fatalf("unexpected response content: %+v", response.Data)
+	}
+}
+
+func TestHandleInteraction_RCONPermissionDenied(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newRCONInteraction("list", nil)
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Data == nil || !strings.Contains(response.Data.Content, "역할이 필요합니다") {
+		t.Fatalf("unexpected response content: %+v", response.Data)
+	}
+}
+
+func TestHandleInteraction_RCONRequiresRunningServer(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", EmbedUpdateTimeout: time.Second}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateStopped},
+	}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newRCONInteraction("list", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Data == nil || !strings.Contains(response.Data.Content, "서버가 실행 중이 아닙니다") {
+		t.Fatalf("unexpected response content: %+v", response.Data)
+	}
+}
+
+func TestHandleInteraction_RCONSuccessSanitizesAndTruncatesResponse(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	executor := &testRCONExecutor{response: "```@everyone" + strings.Repeat("a", 1805)}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:      "마크봇",
+		EmbedUpdateTimeout: time.Second,
+		RCONTimeout:        time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, executor)
+
+	interaction := newRCONInteraction("list", []string{"role-id"})
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if executor.lastCommand != "list" {
+		t.Fatalf("expected command to be forwarded, got %q", executor.lastCommand)
+	}
+	if followup.AllowedMentions == nil || len(followup.AllowedMentions.Parse) != 0 {
+		t.Fatalf("expected followup allowed mentions to be disabled, got %+v", followup.AllowedMentions)
+	}
+	if !strings.Contains(followup.Content, "✅ 명령 실행 완료") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+	if !strings.Contains(followup.Content, "``\u200b`") {
+		t.Fatalf("expected response fences to be neutralized, got %q", followup.Content)
+	}
+	if !strings.Contains(followup.Content, "응답이 너무 길어 잘렸습니다") {
+		t.Fatalf("expected truncation notice, got %q", followup.Content)
 	}
 }
 
