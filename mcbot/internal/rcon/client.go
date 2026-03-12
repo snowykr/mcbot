@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorcon/rcon"
+	gorcon "github.com/gorcon/rcon"
 
 	"github.com/snowy/mcbot/internal/logutil"
 )
@@ -59,12 +59,12 @@ func (c *Client) Execute(ctx context.Context, command string) (string, error) {
 		return "", ErrTimeout
 	}
 
-	conn, err := rcon.Dial(c.address, c.password, rcon.SetDialTimeout(deadline), rcon.SetDeadline(deadline))
+	conn, err := gorcon.Dial(c.address, c.password, gorcon.SetDialTimeout(deadline), gorcon.SetDeadline(deadline))
 	if err != nil {
 		if mappedErr := mapContextError(ctx.Err()); mappedErr != nil {
 			return "", mappedErr
 		}
-		if errors.Is(err, rcon.ErrAuthFailed) {
+		if errors.Is(err, gorcon.ErrAuthFailed) {
 			return "", ErrAuthFailed
 		}
 		if mappedErr := mapTimeoutError(err); mappedErr != nil {
