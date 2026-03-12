@@ -101,8 +101,7 @@ func main() {
 		}
 	}()
 
-	registeredCommands := registerSlashCommands(session)
-	defer cleanupSlashCommands(session, registeredCommands)
+	registerSlashCommands(session)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -343,14 +342,4 @@ func registerSlashCommands(s *discordgo.Session) []*discordgo.ApplicationCommand
 		log.Printf("슬래시 커맨드 등록 완료: /%s", cmd.Name)
 	}
 	return registered
-}
-
-func cleanupSlashCommands(s *discordgo.Session, commands []*discordgo.ApplicationCommand) {
-	for _, cmd := range commands {
-		if err := s.ApplicationCommandDelete(s.State.User.ID, "", cmd.ID); err != nil {
-			log.Printf("슬래시 커맨드 삭제 실패 (%s): %v", cmd.Name, err)
-		} else {
-			log.Printf("슬래시 커맨드 삭제 완료: /%s", cmd.Name)
-		}
-	}
 }
