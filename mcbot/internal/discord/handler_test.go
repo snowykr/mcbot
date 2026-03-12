@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,9 +19,11 @@ import (
 )
 
 type testServerController struct {
-	startCh     chan mcserver.StartResult
-	stopCh      chan mcserver.StopResult
-	presenceVal mcserver.PresenceState
+	startCh         chan mcserver.StartResult
+	stopCh          chan mcserver.StopResult
+	presenceVal     mcserver.PresenceState
+	presenceStarted chan struct{}
+	presenceBlock   <-chan struct{}
 }
 
 func (t *testServerController) Start(_ context.Context) <-chan mcserver.StartResult {
@@ -32,6 +35,16 @@ func (t *testServerController) Stop(_ context.Context) <-chan mcserver.StopResul
 }
 
 func (t *testServerController) Presence(_ context.Context) mcserver.PresenceState {
+	if t.presenceStarted != nil {
+		select {
+		case <-t.presenceStarted:
+		default:
+			close(t.presenceStarted)
+		}
+	}
+	if t.presenceBlock != nil {
+		<-t.presenceBlock
+	}
 	return t.presenceVal
 }
 
@@ -321,7 +334,33 @@ func TestHandleInteraction_RCONDisabledRespondsEphemeral(t *testing.T) {
 	}
 
 	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate response, got %v", response.Type)
+	}
 	if response.Data == nil || !strings.Contains(response.Data.Content, "RCON이 활성화되지 않았습니다") {
+		t.Fatalf("unexpected response content: %+v", response.Data)
+	}
+}
+
+func TestHandleInteraction_RCONEmptyCommandRespondsEphemeral(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newRCONInteraction("", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate response, got %v", response.Type)
+	}
+	if response.Data == nil || !strings.Contains(response.Data.Content, "명령어를 입력해주세요") {
 		t.Fatalf("unexpected response content: %+v", response.Data)
 	}
 }
@@ -336,13 +375,18 @@ func TestHandleInteraction_RCONPermissionDenied(t *testing.T) {
 	handler.HandleInteraction(session, interaction)
 
 	requests := api.recordedRequests()
-	if len(requests) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(requests))
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
 	}
 
-	response := decodeInteractionResponse(t, requests[0].Body)
-	if response.Data == nil || !strings.Contains(response.Data.Content, "역할이 필요합니다") {
-		t.Fatalf("unexpected response content: %+v", response.Data)
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "역할이 필요합니다") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
 	}
 }
 
@@ -358,13 +402,82 @@ func TestHandleInteraction_RCONRequiresRunningServer(t *testing.T) {
 	handler.HandleInteraction(session, interaction)
 
 	requests := api.recordedRequests()
-	if len(requests) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(requests))
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
 	}
 
-	response := decodeInteractionResponse(t, requests[0].Body)
-	if response.Data == nil || !strings.Contains(response.Data.Content, "서버가 실행 중이 아닙니다") {
-		t.Fatalf("unexpected response content: %+v", response.Data)
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "서버가 실행 중이 아닙니다") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+}
+
+func TestHandleInteraction_RCONDefersBeforePresenceCheck(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	presenceStarted := make(chan struct{})
+	presenceBlock := make(chan struct{})
+	controller := &testServerController{
+		presenceVal:     mcserver.PresenceState{ServerState: state.StateRunning},
+		presenceStarted: presenceStarted,
+		presenceBlock:   presenceBlock,
+	}
+	executor := &testRCONExecutor{response: "There are 0 of a max of 20 players online"}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:      "마크봇",
+		EmbedUpdateTimeout: time.Second,
+		RCONTimeout:        time.Second,
+	}, controller, &testStatusEmbedUpdater{}, executor)
+	interaction := newRCONInteraction("list", []string{"role-id"})
+
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		handler.HandleInteraction(session, interaction)
+	}()
+
+	select {
+	case <-presenceStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Presence was not called")
+	}
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		close(presenceBlock)
+		<-handlerDone
+		t.Fatalf("expected deferred response before presence completes, got %d requests", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		close(presenceBlock)
+		<-handlerDone
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	close(presenceBlock)
+
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not finish after unblocking presence")
+	}
+
+	requests = api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests after handler completes, got %d", len(requests))
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "명령 실행 완료") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
 	}
 }
 
@@ -409,6 +522,70 @@ func TestHandleInteraction_RCONSuccessSanitizesAndTruncatesResponse(t *testing.T
 	}
 	if !strings.Contains(followup.Content, "응답이 너무 길어 잘렸습니다") {
 		t.Fatalf("expected truncation notice, got %q", followup.Content)
+	}
+}
+
+func TestHandleInteraction_RCONExecutionFailureUsesFollowup(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	executor := &testRCONExecutor{err: errors.New("boom")}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:      "마크봇",
+		EmbedUpdateTimeout: time.Second,
+		RCONTimeout:        time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, executor)
+	interaction := newRCONInteraction("list", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "RCON 실행 실패: boom") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+}
+
+func TestHandleInteraction_RCONSuccessWithEmptyResponseUsesPlainSuccessMessage(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	executor := &testRCONExecutor{}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:      "마크봇",
+		EmbedUpdateTimeout: time.Second,
+		RCONTimeout:        time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, executor)
+	interaction := newRCONInteraction("list", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if followup.Content != "✅ 명령 실행 완료" {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
 	}
 }
 

@@ -533,6 +533,17 @@ func (h *Handler) respondEphemeral(s *discordgo.Session, i *discordgo.Interactio
 	}
 }
 
+func (h *Handler) respondEphemeralFollowup(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content:         content,
+		Flags:           discordgo.MessageFlagsEphemeral,
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	})
+	if err != nil {
+		log.Printf("ephemeral followup 응답 실패: %v", err)
+	}
+}
+
 func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.InteractionCreate, options []*discordgo.ApplicationCommandInteractionDataOption) {
 	userID := h.getUserID(i)
 	username := h.getUsername(i)
@@ -542,12 +553,6 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 	if h.rconClient == nil {
 		log.Printf("[RCON] RCON 클라이언트 없음 (RCON_PASSWORD 미설정) (User: %s, ID: %s)", username, userID)
 		h.respondEphemeral(s, i, "❌ RCON이 활성화되지 않았습니다. `RCON_PASSWORD` 환경 변수 설정 후 봇을 재시작해주세요.")
-		return
-	}
-
-	if !h.hasRequiredRole(s, i) {
-		log.Printf("[RCON] 권한 거부 (User: %s, ID: %s)", username, userID)
-		h.respondEphemeral(s, i, "🚫 `"+h.cfg.McbotRoleName+"` 역할이 필요합니다.")
 		return
 	}
 
@@ -564,16 +569,6 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 		return
 	}
 
-	presenceCtx, presenceCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
-	defer presenceCancel()
-
-	presence := h.controller.Presence(presenceCtx)
-
-	if presence.ServerState != state.StateRunning {
-		h.respondEphemeral(s, i, "❌ 서버가 실행 중이 아닙니다. (현재 상태: "+presence.ServerState.Korean()+")")
-		return
-	}
-
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
@@ -583,6 +578,22 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 	})
 	if err != nil {
 		log.Printf("[RCON] deferred 응답 실패: %v", err)
+		return
+	}
+
+	if !h.hasRequiredRole(s, i) {
+		log.Printf("[RCON] 권한 거부 (User: %s, ID: %s)", username, userID)
+		h.respondEphemeralFollowup(s, i, "🚫 `"+h.cfg.McbotRoleName+"` 역할이 필요합니다.")
+		return
+	}
+
+	presenceCtx, presenceCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
+	defer presenceCancel()
+
+	presence := h.controller.Presence(presenceCtx)
+
+	if presence.ServerState != state.StateRunning {
+		h.respondEphemeralFollowup(s, i, "❌ 서버가 실행 중이 아닙니다. (현재 상태: "+presence.ServerState.Korean()+")")
 		return
 	}
 
@@ -605,14 +616,7 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 		}
 	}
 
-	_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-		Content:         content,
-		Flags:           discordgo.MessageFlagsEphemeral,
-		AllowedMentions: &discordgo.MessageAllowedMentions{},
-	})
-	if err != nil {
-		log.Printf("[RCON] followup 메시지 전송 실패: %v", err)
-	}
+	h.respondEphemeralFollowup(s, i, content)
 }
 
 func formatRCONResponse(response string) string {
