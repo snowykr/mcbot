@@ -111,12 +111,8 @@ func (c *Config) validate() error {
 	if c.McbotRoleName == "" {
 		return errors.New("MCBOT_ROLE_NAME is required")
 	}
-	trimmedTrustedGuildID := strings.TrimSpace(c.TrustedGuildID)
-	if trimmedTrustedGuildID == "" {
-		return errors.New("MCBOT_TRUSTED_GUILD_ID is required")
-	}
-	if c.TrustedGuildID != trimmedTrustedGuildID {
-		return errors.New("MCBOT_TRUSTED_GUILD_ID must not have leading or trailing whitespace")
+	if err := validateRequiredSnowflakeID("MCBOT_TRUSTED_GUILD_ID", c.TrustedGuildID); err != nil {
+		return err
 	}
 	if c.EmbedChannelID == "" {
 		return errors.New("EMBED_CHANNEL_ID is required")
@@ -175,6 +171,25 @@ func (c *Config) validate() error {
 			return errors.New("RCON_TIMEOUT_SECONDS must be positive")
 		}
 	}
+	return nil
+}
+
+func validateRequiredSnowflakeID(key, value string) error {
+	trimmedValue := strings.TrimSpace(value)
+	if trimmedValue == "" {
+		return fmt.Errorf("%s is required", key)
+	}
+	if value != trimmedValue {
+		return fmt.Errorf("%s must not have leading or trailing whitespace", key)
+	}
+	parsedValue, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%s must be a Discord snowflake ID (digits only)", key)
+	}
+	if strconv.FormatUint(parsedValue, 10) != value {
+		return fmt.Errorf("%s must be a canonical Discord snowflake ID (no leading zeros)", key)
+	}
+
 	return nil
 }
 

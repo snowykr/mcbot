@@ -69,7 +69,7 @@ cp .env.example .env
 
 `.env` 파일을 열고 다음 필수 항목을 입력합니다:
 - `DISCORD_TOKEN`: Discord 봇 토큰
-- `MCBOT_TRUSTED_GUILD_ID`: 봇의 privileged 기능을 허용할 Discord 서버 ID
+- `MCBOT_TRUSTED_GUILD_ID`: 봇의 privileged 기능을 허용할 Discord 서버 snowflake ID (숫자 문자열)
 - `EMBED_CHANNEL_ID`: 상시 임베드 메시지를 표시할 채널 ID
 
 `EMBED_CHANNEL_ID`는 반드시 `MCBOT_TRUSTED_GUILD_ID`와 같은 서버에 속한 채널이어야 합니다. 다른 서버 채널을 지정하면 버튼은 표시될 수 있어도 실행은 거부됩니다.
@@ -366,7 +366,7 @@ make go-deps
 make go-build
 
 # 실행 (환경 변수 필요)
-DISCORD_TOKEN=your_token MCBOT_TRUSTED_GUILD_ID=your_guild_id EMBED_CHANNEL_ID=your_channel_id ./mcbot/mcbot
+DISCORD_TOKEN=your_token MCBOT_TRUSTED_GUILD_ID=123456789012345678 EMBED_CHANNEL_ID=123456789012345679 ./mcbot/mcbot
 ```
 
 ### 직접 Go 명령어 사용
@@ -379,5 +379,5 @@ cd mcbot && go mod tidy
 cd mcbot && go build -o mcbot ./cmd/mcbot
 
 # 실행 (환경 변수 필요)
-cd mcbot && DISCORD_TOKEN=your_token MCBOT_TRUSTED_GUILD_ID=your_guild_id EMBED_CHANNEL_ID=your_channel_id ./mcbot
+cd mcbot && DISCORD_TOKEN=your_token MCBOT_TRUSTED_GUILD_ID=123456789012345678 EMBED_CHANNEL_ID=123456789012345679 ./mcbot
 ```

@@ -38,7 +38,7 @@ func TestValidate_RequiredFields(t *testing.T) {
 			config: Config{
 				DiscordToken:    "token",
 				MCContainerName: "mc-server",
-				TrustedGuildID:  "guild-id",
+				TrustedGuildID:  "123456789012345678",
 				EmbedChannelID:  "123456",
 			},
 			expectError: true,
@@ -61,7 +61,7 @@ func TestValidate_RequiredFields(t *testing.T) {
 				DiscordToken:    "token",
 				MCContainerName: "mc-server",
 				McbotRoleName:   "마크봇",
-				TrustedGuildID:  "guild-id",
+				TrustedGuildID:  "123456789012345678",
 			},
 			expectError: true,
 			errorMsg:    "EMBED_CHANNEL_ID is required",
@@ -92,7 +92,7 @@ func TestValidate_DurationFields(t *testing.T) {
 		DiscordToken:           "token",
 		MCContainerName:        "mc-server",
 		McbotRoleName:          "마크봇",
-		TrustedGuildID:         "guild-id",
+		TrustedGuildID:         "123456789012345678",
 		EmbedChannelID:         "123456",
 		StopTimeoutSeconds:     10,
 		ServerOperationTimeout: 60 * time.Second,
@@ -211,7 +211,7 @@ func TestValidate_AttemptFields(t *testing.T) {
 		DiscordToken:           "token",
 		MCContainerName:        "mc-server",
 		McbotRoleName:          "마크봇",
-		TrustedGuildID:         "guild-id",
+		TrustedGuildID:         "123456789012345678",
 		EmbedChannelID:         "123456",
 		ReadyTimeout:           1,
 		EmbedUpdateTimeout:     1,
@@ -372,7 +372,7 @@ func TestValidate_StopTimeoutSeconds(t *testing.T) {
 		DiscordToken:              "token",
 		MCContainerName:           "mc-server",
 		McbotRoleName:             "마크봇",
-		TrustedGuildID:            "guild-id",
+		TrustedGuildID:            "123456789012345678",
 		EmbedChannelID:            "123456",
 		ReadyTimeout:              60 * time.Second,
 		EmbedUpdateTimeout:        10 * time.Second,
@@ -460,7 +460,7 @@ func TestValidate_RCONSettingsWhenEnabled(t *testing.T) {
 		DiscordToken:              "token",
 		MCContainerName:           "mc-server",
 		McbotRoleName:             "마크봇",
-		TrustedGuildID:            "guild-id",
+		TrustedGuildID:            "123456789012345678",
 		EmbedChannelID:            "123456",
 		ReadyTimeout:              time.Second,
 		EmbedUpdateTimeout:        time.Second,
@@ -571,7 +571,7 @@ func TestRCONEnabled_TrimsWhitespacePassword(t *testing.T) {
 
 func TestLoad_InvalidRCONNumericEnv(t *testing.T) {
 	t.Setenv("DISCORD_TOKEN", "token")
-	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "guild-id")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "123456789012345678")
 	t.Setenv("EMBED_CHANNEL_ID", "123456")
 
 	tests := []struct {
@@ -616,7 +616,7 @@ func TestValidate_RCONPasswordWhitespacePolicy(t *testing.T) {
 		DiscordToken:              "token",
 		MCContainerName:           "mc-server",
 		McbotRoleName:             "마크봇",
-		TrustedGuildID:            "guild-id",
+		TrustedGuildID:            "123456789012345678",
 		EmbedChannelID:            "123456",
 		ReadyTimeout:              time.Second,
 		EmbedUpdateTimeout:        time.Second,
@@ -673,7 +673,7 @@ func TestValidate_RCONPasswordWhitespacePolicy(t *testing.T) {
 func TestLoad_RCONPasswordWhitespacePolicy(t *testing.T) {
 	t.Setenv("DISCORD_TOKEN", "token")
 	t.Setenv("EMBED_CHANNEL_ID", "123456")
-	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "guild-id")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "123456789012345678")
 
 	tests := []struct {
 		name            string
@@ -715,7 +715,7 @@ func TestLoad_RCONPasswordWhitespacePolicy(t *testing.T) {
 func TestLoad_RCONHostWhitespacePolicy(t *testing.T) {
 	t.Setenv("DISCORD_TOKEN", "token")
 	t.Setenv("EMBED_CHANNEL_ID", "123456")
-	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "guild-id")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "123456789012345678")
 	t.Setenv("RCON_PASSWORD", "configured")
 
 	tests := []struct {
@@ -754,7 +754,7 @@ func TestLoad_RCONHostWhitespacePolicy(t *testing.T) {
 func TestLoad_RCONHostWhitespaceValidationSkippedWhenDisabled(t *testing.T) {
 	t.Setenv("DISCORD_TOKEN", "token")
 	t.Setenv("EMBED_CHANNEL_ID", "123456")
-	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "guild-id")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "123456789012345678")
 	t.Setenv("RCON_HOST", " mc-server")
 
 	tests := []struct {
@@ -785,7 +785,7 @@ func TestValidate_TrustedGuildIDWhitespacePolicy(t *testing.T) {
 		DiscordToken:              "token",
 		MCContainerName:           "mc-server",
 		McbotRoleName:             "마크봇",
-		TrustedGuildID:            "guild-id",
+		TrustedGuildID:            "123456789012345678",
 		EmbedChannelID:            "123456",
 		ReadyTimeout:              time.Second,
 		EmbedUpdateTimeout:        time.Second,
@@ -800,10 +800,12 @@ func TestValidate_TrustedGuildIDWhitespacePolicy(t *testing.T) {
 		guildID         string
 		expectErrorText string
 	}{
-		{name: "Valid guild ID", guildID: "guild-id"},
+		{name: "Valid guild ID", guildID: "123456789012345678"},
+		{name: "Non-numeric guild ID", guildID: "guild-id", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must be a Discord snowflake ID (digits only)"},
+		{name: "Leading zeros", guildID: "0123456789012345678", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must be a canonical Discord snowflake ID (no leading zeros)"},
 		{name: "Whitespace only guild ID", guildID: "   \t\n  ", expectErrorText: "MCBOT_TRUSTED_GUILD_ID is required"},
-		{name: "Leading whitespace", guildID: " guild-id", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must not have leading or trailing whitespace"},
-		{name: "Trailing whitespace", guildID: "guild-id ", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must not have leading or trailing whitespace"},
+		{name: "Leading whitespace", guildID: " 123456789012345678", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must not have leading or trailing whitespace"},
+		{name: "Trailing whitespace", guildID: "123456789012345678 ", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must not have leading or trailing whitespace"},
 	}
 
 	for _, tt := range tests {
@@ -832,7 +834,7 @@ func TestValidate_TrustedGuildIDWhitespacePolicy(t *testing.T) {
 func TestLoad_TrustedGuildIDWhitespaceRejected(t *testing.T) {
 	t.Setenv("DISCORD_TOKEN", "token")
 	t.Setenv("EMBED_CHANNEL_ID", "123456")
-	t.Setenv("MCBOT_TRUSTED_GUILD_ID", " guild-id")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", " 123456789012345678")
 
 	_, err := Load()
 	if err == nil {
@@ -853,6 +855,34 @@ func TestLoad_MissingTrustedGuildID(t *testing.T) {
 		t.Fatal("expected load error but got nil")
 	}
 	if !strings.Contains(err.Error(), "MCBOT_TRUSTED_GUILD_ID is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_InvalidTrustedGuildIDRejected(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "guild-id")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected load error but got nil")
+	}
+	if !strings.Contains(err.Error(), "MCBOT_TRUSTED_GUILD_ID must be a Discord snowflake ID (digits only)") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_TrustedGuildIDWithLeadingZerosRejected(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "0123456789012345678")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected load error but got nil")
+	}
+	if !strings.Contains(err.Error(), "MCBOT_TRUSTED_GUILD_ID must be a canonical Discord snowflake ID (no leading zeros)") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

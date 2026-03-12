@@ -18,6 +18,11 @@ import (
 	"github.com/snowy/mcbot/internal/state"
 )
 
+const (
+	testGuildID      = "123456789012345678"
+	testOtherGuildID = "987654321098765432"
+)
+
 type testServerController struct {
 	startCh         chan mcserver.StartResult
 	stopCh          chan mcserver.StopResult
@@ -206,7 +211,7 @@ func newApplicationCommandInteraction(commandName string, options []*discordgo.A
 			AppID:   "123456789012345678",
 			Token:   "interaction-token",
 			Type:    discordgo.InteractionApplicationCommand,
-			GuildID: "guild-id",
+			GuildID: testGuildID,
 			Member: &discordgo.Member{
 				Roles: roles,
 				User: &discordgo.User{
@@ -385,9 +390,9 @@ func TestHandleInteraction_UnknownApplicationCommandRespondsEphemeral(t *testing
 
 func TestHandleInteraction_RCONDisabledRespondsEphemeral(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
-	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: "guild-id"}, &testServerController{}, &testStatusEmbedUpdater{}, nil)
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: testGuildID}, &testServerController{}, &testStatusEmbedUpdater{}, nil)
 	interaction := newRCONInteraction("list", []string{"role-id"})
 
 	handler.HandleInteraction(session, interaction)
@@ -409,9 +414,9 @@ func TestHandleInteraction_RCONDisabledRespondsEphemeral(t *testing.T) {
 
 func TestHandleInteraction_RCONEmptyCommandRespondsEphemeral(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
-	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: "guild-id"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: testGuildID}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
 	interaction := newRCONInteraction("", []string{"role-id"})
 
 	handler.HandleInteraction(session, interaction)
@@ -433,9 +438,9 @@ func TestHandleInteraction_RCONEmptyCommandRespondsEphemeral(t *testing.T) {
 
 func TestHandleInteraction_RCONPermissionDenied(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
-	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: "guild-id"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: testGuildID}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
 	interaction := newRCONInteraction("list", nil)
 
 	handler.HandleInteraction(session, interaction)
@@ -460,7 +465,7 @@ func TestHandleInteraction_RCONPermissionDenied(t *testing.T) {
 
 func TestHandleInteraction_RCONRejectsWhenTrustedGuildUnset(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
 	handler := NewHandler(&config.Config{McbotRoleName: "마크봇"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
 	interaction := newRCONInteraction("list", []string{"role-id"})
@@ -484,14 +489,14 @@ func TestHandleInteraction_RCONRejectsWhenTrustedGuildUnset(t *testing.T) {
 
 func TestHandleInteraction_RCONWrongGuildRespondsEphemeralBeforeDeferred(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
 	handler := NewHandler(&config.Config{
 		McbotRoleName:  "마크봇",
-		TrustedGuildID: "guild-id",
+		TrustedGuildID: testGuildID,
 	}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
 	interaction := newRCONInteraction("list", []string{"role-id"})
-	interaction.GuildID = "other-guild"
+	interaction.GuildID = testOtherGuildID
 
 	handler.HandleInteraction(session, interaction)
 
@@ -512,12 +517,12 @@ func TestHandleInteraction_RCONWrongGuildRespondsEphemeralBeforeDeferred(t *test
 
 func TestHandleInteraction_RCONTrustedGuildAllowsExecution(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
 	executor := &testRCONExecutor{response: "ok"}
 	handler := NewHandler(&config.Config{
 		McbotRoleName:      "마크봇",
-		TrustedGuildID:     "guild-id",
+		TrustedGuildID:     testGuildID,
 		EmbedUpdateTimeout: time.Second,
 		RCONTimeout:        time.Second,
 	}, &testServerController{
@@ -543,13 +548,13 @@ func TestHandleInteraction_RCONTrustedGuildAllowsExecution(t *testing.T) {
 
 func TestHandleInteraction_ToggleWrongGuildRespondsEphemeral(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
 	handler := NewHandler(&config.Config{
 		McbotRoleName:  "마크봇",
-		TrustedGuildID: "guild-id",
+		TrustedGuildID: testGuildID,
 	}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
-	interaction := newComponentInteraction(ComponentIDToggle, "other-guild", []string{"role-id"})
+	interaction := newComponentInteraction(ComponentIDToggle, testOtherGuildID, []string{"role-id"})
 
 	handler.HandleInteraction(session, interaction)
 
@@ -570,7 +575,7 @@ func TestHandleInteraction_ToggleWrongGuildRespondsEphemeral(t *testing.T) {
 
 func TestHandleInteraction_ToggleTrustedGuildDefersMessageUpdate(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
 	controller := &testServerController{
 		startCh:     make(chan mcserver.StartResult, 1),
@@ -580,11 +585,11 @@ func TestHandleInteraction_ToggleTrustedGuildDefersMessageUpdate(t *testing.T) {
 
 	handler := NewHandler(&config.Config{
 		McbotRoleName:          "마크봇",
-		TrustedGuildID:         "guild-id",
+		TrustedGuildID:         testGuildID,
 		EmbedUpdateTimeout:     time.Second,
 		ServerOperationTimeout: time.Second,
 	}, controller, &testStatusEmbedUpdater{}, &testRCONExecutor{})
-	interaction := newComponentInteraction(ComponentIDToggle, "guild-id", []string{"role-id"})
+	interaction := newComponentInteraction(ComponentIDToggle, testGuildID, []string{"role-id"})
 
 	handler.HandleInteraction(session, interaction)
 
@@ -610,8 +615,8 @@ func TestHandleInteraction_ToggleTrustedGuildDefersMessageUpdate(t *testing.T) {
 func TestHandleInteraction_StopConfirmWrongGuildRespondsEphemeral(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
 
-	handler := NewHandler(&config.Config{TrustedGuildID: "guild-id"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
-	interaction := newComponentInteraction(ComponentIDConfirmStopPrefix+"confirmation-id", "other-guild", nil)
+	handler := NewHandler(&config.Config{TrustedGuildID: testGuildID}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newComponentInteraction(ComponentIDConfirmStopPrefix+"confirmation-id", testOtherGuildID, nil)
 
 	handler.HandleInteraction(session, interaction)
 
@@ -630,8 +635,8 @@ func TestHandleInteraction_StopConfirmWrongGuildRespondsEphemeral(t *testing.T) 
 func TestHandleInteraction_StopCancelWrongGuildRespondsEphemeral(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
 
-	handler := NewHandler(&config.Config{TrustedGuildID: "guild-id"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
-	interaction := newComponentInteraction(ComponentIDCancelStopPrefix+"confirmation-id", "other-guild", nil)
+	handler := NewHandler(&config.Config{TrustedGuildID: testGuildID}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newComponentInteraction(ComponentIDCancelStopPrefix+"confirmation-id", testOtherGuildID, nil)
 
 	handler.HandleInteraction(session, interaction)
 
@@ -649,11 +654,11 @@ func TestHandleInteraction_StopCancelWrongGuildRespondsEphemeral(t *testing.T) {
 
 func TestHandleInteraction_RCONNoGuildRespondsEphemeral(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
 	handler := NewHandler(&config.Config{
 		McbotRoleName:  "마크봇",
-		TrustedGuildID: "guild-id",
+		TrustedGuildID: testGuildID,
 	}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
 	interaction := newRCONInteraction("list", []string{"role-id"})
 	interaction.GuildID = ""
@@ -677,9 +682,9 @@ func TestHandleInteraction_RCONNoGuildRespondsEphemeral(t *testing.T) {
 
 func TestHandleInteraction_RCONRequiresRunningServer(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
-	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: "guild-id", EmbedUpdateTimeout: time.Second}, &testServerController{
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: testGuildID, EmbedUpdateTimeout: time.Second}, &testServerController{
 		presenceVal: mcserver.PresenceState{ServerState: state.StateStopped},
 	}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
 	interaction := newRCONInteraction("list", []string{"role-id"})
@@ -706,7 +711,7 @@ func TestHandleInteraction_RCONRequiresRunningServer(t *testing.T) {
 
 func TestHandleInteraction_RCONDefersBeforePresenceCheck(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
 	presenceStarted := make(chan struct{})
 	presenceBlock := make(chan struct{})
@@ -718,7 +723,7 @@ func TestHandleInteraction_RCONDefersBeforePresenceCheck(t *testing.T) {
 	executor := &testRCONExecutor{response: "There are 0 of a max of 20 players online"}
 	handler := NewHandler(&config.Config{
 		McbotRoleName:      "마크봇",
-		TrustedGuildID:     "guild-id",
+		TrustedGuildID:     testGuildID,
 		EmbedUpdateTimeout: time.Second,
 		RCONTimeout:        time.Second,
 	}, controller, &testStatusEmbedUpdater{}, executor)
@@ -773,12 +778,12 @@ func TestHandleInteraction_RCONDefersBeforePresenceCheck(t *testing.T) {
 
 func TestHandleInteraction_RCONSuccessSanitizesAndTruncatesResponse(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
 	executor := &testRCONExecutor{response: "```@everyone" + strings.Repeat("a", 1805)}
 	handler := NewHandler(&config.Config{
 		McbotRoleName:      "마크봇",
-		TrustedGuildID:     "guild-id",
+		TrustedGuildID:     testGuildID,
 		EmbedUpdateTimeout: time.Second,
 		RCONTimeout:        time.Second,
 	}, &testServerController{
@@ -816,12 +821,12 @@ func TestHandleInteraction_RCONSuccessSanitizesAndTruncatesResponse(t *testing.T
 
 func TestHandleInteraction_RCONExecutionFailureUsesEscapedFollowup(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
 	executor := &testRCONExecutor{err: errors.New("```@everyone```")}
 	handler := NewHandler(&config.Config{
 		McbotRoleName:      "마크봇",
-		TrustedGuildID:     "guild-id",
+		TrustedGuildID:     testGuildID,
 		EmbedUpdateTimeout: time.Second,
 		RCONTimeout:        time.Second,
 	}, &testServerController{
@@ -859,12 +864,12 @@ func TestHandleInteraction_RCONExecutionFailureUsesEscapedFollowup(t *testing.T)
 
 func TestHandleInteraction_RCONSuccessWithEmptyResponseUsesPlainSuccessMessage(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
-	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
 
 	executor := &testRCONExecutor{}
 	handler := NewHandler(&config.Config{
 		McbotRoleName:      "마크봇",
-		TrustedGuildID:     "guild-id",
+		TrustedGuildID:     testGuildID,
 		EmbedUpdateTimeout: time.Second,
 		RCONTimeout:        time.Second,
 	}, &testServerController{
