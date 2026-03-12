@@ -218,6 +218,8 @@ RCON_PASSWORD=your_secure_password
   - `mc-server`: 랜덤 비밀번호로 RCON 작동 (내부 기능 정상 작동, `RCON_CMDS_STARTUP` 포함)
   - `mcbot`: `/마크봇 rcon` 명령어 실행 시 설정 안내 메시지 표시
 
+`docker-compose.yml`은 `RCON_PASSWORD`가 설정된 경우 해당 문자열 값을 `mc-server` 컨테이너에 전달합니다. RCON을 쓰지 않을 때는 값을 빈 문자열로 두지 말고 `.env`에서 해당 줄 자체를 제거해야 하며, 그 경우 `itzg/minecraft-server`의 기본 동작에 따라 랜덤 비밀번호가 사용됩니다.
+
 **사용 예시**:
 - `/마크봇 rcon list` - 접속 중인 플레이어 목록
 - `/마크봇 rcon say Hello!` - 서버 채팅에 메시지 전송
