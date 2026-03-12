@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -331,7 +332,13 @@ var slashCommands = []*discordgo.ApplicationCommand{
 }
 
 func registerSlashCommands(s *discordgo.Session) []*discordgo.ApplicationCommand {
-	registered, err := s.ApplicationCommandBulkOverwrite(s.State.User.ID, "", slashCommands)
+	applicationID, err := resolveSlashCommandApplicationID(s)
+	if err != nil {
+		log.Printf("슬래시 커맨드 동기화 건너뜀: %v", err)
+		return nil
+	}
+
+	registered, err := s.ApplicationCommandBulkOverwrite(applicationID, "", slashCommands)
 	if err != nil {
 		log.Printf("슬래시 커맨드 동기화 실패: %v", err)
 		return nil
@@ -342,4 +349,29 @@ func registerSlashCommands(s *discordgo.Session) []*discordgo.ApplicationCommand
 	}
 
 	return registered
+}
+
+func resolveSlashCommandApplicationID(s *discordgo.Session) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("discord session is nil")
+	}
+
+	if s.State != nil {
+		if s.State.Application != nil && s.State.Application.ID != "" {
+			return s.State.Application.ID, nil
+		}
+		if s.State.User != nil && s.State.User.ID != "" {
+			return s.State.User.ID, nil
+		}
+	}
+
+	app, err := s.Application("@me")
+	if err != nil {
+		return "", fmt.Errorf("application ID 조회 실패: %w", err)
+	}
+	if app == nil || app.ID == "" {
+		return "", fmt.Errorf("application ID가 비어 있습니다")
+	}
+
+	return app.ID, nil
 }
