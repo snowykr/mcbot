@@ -16,6 +16,7 @@ type Config struct {
 	MCContainerName        string
 	ReadyTimeout           time.Duration
 	McbotRoleName          string
+	TrustedGuildID         string
 	StopTimeoutSeconds     int
 	EmbedChannelID         string
 	MCJoinLogPattern       string
@@ -44,6 +45,7 @@ func Load() (*Config, error) {
 		DiscordToken:       os.Getenv("DISCORD_TOKEN"),
 		MCContainerName:    getEnvOrDefault("MC_CONTAINER_NAME", "mc-server"),
 		McbotRoleName:      getEnvOrDefault("MCBOT_ROLE_NAME", "마크봇"),
+		TrustedGuildID:     os.Getenv("MCBOT_TRUSTED_GUILD_ID"),
 		StopTimeoutSeconds: getEnvIntOrDefault("STOP_TIMEOUT_SECONDS", 120),
 		EmbedChannelID:     os.Getenv("EMBED_CHANNEL_ID"),
 		MCJoinLogPattern:   getEnvOrDefault("MC_JOIN_LOG_PATTERN", `]: (.+) joined the game`),
@@ -109,8 +111,22 @@ func (c *Config) validate() error {
 	if c.McbotRoleName == "" {
 		return errors.New("MCBOT_ROLE_NAME is required")
 	}
+	trimmedTrustedGuildID := strings.TrimSpace(c.TrustedGuildID)
+	if trimmedTrustedGuildID == "" {
+		return errors.New("MCBOT_TRUSTED_GUILD_ID is required")
+	}
+	if c.TrustedGuildID != trimmedTrustedGuildID {
+		return errors.New("MCBOT_TRUSTED_GUILD_ID must not have leading or trailing whitespace")
+	}
 	if c.EmbedChannelID == "" {
 		return errors.New("EMBED_CHANNEL_ID is required")
+	}
+	trimmedPassword := strings.TrimSpace(c.RCONPassword)
+	if c.RCONPassword != "" && trimmedPassword == "" {
+		c.RCONPassword = ""
+	}
+	if trimmedPassword != "" && c.RCONPassword != trimmedPassword {
+		return errors.New("RCON_PASSWORD must not have leading or trailing whitespace")
 	}
 	if c.ReadyTimeout <= 0 {
 		return errors.New("READY_TIMEOUT_SECONDS must be positive")
