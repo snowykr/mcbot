@@ -202,8 +202,8 @@ func addGuildRole(t *testing.T, session *discordgo.Session, guildID, roleID, rol
 func newApplicationCommandInteraction(commandName string, options []*discordgo.ApplicationCommandInteractionDataOption, roles []string) *discordgo.InteractionCreate {
 	return &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
-			ID:      "interaction-id",
-			AppID:   "application-id",
+			ID:      "123456789012345670",
+			AppID:   "123456789012345678",
 			Token:   "interaction-token",
 			Type:    discordgo.InteractionApplicationCommand,
 			GuildID: "guild-id",
@@ -232,6 +232,26 @@ func newRCONInteraction(command string, roles []string) *discordgo.InteractionCr
 			Value: command,
 		}},
 	}}, roles)
+}
+
+func newComponentInteraction(customID, guildID string, roles []string) *discordgo.InteractionCreate {
+	return &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:      "123456789012345671",
+			AppID:   "123456789012345678",
+			Token:   "interaction-token",
+			Type:    discordgo.InteractionMessageComponent,
+			GuildID: guildID,
+			Member: &discordgo.Member{
+				Roles: roles,
+				User: &discordgo.User{
+					ID:       "user-id",
+					Username: "test-user",
+				},
+			},
+			Data: discordgo.MessageComponentInteractionData{CustomID: customID},
+		},
+	}
 }
 
 func decodeInteractionResponse(t *testing.T, body []byte) discordgo.InteractionResponse {
@@ -387,6 +407,194 @@ func TestHandleInteraction_RCONPermissionDenied(t *testing.T) {
 	followup := decodeWebhookParams(t, requests[1].Body)
 	if !strings.Contains(followup.Content, "역할이 필요합니다") {
 		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+}
+
+func TestHandleInteraction_RCONWrongGuildRespondsEphemeralBeforeDeferred(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:  "마크봇",
+		TrustedGuildID: "guild-id",
+	}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newRCONInteraction("list", []string{"role-id"})
+	interaction.GuildID = "other-guild"
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate response, got %v", response.Type)
+	}
+	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
+		t.Fatalf("unexpected response content: %+v", response.Data)
+	}
+}
+
+func TestHandleInteraction_RCONTrustedGuildAllowsExecution(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	executor := &testRCONExecutor{response: "ok"}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:      "마크봇",
+		TrustedGuildID:     "guild-id",
+		EmbedUpdateTimeout: time.Second,
+		RCONTimeout:        time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, executor)
+	interaction := newRCONInteraction("list", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+	if executor.lastCommand != "list" {
+		t.Fatalf("expected command to be executed, got %q", executor.lastCommand)
+	}
+}
+
+func TestHandleInteraction_ToggleWrongGuildRespondsEphemeral(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:  "마크봇",
+		TrustedGuildID: "guild-id",
+	}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newComponentInteraction(ComponentIDToggle, "other-guild", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate response, got %v", response.Type)
+	}
+	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
+		t.Fatalf("unexpected response content: %+v", response.Data)
+	}
+}
+
+func TestHandleInteraction_ToggleTrustedGuildDefersMessageUpdate(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	controller := &testServerController{
+		startCh:     make(chan mcserver.StartResult, 1),
+		presenceVal: mcserver.PresenceState{ServerState: state.StateStopped},
+	}
+	controller.startCh <- mcserver.StartResult{Success: true, ReadyDuration: time.Second}
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         "guild-id",
+		EmbedUpdateTimeout:     time.Second,
+		ServerOperationTimeout: time.Second,
+	}, controller, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newComponentInteraction(ComponentIDToggle, "guild-id", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	var requests []recordedDiscordRequest
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		requests = api.recordedRequests()
+		if len(requests) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(requests) < 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseDeferredMessageUpdate {
+		t.Fatalf("expected deferred message update, got %v", response.Type)
+	}
+}
+
+func TestHandleInteraction_StopConfirmWrongGuildRespondsEphemeral(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+
+	handler := NewHandler(&config.Config{TrustedGuildID: "guild-id"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newComponentInteraction(ComponentIDConfirmStopPrefix+"confirmation-id", "other-guild", nil)
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
+		t.Fatalf("unexpected response content: %+v", response.Data)
+	}
+}
+
+func TestHandleInteraction_StopCancelWrongGuildRespondsEphemeral(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+
+	handler := NewHandler(&config.Config{TrustedGuildID: "guild-id"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newComponentInteraction(ComponentIDCancelStopPrefix+"confirmation-id", "other-guild", nil)
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
+		t.Fatalf("unexpected response content: %+v", response.Data)
+	}
+}
+
+func TestHandleInteraction_RCONNoGuildRespondsEphemeral(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:  "마크봇",
+		TrustedGuildID: "guild-id",
+	}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newRCONInteraction("list", []string{"role-id"})
+	interaction.GuildID = ""
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate response, got %v", response.Type)
+	}
+	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
+		t.Fatalf("unexpected response content: %+v", response.Data)
 	}
 }
 

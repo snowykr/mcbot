@@ -144,6 +144,10 @@ func (h *Handler) handleComponentInteraction(s *discordgo.Session, i *discordgo.
 }
 
 func (h *Handler) handleToggleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if !h.ensureTrustedGuild(s, i) {
+		return
+	}
+
 	if !h.hasRequiredRole(s, i) {
 		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -224,6 +228,10 @@ func (h *Handler) handleStopConfirmationRequest(s *discordgo.Session, i *discord
 }
 
 func (h *Handler) handleStopConfirmComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if !h.ensureTrustedGuild(s, i) {
+		return
+	}
+
 	customID := i.MessageComponentData().CustomID
 	confirmationID := strings.TrimPrefix(customID, ComponentIDConfirmStopPrefix)
 
@@ -279,6 +287,10 @@ func (h *Handler) handleStopConfirmComponent(s *discordgo.Session, i *discordgo.
 }
 
 func (h *Handler) handleStopCancelComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if !h.ensureTrustedGuild(s, i) {
+		return
+	}
+
 	customID := i.MessageComponentData().CustomID
 	confirmationID := strings.TrimPrefix(customID, ComponentIDCancelStopPrefix)
 
@@ -353,6 +365,24 @@ func (h *Handler) hasRequiredRole(s *discordgo.Session, i *discordgo.Interaction
 		}
 	}
 
+	return false
+}
+
+func (h *Handler) isTrustedGuild(i *discordgo.InteractionCreate) bool {
+	if h.cfg == nil || strings.TrimSpace(h.cfg.TrustedGuildID) == "" {
+		return true
+	}
+
+	return i.GuildID != "" && i.GuildID == h.cfg.TrustedGuildID
+}
+
+func (h *Handler) ensureTrustedGuild(s *discordgo.Session, i *discordgo.InteractionCreate) bool {
+	if h.isTrustedGuild(i) {
+		return true
+	}
+
+	log.Printf("신뢰되지 않은 길드에서 privileged interaction 거부 (GuildID: %s, UserID: %s)", i.GuildID, h.getUserID(i))
+	h.respondEphemeral(s, i, "🚫 이 서버에서는 사용할 수 없는 명령어입니다.")
 	return false
 }
 
@@ -547,6 +577,10 @@ func (h *Handler) respondEphemeralFollowup(s *discordgo.Session, i *discordgo.In
 func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.InteractionCreate, options []*discordgo.ApplicationCommandInteractionDataOption) {
 	userID := h.getUserID(i)
 	username := h.getUsername(i)
+
+	if !h.ensureTrustedGuild(s, i) {
+		return
+	}
 
 	// RCON command is always registered regardless of RCON_PASSWORD configuration (UX trade-off).
 	// Return a friendly error if RCON is not configured for this deployment.
