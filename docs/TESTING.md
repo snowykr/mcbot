@@ -512,7 +512,7 @@ ports:
 **예상 결과**:
 - RCON이 비활성화된 배포라면 ephemeral 메시지로 설정 안내 표시
 - RCON이 활성화되고, 요청 사용자가 `마크봇` 역할을 가지고 있으며, 서버가 실행 중이라면 deferred 응답 후 ephemeral follow-up 메시지로 실행 결과 표시
-- 역할이 없거나 서버가 실행 중이 아니면 즉시 ephemeral 오류 메시지 표시
+- 역할이 없거나 서버가 실행 중이 아니면 deferred 응답 후 ephemeral follow-up 오류 메시지 표시
 - 결과 메시지의 RCON 응답은 코드블록으로 감싸지며, 멘션은 파싱되지 않음
 - 봇이 크래시하지 않음
 
