@@ -82,6 +82,8 @@ func TestValidate_DurationFields(t *testing.T) {
 		EmbedChannelID:         "123456",
 		StopTimeoutSeconds:     10,
 		ServerOperationTimeout: 60 * time.Second,
+		RCONHost:               "mc-server",
+		RCONPort:               25575,
 		RCONPassword:           "test",
 		RCONTimeout:            10 * time.Second,
 	}
@@ -203,6 +205,8 @@ func TestValidate_AttemptFields(t *testing.T) {
 		AutoRecoverEnabled:     true,
 		AutoRecoverInterval:    1,
 		CrashDetectionInterval: 1,
+		RCONHost:               "mc-server",
+		RCONPort:               25575,
 		RCONPassword:           "test",
 		RCONTimeout:            10 * time.Second,
 	}
@@ -361,6 +365,8 @@ func TestValidate_StopTimeoutSeconds(t *testing.T) {
 		AutoRecoverEnabled:        false,
 		CrashDetectionInterval:    2 * time.Second,
 		MaxInspectFailureAttempts: 3,
+		RCONHost:                  "mc-server",
+		RCONPort:                  25575,
 		RCONPassword:              "test",
 		RCONTimeout:               10 * time.Second,
 	}
@@ -429,6 +435,125 @@ func TestValidate_StopTimeoutSeconds(t *testing.T) {
 					t.Fatalf("Unexpected error: %v", err)
 				}
 			}
+		})
+	}
+}
+
+func TestValidate_RCONSettingsWhenEnabled(t *testing.T) {
+	baseConfig := Config{
+		DiscordToken:              "token",
+		MCContainerName:           "mc-server",
+		McbotRoleName:             "마크봇",
+		EmbedChannelID:            "123456",
+		ReadyTimeout:              time.Second,
+		EmbedUpdateTimeout:        time.Second,
+		ServerOperationTimeout:    60 * time.Second,
+		StopTimeoutSeconds:        10,
+		CrashDetectionInterval:    time.Second,
+		MaxInspectFailureAttempts: 1,
+		RCONHost:                  "mc-server",
+		RCONPort:                  25575,
+		RCONPassword:              "configured",
+		RCONTimeout:               10 * time.Second,
+	}
+
+	tests := []struct {
+		name        string
+		modifier    func(*Config)
+		expectError string
+	}{
+		{
+			name: "Empty host",
+			modifier: func(c *Config) {
+				c.RCONHost = "   "
+			},
+			expectError: "RCON_HOST is required when RCON is enabled",
+		},
+		{
+			name: "Zero port",
+			modifier: func(c *Config) {
+				c.RCONPort = 0
+			},
+			expectError: "RCON_PORT must be between 1 and 65535 when RCON is enabled",
+		},
+		{
+			name: "Too large port",
+			modifier: func(c *Config) {
+				c.RCONPort = 65536
+			},
+			expectError: "RCON_PORT must be between 1 and 65535 when RCON is enabled",
+		},
+		{
+			name: "Disabled RCON skips host and port validation",
+			modifier: func(c *Config) {
+				c.RCONPassword = ""
+				c.RCONHost = ""
+				c.RCONPort = 0
+				c.RCONTimeout = 0
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig
+			tt.modifier(&cfg)
+
+			err := cfg.validate()
+			if tt.expectError == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error %q but got nil", tt.expectError)
+			}
+			if err.Error() != tt.expectError {
+				t.Fatalf("expected error %q, got %q", tt.expectError, err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_InvalidRCONNumericEnv(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+
+	tests := []struct {
+		name    string
+		key     string
+		value   string
+		errText string
+	}{
+		{
+			name:    "Invalid RCON port",
+			key:     "RCON_PORT",
+			value:   "abc",
+			errText: "invalid RCON_PORT",
+		},
+		{
+			name:    "Invalid RCON timeout",
+			key:     "RCON_TIMEOUT_SECONDS",
+			value:   "abc",
+			errText: "invalid RCON_TIMEOUT_SECONDS",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.key, tt.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected load error containing %q but got nil", tt.errText)
+			}
+			if !strings.Contains(err.Error(), tt.errText) {
+				t.Fatalf("expected error containing %q, got %q", tt.errText, err.Error())
+			}
+
+			t.Setenv(tt.key, "")
 		})
 	}
 }

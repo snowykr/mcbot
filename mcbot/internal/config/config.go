@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/snowy/mcbot/internal/logutil"
@@ -71,9 +72,24 @@ func Load() (*Config, error) {
 	cfg.MaxInspectFailureAttempts = getEnvIntOrDefault("MAX_INSPECT_FAILURE_ATTEMPTS", 3)
 
 	cfg.RCONHost = getEnvOrDefault("RCON_HOST", "mc-server")
-	cfg.RCONPort = getEnvIntOrDefault("RCON_PORT", 25575)
+	rconPort, err := getEnvIntIfSet("RCON_PORT")
+	if err != nil {
+		return nil, fmt.Errorf("invalid RCON_PORT: %w", err)
+	}
+	if rconPort == nil {
+		cfg.RCONPort = 25575
+	} else {
+		cfg.RCONPort = *rconPort
+	}
 	cfg.RCONPassword = os.Getenv("RCON_PASSWORD")
-	rconTimeoutSec := getEnvIntOrDefault("RCON_TIMEOUT_SECONDS", 10)
+	rconTimeoutSecValue, err := getEnvIntIfSet("RCON_TIMEOUT_SECONDS")
+	if err != nil {
+		return nil, fmt.Errorf("invalid RCON_TIMEOUT_SECONDS: %w", err)
+	}
+	rconTimeoutSec := 10
+	if rconTimeoutSecValue != nil {
+		rconTimeoutSec = *rconTimeoutSecValue
+	}
 	cfg.RCONTimeout = time.Duration(rconTimeoutSec) * time.Second
 
 	if err := cfg.validate(); err != nil {
@@ -128,8 +144,16 @@ func (c *Config) validate() error {
 	if c.MaxInspectFailureAttempts < 1 {
 		return errors.New("MAX_INSPECT_FAILURE_ATTEMPTS must be at least 1")
 	}
-	if c.RCONEnabled() && c.RCONTimeout <= 0 {
-		return errors.New("RCON_TIMEOUT_SECONDS must be positive")
+	if c.RCONEnabled() {
+		if strings.TrimSpace(c.RCONHost) == "" {
+			return errors.New("RCON_HOST is required when RCON is enabled")
+		}
+		if c.RCONPort < 1 || c.RCONPort > 65535 {
+			return errors.New("RCON_PORT must be between 1 and 65535 when RCON is enabled")
+		}
+		if c.RCONTimeout <= 0 {
+			return errors.New("RCON_TIMEOUT_SECONDS must be positive")
+		}
 	}
 	return nil
 }
@@ -148,6 +172,20 @@ func getEnvIntOrDefault(key string, defaultVal int) int {
 		}
 	}
 	return defaultVal
+}
+
+func getEnvIntIfSet(key string) (*int, error) {
+	val := os.Getenv(key)
+	if val == "" {
+		return nil, nil
+	}
+
+	intVal, err := strconv.Atoi(val)
+	if err != nil {
+		return nil, err
+	}
+
+	return &intVal, nil
 }
 
 func getEnvBoolOrDefault(key string, defaultVal bool) bool {
