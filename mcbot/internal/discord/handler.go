@@ -370,10 +370,16 @@ func (h *Handler) hasRequiredRole(s *discordgo.Session, i *discordgo.Interaction
 
 func (h *Handler) isTrustedGuild(i *discordgo.InteractionCreate) bool {
 	if h.cfg == nil || strings.TrimSpace(h.cfg.TrustedGuildID) == "" {
-		return true
+		return false
 	}
 
 	return i.GuildID != "" && i.GuildID == h.cfg.TrustedGuildID
+}
+
+func noAllowedMentions() *discordgo.MessageAllowedMentions {
+	return &discordgo.MessageAllowedMentions{
+		Parse: []discordgo.AllowedMentionType{},
+	}
 }
 
 func (h *Handler) ensureTrustedGuild(s *discordgo.Session, i *discordgo.InteractionCreate) bool {
@@ -555,7 +561,7 @@ func (h *Handler) respondEphemeral(s *discordgo.Session, i *discordgo.Interactio
 		Data: &discordgo.InteractionResponseData{
 			Content:         content,
 			Flags:           discordgo.MessageFlagsEphemeral,
-			AllowedMentions: &discordgo.MessageAllowedMentions{},
+			AllowedMentions: noAllowedMentions(),
 		},
 	})
 	if err != nil {
@@ -567,7 +573,7 @@ func (h *Handler) respondEphemeralFollowup(s *discordgo.Session, i *discordgo.In
 	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
 		Content:         content,
 		Flags:           discordgo.MessageFlagsEphemeral,
-		AllowedMentions: &discordgo.MessageAllowedMentions{},
+		AllowedMentions: noAllowedMentions(),
 	})
 	if err != nil {
 		log.Printf("ephemeral followup 응답 실패: %v", err)
@@ -607,7 +613,7 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Flags:           discordgo.MessageFlagsEphemeral,
-			AllowedMentions: &discordgo.MessageAllowedMentions{},
+			AllowedMentions: noAllowedMentions(),
 		},
 	})
 	if err != nil {

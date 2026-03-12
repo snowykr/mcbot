@@ -274,6 +274,52 @@ func decodeWebhookParams(t *testing.T, body []byte) discordgo.WebhookParams {
 	return params
 }
 
+func assertAllowedMentionsParseEmpty(t *testing.T, body []byte, fieldPath ...string) {
+	t.Helper()
+
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("failed to decode raw payload: %v", err)
+	}
+
+	current := payload
+	for _, field := range fieldPath {
+		raw, ok := current[field]
+		if !ok {
+			t.Fatalf("expected %q field in payload", field)
+		}
+
+		var next map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &next); err != nil {
+			t.Fatalf("failed to decode %q field: %v", field, err)
+		}
+		current = next
+	}
+
+	allowedMentionsRaw, ok := current["allowed_mentions"]
+	if !ok {
+		t.Fatal("expected allowed_mentions field in payload")
+	}
+
+	var allowedMentions map[string]json.RawMessage
+	if err := json.Unmarshal(allowedMentionsRaw, &allowedMentions); err != nil {
+		t.Fatalf("failed to decode allowed_mentions field: %v", err)
+	}
+
+	parseRaw, ok := allowedMentions["parse"]
+	if !ok {
+		t.Fatal("expected allowed_mentions.parse field in payload")
+	}
+
+	var parse []string
+	if err := json.Unmarshal(parseRaw, &parse); err != nil {
+		t.Fatalf("failed to decode allowed_mentions.parse: %v", err)
+	}
+	if len(parse) != 0 {
+		t.Fatalf("expected allowed_mentions.parse to be empty, got %v", parse)
+	}
+}
+
 func TestHandleButtonStart_FirstUpdateUsesEmbedTimeout(t *testing.T) {
 	cfg := &config.Config{
 		EmbedUpdateTimeout:     5 * time.Second,
@@ -334,16 +380,14 @@ func TestHandleInteraction_UnknownApplicationCommandRespondsEphemeral(t *testing
 	if response.Data == nil || response.Data.Content != "알 수 없는 명령어입니다." {
 		t.Fatalf("unexpected interaction response: %+v", response.Data)
 	}
-	if response.Data.AllowedMentions == nil || len(response.Data.AllowedMentions.Parse) != 0 {
-		t.Fatalf("expected allowed mentions to be disabled, got %+v", response.Data.AllowedMentions)
-	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 }
 
 func TestHandleInteraction_RCONDisabledRespondsEphemeral(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
 	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
 
-	handler := NewHandler(&config.Config{McbotRoleName: "마크봇"}, &testServerController{}, &testStatusEmbedUpdater{}, nil)
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: "guild-id"}, &testServerController{}, &testStatusEmbedUpdater{}, nil)
 	interaction := newRCONInteraction("list", []string{"role-id"})
 
 	handler.HandleInteraction(session, interaction)
@@ -360,13 +404,14 @@ func TestHandleInteraction_RCONDisabledRespondsEphemeral(t *testing.T) {
 	if response.Data == nil || !strings.Contains(response.Data.Content, "RCON이 활성화되지 않았습니다") {
 		t.Fatalf("unexpected response content: %+v", response.Data)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 }
 
 func TestHandleInteraction_RCONEmptyCommandRespondsEphemeral(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
 	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
 
-	handler := NewHandler(&config.Config{McbotRoleName: "마크봇"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: "guild-id"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
 	interaction := newRCONInteraction("", []string{"role-id"})
 
 	handler.HandleInteraction(session, interaction)
@@ -383,13 +428,14 @@ func TestHandleInteraction_RCONEmptyCommandRespondsEphemeral(t *testing.T) {
 	if response.Data == nil || !strings.Contains(response.Data.Content, "명령어를 입력해주세요") {
 		t.Fatalf("unexpected response content: %+v", response.Data)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 }
 
 func TestHandleInteraction_RCONPermissionDenied(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
 	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
 
-	handler := NewHandler(&config.Config{McbotRoleName: "마크봇"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: "guild-id"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
 	interaction := newRCONInteraction("list", nil)
 
 	handler.HandleInteraction(session, interaction)
@@ -403,11 +449,37 @@ func TestHandleInteraction_RCONPermissionDenied(t *testing.T) {
 	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
 		t.Fatalf("expected deferred response, got %v", deferred.Type)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 
 	followup := decodeWebhookParams(t, requests[1].Body)
 	if !strings.Contains(followup.Content, "역할이 필요합니다") {
 		t.Fatalf("unexpected followup content: %q", followup.Content)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[1].Body)
+}
+
+func TestHandleInteraction_RCONRejectsWhenTrustedGuildUnset(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
+
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇"}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	interaction := newRCONInteraction("list", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate response, got %v", response.Type)
+	}
+	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
+		t.Fatalf("unexpected response content: %+v", response.Data)
+	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 }
 
 func TestHandleInteraction_RCONWrongGuildRespondsEphemeralBeforeDeferred(t *testing.T) {
@@ -435,6 +507,7 @@ func TestHandleInteraction_RCONWrongGuildRespondsEphemeralBeforeDeferred(t *test
 	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
 		t.Fatalf("unexpected response content: %+v", response.Data)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 }
 
 func TestHandleInteraction_RCONTrustedGuildAllowsExecution(t *testing.T) {
@@ -492,6 +565,7 @@ func TestHandleInteraction_ToggleWrongGuildRespondsEphemeral(t *testing.T) {
 	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
 		t.Fatalf("unexpected response content: %+v", response.Data)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 }
 
 func TestHandleInteraction_ToggleTrustedGuildDefersMessageUpdate(t *testing.T) {
@@ -550,6 +624,7 @@ func TestHandleInteraction_StopConfirmWrongGuildRespondsEphemeral(t *testing.T) 
 	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
 		t.Fatalf("unexpected response content: %+v", response.Data)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 }
 
 func TestHandleInteraction_StopCancelWrongGuildRespondsEphemeral(t *testing.T) {
@@ -569,6 +644,7 @@ func TestHandleInteraction_StopCancelWrongGuildRespondsEphemeral(t *testing.T) {
 	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
 		t.Fatalf("unexpected response content: %+v", response.Data)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 }
 
 func TestHandleInteraction_RCONNoGuildRespondsEphemeral(t *testing.T) {
@@ -596,13 +672,14 @@ func TestHandleInteraction_RCONNoGuildRespondsEphemeral(t *testing.T) {
 	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
 		t.Fatalf("unexpected response content: %+v", response.Data)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 }
 
 func TestHandleInteraction_RCONRequiresRunningServer(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
 	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
 
-	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", EmbedUpdateTimeout: time.Second}, &testServerController{
+	handler := NewHandler(&config.Config{McbotRoleName: "마크봇", TrustedGuildID: "guild-id", EmbedUpdateTimeout: time.Second}, &testServerController{
 		presenceVal: mcserver.PresenceState{ServerState: state.StateStopped},
 	}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
 	interaction := newRCONInteraction("list", []string{"role-id"})
@@ -618,11 +695,13 @@ func TestHandleInteraction_RCONRequiresRunningServer(t *testing.T) {
 	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
 		t.Fatalf("expected deferred response, got %v", deferred.Type)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 
 	followup := decodeWebhookParams(t, requests[1].Body)
 	if !strings.Contains(followup.Content, "서버가 실행 중이 아닙니다") {
 		t.Fatalf("unexpected followup content: %q", followup.Content)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[1].Body)
 }
 
 func TestHandleInteraction_RCONDefersBeforePresenceCheck(t *testing.T) {
@@ -639,6 +718,7 @@ func TestHandleInteraction_RCONDefersBeforePresenceCheck(t *testing.T) {
 	executor := &testRCONExecutor{response: "There are 0 of a max of 20 players online"}
 	handler := NewHandler(&config.Config{
 		McbotRoleName:      "마크봇",
+		TrustedGuildID:     "guild-id",
 		EmbedUpdateTimeout: time.Second,
 		RCONTimeout:        time.Second,
 	}, controller, &testStatusEmbedUpdater{}, executor)
@@ -669,6 +749,7 @@ func TestHandleInteraction_RCONDefersBeforePresenceCheck(t *testing.T) {
 		<-handlerDone
 		t.Fatalf("expected deferred response, got %v", deferred.Type)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 
 	close(presenceBlock)
 
@@ -687,6 +768,7 @@ func TestHandleInteraction_RCONDefersBeforePresenceCheck(t *testing.T) {
 	if !strings.Contains(followup.Content, "명령 실행 완료") {
 		t.Fatalf("unexpected followup content: %q", followup.Content)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[1].Body)
 }
 
 func TestHandleInteraction_RCONSuccessSanitizesAndTruncatesResponse(t *testing.T) {
@@ -696,6 +778,7 @@ func TestHandleInteraction_RCONSuccessSanitizesAndTruncatesResponse(t *testing.T
 	executor := &testRCONExecutor{response: "```@everyone" + strings.Repeat("a", 1805)}
 	handler := NewHandler(&config.Config{
 		McbotRoleName:      "마크봇",
+		TrustedGuildID:     "guild-id",
 		EmbedUpdateTimeout: time.Second,
 		RCONTimeout:        time.Second,
 	}, &testServerController{
@@ -719,9 +802,7 @@ func TestHandleInteraction_RCONSuccessSanitizesAndTruncatesResponse(t *testing.T
 	if executor.lastCommand != "list" {
 		t.Fatalf("expected command to be forwarded, got %q", executor.lastCommand)
 	}
-	if followup.AllowedMentions == nil || len(followup.AllowedMentions.Parse) != 0 {
-		t.Fatalf("expected followup allowed mentions to be disabled, got %+v", followup.AllowedMentions)
-	}
+	assertAllowedMentionsParseEmpty(t, requests[1].Body)
 	if !strings.Contains(followup.Content, "✅ 명령 실행 완료") {
 		t.Fatalf("unexpected followup content: %q", followup.Content)
 	}
@@ -740,6 +821,7 @@ func TestHandleInteraction_RCONExecutionFailureUsesEscapedFollowup(t *testing.T)
 	executor := &testRCONExecutor{err: errors.New("```@everyone```")}
 	handler := NewHandler(&config.Config{
 		McbotRoleName:      "마크봇",
+		TrustedGuildID:     "guild-id",
 		EmbedUpdateTimeout: time.Second,
 		RCONTimeout:        time.Second,
 	}, &testServerController{
@@ -760,9 +842,7 @@ func TestHandleInteraction_RCONExecutionFailureUsesEscapedFollowup(t *testing.T)
 	}
 
 	followup := decodeWebhookParams(t, requests[1].Body)
-	if followup.AllowedMentions == nil || len(followup.AllowedMentions.Parse) != 0 {
-		t.Fatalf("expected followup allowed mentions to be disabled, got %+v", followup.AllowedMentions)
-	}
+	assertAllowedMentionsParseEmpty(t, requests[1].Body)
 	if !strings.Contains(followup.Content, "RCON 실행 실패:") {
 		t.Fatalf("unexpected followup content: %q", followup.Content)
 	}
@@ -784,6 +864,7 @@ func TestHandleInteraction_RCONSuccessWithEmptyResponseUsesPlainSuccessMessage(t
 	executor := &testRCONExecutor{}
 	handler := NewHandler(&config.Config{
 		McbotRoleName:      "마크봇",
+		TrustedGuildID:     "guild-id",
 		EmbedUpdateTimeout: time.Second,
 		RCONTimeout:        time.Second,
 	}, &testServerController{
@@ -802,11 +883,13 @@ func TestHandleInteraction_RCONSuccessWithEmptyResponseUsesPlainSuccessMessage(t
 	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
 		t.Fatalf("expected deferred response, got %v", deferred.Type)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 
 	followup := decodeWebhookParams(t, requests[1].Body)
 	if followup.Content != "✅ 명령 실행 완료" {
 		t.Fatalf("unexpected followup content: %q", followup.Content)
 	}
+	assertAllowedMentionsParseEmpty(t, requests[1].Body)
 }
 
 func TestHandleButtonStart_GoroutineUpdateUsesIndependentContext(t *testing.T) {
