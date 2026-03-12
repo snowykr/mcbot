@@ -69,7 +69,7 @@ func TestClientExecute_ContextDeadlineExceeded(t *testing.T) {
 }
 
 func TestClientExecute_ConnectionFailure(t *testing.T) {
-	port := unusedLocalPort(t)
+	port := abruptCloseServerPort(t)
 	client := NewClient("127.0.0.1", port, "secret", 200*time.Millisecond)
 
 	_, err := client.Execute(context.Background(), "list")
@@ -151,19 +151,30 @@ func splitServerAddr(t *testing.T, addr string) (string, int) {
 	return host, port
 }
 
-func unusedLocalPort(t *testing.T) int {
+func abruptCloseServerPort(t *testing.T) int {
 	t.Helper()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("failed to allocate local port: %v", err)
+		t.Fatalf("failed to create test listener: %v", err)
 	}
-	defer listener.Close()
+	t.Cleanup(func() {
+		_ = listener.Close()
+	})
 
 	addr, ok := listener.Addr().(*net.TCPAddr)
 	if !ok {
 		t.Fatalf("unexpected listener address type %T", listener.Addr())
 	}
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+		_ = listener.Close()
+	}()
 
 	return addr.Port
 }
