@@ -25,6 +25,8 @@ type discordAPITestServer struct {
 	oauthApplicationID string
 }
 
+var discordEndpointOverrideMu sync.Mutex
+
 type discordAPITestServerOptions struct {
 	oauthApplicationID string
 }
@@ -188,6 +190,8 @@ func newDiscordAPITestServer(t *testing.T, opts discordAPITestServerOptions) *di
 }
 
 func overrideDiscordEndpoints(baseURL string) func() {
+	discordEndpointOverrideMu.Lock()
+
 	oldEndpointDiscord := discordgo.EndpointDiscord
 	oldEndpointAPI := discordgo.EndpointAPI
 	oldEndpointApplications := discordgo.EndpointApplications
@@ -209,6 +213,7 @@ func overrideDiscordEndpoints(baseURL string) func() {
 		discordgo.EndpointOAuth2 = oldEndpointOAuth2
 		discordgo.EndpointOAuth2Applications = oldEndpointOAuth2Applications
 		discordgo.EndpointOAuth2Application = oldEndpointOAuth2Application
+		discordEndpointOverrideMu.Unlock()
 	}
 }
 

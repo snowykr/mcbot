@@ -637,7 +637,7 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 		return
 	}
 
-	log.Printf("[RCON] 명령 실행 (User: %s, ID: %s, Command: %s)", username, userID, command)
+	log.Printf("[RCON] 명령 실행 (User: %s, ID: %s)", username, userID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), h.cfg.RCONTimeout)
 	defer cancel()
@@ -646,10 +646,10 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 
 	var content string
 	if rconErr != nil {
-		log.Printf("[RCON] 실행 실패 (User: %s, Command: %s, Error: %v)", username, command, rconErr)
+		log.Printf("[RCON] 실행 실패 (User: %s, ID: %s, Error: %v)", username, userID, rconErr)
 		content = "❌ RCON 실행 실패: " + EscapeDiscordText(rconErr.Error())
 	} else {
-		log.Printf("[RCON] 실행 성공 (User: %s, Command: %s)", username, command)
+		log.Printf("[RCON] 실행 성공 (User: %s, ID: %s)", username, userID)
 		content = "✅ 명령 실행 완료"
 		if response != "" {
 			content += "\n```txt\n" + formatRCONResponse(response) + "\n```"

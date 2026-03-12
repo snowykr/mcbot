@@ -1,10 +1,12 @@
 package discord
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +24,8 @@ const (
 	testGuildID      = "123456789012345678"
 	testOtherGuildID = "987654321098765432"
 )
+
+var discordEndpointOverrideMu sync.Mutex
 
 type testServerController struct {
 	startCh         chan mcserver.StartResult
@@ -162,6 +166,8 @@ func newDiscordAPITestSession(t *testing.T) (*discordgo.Session, *discordAPITest
 }
 
 func overrideDiscordEndpoints(baseURL string) func() {
+	discordEndpointOverrideMu.Lock()
+
 	oldEndpointDiscord := discordgo.EndpointDiscord
 	oldEndpointAPI := discordgo.EndpointAPI
 	oldEndpointWebhooks := discordgo.EndpointWebhooks
@@ -177,6 +183,7 @@ func overrideDiscordEndpoints(baseURL string) func() {
 		discordgo.EndpointAPI = oldEndpointAPI
 		discordgo.EndpointWebhooks = oldEndpointWebhooks
 		discordgo.EndpointApplications = oldEndpointApplications
+		discordEndpointOverrideMu.Unlock()
 	}
 }
 
@@ -860,6 +867,114 @@ func TestHandleInteraction_RCONExecutionFailureUsesEscapedFollowup(t *testing.T)
 	if !strings.Contains(followup.Content, "@\u200beveryone") {
 		t.Fatalf("unexpected followup content: %q", followup.Content)
 	}
+}
+
+func TestHandleInteraction_RCONLogsDoNotContainRawCommand(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+
+	command := "whitelist add SensitivePlayer\nforged-log-line"
+	executor := &testRCONExecutor{}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:      "마크봇",
+		TrustedGuildID:     testGuildID,
+		EmbedUpdateTimeout: time.Second,
+		RCONTimeout:        time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, executor)
+	interaction := newRCONInteraction(command, []string{"role-id"})
+
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	var logBuf bytes.Buffer
+	log.SetFlags(0)
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+	})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if followup.Content != "✅ 명령 실행 완료" {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+	if executor.lastCommand != command {
+		t.Fatalf("expected command to be forwarded, got %q", executor.lastCommand)
+	}
+
+	logs := logBuf.String()
+	if !strings.Contains(logs, "[RCON] 명령 실행") {
+		t.Fatalf("expected execution log, got %q", logs)
+	}
+	if !strings.Contains(logs, "[RCON] 실행 성공") {
+		t.Fatalf("expected success log, got %q", logs)
+	}
+	if strings.Contains(logs, command) {
+		t.Fatalf("expected logs to omit raw command, got %q", logs)
+	}
+	assertAllowedMentionsParseEmpty(t, requests[1].Body)
+}
+
+func TestHandleInteraction_RCONFailureLogsDoNotContainRawCommand(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+
+	command := "op SensitivePlayer\nforged-log-line"
+	executor := &testRCONExecutor{err: errors.New("boom")}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:      "마크봇",
+		TrustedGuildID:     testGuildID,
+		EmbedUpdateTimeout: time.Second,
+		RCONTimeout:        time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, executor)
+	interaction := newRCONInteraction(command, []string{"role-id"})
+
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	var logBuf bytes.Buffer
+	log.SetFlags(0)
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+	})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(requests))
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "RCON 실행 실패:") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+	if executor.lastCommand != command {
+		t.Fatalf("expected command to be forwarded, got %q", executor.lastCommand)
+	}
+
+	logs := logBuf.String()
+	if !strings.Contains(logs, "[RCON] 명령 실행") {
+		t.Fatalf("expected execution log, got %q", logs)
+	}
+	if !strings.Contains(logs, "[RCON] 실행 실패") {
+		t.Fatalf("expected failure log, got %q", logs)
+	}
+	if strings.Contains(logs, command) {
+		t.Fatalf("expected logs to omit raw command, got %q", logs)
+	}
+	assertAllowedMentionsParseEmpty(t, requests[1].Body)
 }
 
 func TestHandleInteraction_RCONSuccessWithEmptyResponseUsesPlainSuccessMessage(t *testing.T) {
