@@ -607,7 +607,7 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 	var content string
 	if rconErr != nil {
 		log.Printf("[RCON] 실행 실패 (User: %s, Command: %s, Error: %v)", username, command, rconErr)
-		content = "❌ RCON 실행 실패: " + rconErr.Error()
+		content = "❌ RCON 실행 실패: " + EscapeDiscordText(rconErr.Error())
 	} else {
 		log.Printf("[RCON] 실행 성공 (User: %s, Command: %s)", username, command)
 		content = "✅ 명령 실행 완료"

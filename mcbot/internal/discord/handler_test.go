@@ -525,11 +525,11 @@ func TestHandleInteraction_RCONSuccessSanitizesAndTruncatesResponse(t *testing.T
 	}
 }
 
-func TestHandleInteraction_RCONExecutionFailureUsesFollowup(t *testing.T) {
+func TestHandleInteraction_RCONExecutionFailureUsesEscapedFollowup(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
 	addGuildRole(t, session, "guild-id", "role-id", "마크봇")
 
-	executor := &testRCONExecutor{err: errors.New("boom")}
+	executor := &testRCONExecutor{err: errors.New("```@everyone```")}
 	handler := NewHandler(&config.Config{
 		McbotRoleName:      "마크봇",
 		EmbedUpdateTimeout: time.Second,
@@ -552,7 +552,19 @@ func TestHandleInteraction_RCONExecutionFailureUsesFollowup(t *testing.T) {
 	}
 
 	followup := decodeWebhookParams(t, requests[1].Body)
-	if !strings.Contains(followup.Content, "RCON 실행 실패: boom") {
+	if followup.AllowedMentions == nil || len(followup.AllowedMentions.Parse) != 0 {
+		t.Fatalf("expected followup allowed mentions to be disabled, got %+v", followup.AllowedMentions)
+	}
+	if !strings.Contains(followup.Content, "RCON 실행 실패:") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+	if strings.Contains(followup.Content, "```@everyone```") {
+		t.Fatalf("expected raw markdown and mention to be escaped, got %q", followup.Content)
+	}
+	if !strings.Contains(followup.Content, "\\`\\`\\`") {
+		t.Fatalf("expected code fences to be escaped, got %q", followup.Content)
+	}
+	if !strings.Contains(followup.Content, "@\u200beveryone") {
 		t.Fatalf("unexpected followup content: %q", followup.Content)
 	}
 }
