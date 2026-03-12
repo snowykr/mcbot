@@ -189,6 +189,9 @@ func validateRequiredSnowflakeID(key, value string) error {
 	if strconv.FormatUint(parsedValue, 10) != value {
 		return fmt.Errorf("%s must be a canonical Discord snowflake ID (no leading zeros)", key)
 	}
+	if parsedValue == 0 {
+		return fmt.Errorf("%s must be a non-zero Discord snowflake ID", key)
+	}
 
 	return nil
 }

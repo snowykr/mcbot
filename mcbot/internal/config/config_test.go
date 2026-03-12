@@ -801,6 +801,7 @@ func TestValidate_TrustedGuildIDWhitespacePolicy(t *testing.T) {
 		expectErrorText string
 	}{
 		{name: "Valid guild ID", guildID: "123456789012345678"},
+		{name: "Zero guild ID", guildID: "0", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must be a non-zero Discord snowflake ID"},
 		{name: "Non-numeric guild ID", guildID: "guild-id", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must be a Discord snowflake ID (digits only)"},
 		{name: "Leading zeros", guildID: "0123456789012345678", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must be a canonical Discord snowflake ID (no leading zeros)"},
 		{name: "Whitespace only guild ID", guildID: "   \t\n  ", expectErrorText: "MCBOT_TRUSTED_GUILD_ID is required"},
@@ -869,6 +870,20 @@ func TestLoad_InvalidTrustedGuildIDRejected(t *testing.T) {
 		t.Fatal("expected load error but got nil")
 	}
 	if !strings.Contains(err.Error(), "MCBOT_TRUSTED_GUILD_ID must be a Discord snowflake ID (digits only)") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_TrustedGuildIDZeroRejected(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "0")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected load error but got nil")
+	}
+	if !strings.Contains(err.Error(), "MCBOT_TRUSTED_GUILD_ID must be a non-zero Discord snowflake ID") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
