@@ -331,15 +331,15 @@ var slashCommands = []*discordgo.ApplicationCommand{
 }
 
 func registerSlashCommands(s *discordgo.Session) []*discordgo.ApplicationCommand {
-	registered := make([]*discordgo.ApplicationCommand, 0, len(slashCommands))
-	for _, cmd := range slashCommands {
-		created, err := s.ApplicationCommandCreate(s.State.User.ID, "", cmd)
-		if err != nil {
-			log.Printf("슬래시 커맨드 등록 실패 (%s): %v", cmd.Name, err)
-			continue
-		}
-		registered = append(registered, created)
-		log.Printf("슬래시 커맨드 등록 완료: /%s", cmd.Name)
+	registered, err := s.ApplicationCommandBulkOverwrite(s.State.User.ID, "", slashCommands)
+	if err != nil {
+		log.Printf("슬래시 커맨드 동기화 실패: %v", err)
+		return nil
 	}
+
+	for _, cmd := range registered {
+		log.Printf("슬래시 커맨드 동기화 완료: /%s", cmd.Name)
+	}
+
 	return registered
 }
