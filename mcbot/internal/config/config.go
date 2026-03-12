@@ -36,7 +36,7 @@ type Config struct {
 }
 
 func (c *Config) RCONEnabled() bool {
-	return c.RCONPassword != ""
+	return strings.TrimSpace(c.RCONPassword) != ""
 }
 
 func Load() (*Config, error) {

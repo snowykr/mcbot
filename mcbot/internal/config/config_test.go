@@ -517,6 +517,27 @@ func TestValidate_RCONSettingsWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestRCONEnabled_TrimsWhitespacePassword(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+		enabled  bool
+	}{
+		{name: "Configured password", password: "secret", enabled: true},
+		{name: "Empty password", password: "", enabled: false},
+		{name: "Whitespace-only password", password: "   \t\n  ", enabled: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{RCONPassword: tt.password}
+			if got := cfg.RCONEnabled(); got != tt.enabled {
+				t.Fatalf("expected RCONEnabled=%v, got %v", tt.enabled, got)
+			}
+		})
+	}
+}
+
 func TestLoad_InvalidRCONNumericEnv(t *testing.T) {
 	t.Setenv("DISCORD_TOKEN", "token")
 	t.Setenv("EMBED_CHANNEL_ID", "123456")
