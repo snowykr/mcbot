@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorcon/rcon"
@@ -26,8 +29,11 @@ type Client struct {
 }
 
 func NewClient(host string, port int, password string, timeout time.Duration) *Client {
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	}
 	return &Client{
-		address:  fmt.Sprintf("%s:%d", host, port),
+		address:  net.JoinHostPort(host, strconv.Itoa(port)),
 		password: password,
 		timeout:  timeout,
 	}

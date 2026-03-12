@@ -4,9 +4,37 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	gorcon "github.com/gorcon/rcon"
+	rcontest "github.com/gorcon/rcon/rcontest"
 )
+
+func TestNewClient_AddressFormatting(t *testing.T) {
+	tests := []struct {
+		name     string
+		host     string
+		port     int
+		expected string
+	}{
+		{name: "hostname", host: "mc-server", port: 25575, expected: "mc-server:25575"},
+		{name: "ipv4", host: "127.0.0.1", port: 25575, expected: "127.0.0.1:25575"},
+		{name: "ipv6", host: "2001:db8::1", port: 25575, expected: "[2001:db8::1]:25575"},
+		{name: "bracketed ipv6", host: "[2001:db8::1]", port: 25575, expected: "[2001:db8::1]:25575"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := NewClient(tt.host, tt.port, "secret", time.Second)
+			if client.address != tt.expected {
+				t.Fatalf("expected address %q, got %q", tt.expected, client.address)
+			}
+		})
+	}
+}
 
 func TestClientExecute_EmptyCommand(t *testing.T) {
 	client := NewClient("127.0.0.1", 25575, "secret", time.Second)
@@ -47,6 +75,56 @@ func TestClientExecute_ConnectionFailure(t *testing.T) {
 	if !errors.Is(err, ErrConnectionFailed) {
 		t.Fatalf("expected ErrConnectionFailed, got %v", err)
 	}
+}
+
+func TestClientExecute_AuthFailure(t *testing.T) {
+	server := rcontest.NewServer(rcontest.SetSettings(rcontest.Settings{Password: "secret"}))
+	defer server.Close()
+
+	host, port := splitServerAddr(t, server.Addr())
+	client := NewClient(host, port, "wrong", time.Second)
+
+	_, err := client.Execute(context.Background(), "list")
+	if !errors.Is(err, ErrAuthFailed) {
+		t.Fatalf("expected ErrAuthFailed, got %v", err)
+	}
+}
+
+func TestClientExecute_CommandFailureWrapsError(t *testing.T) {
+	server := rcontest.NewServer(
+		rcontest.SetSettings(rcontest.Settings{Password: "secret"}),
+		rcontest.SetCommandHandler(func(c *rcontest.Context) {
+			_, _ = gorcon.NewPacket(gorcon.SERVERDATA_RESPONSE_VALUE, 42, "bad packet id").WriteTo(c.Conn())
+		}),
+	)
+	defer server.Close()
+
+	host, port := splitServerAddr(t, server.Addr())
+	client := NewClient(host, port, "secret", time.Second)
+
+	_, err := client.Execute(context.Background(), "list")
+	if err == nil {
+		t.Fatal("expected command execution error")
+	}
+	if !strings.Contains(err.Error(), "명령 실행 실패:") {
+		t.Fatalf("expected wrapped command failure, got %v", err)
+	}
+}
+
+func splitServerAddr(t *testing.T, addr string) (string, int) {
+	t.Helper()
+
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("failed to split server address %q: %v", addr, err)
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("failed to parse server port %q: %v", portStr, err)
+	}
+
+	return host, port
 }
 
 func unusedLocalPort(t *testing.T) int {
