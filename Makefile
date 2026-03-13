@@ -4,9 +4,18 @@ GO_DIR=mcbot
 .PHONY: up up-all up-mc ensure-mc down nuke go-deps go-build
 
 ensure-mc:
-	@if ! docker ps -a --format '{{.Names}}' | grep -q '^mc-server$$'; then \
+	@if ! docker compose ps -a --format '{{.Service}}' | grep -q '^$(MC_SERVICE)$$'; then \
 		echo 'mc-server 컨테이너를 생성합니다...'; \
-		docker compose create $(MC_SERVICE); \
+		create_output=$$(docker compose create $(MC_SERVICE) 2>&1); \
+		create_status=$$?; \
+		if [ $$create_status -ne 0 ]; then \
+			if printf '%s' "$$create_output" | grep -q 'already in use'; then \
+				echo 'mc-server 컨테이너가 이미 존재합니다.'; \
+			else \
+				printf '%s\n' "$$create_output"; \
+				exit $$create_status; \
+			fi; \
+		fi; \
 	else \
 		echo 'mc-server 컨테이너가 이미 존재합니다.'; \
 	fi

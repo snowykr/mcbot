@@ -74,6 +74,17 @@ cp .env.example .env
 
 `EMBED_CHANNEL_ID`는 반드시 `MCBOT_TRUSTED_GUILD_ID`와 같은 서버에 속한 채널이어야 합니다. 다른 서버 채널을 지정하면 버튼은 표시될 수 있어도 실행은 거부됩니다.
 
+mc-server 관련 설정은 `.env.example`에서 필요한 항목만 주석을 해제해 선택적으로 오버라이드합니다.
+
+UID/GID를 1000에서 1001로 올려야 하는 환경(OCI, Oracle VM 등)이라면 기존 `/data` 볼륨의 소유권도 함께 맞춰야 합니다. 이미 1001:1001 소유인 볼륨을 1000:1000으로 내리면 권한 문제가 생길 수 있습니다.
+
+mc-server 관련 값을 바꾼 경우에는 기존 컨테이너를 재생성해야 반영됩니다. 실행 중이라면 먼저 중지한 다음 아래처럼 재생성하세요:
+
+```bash
+docker compose stop mc-server
+docker compose rm -sf mc-server && docker compose create mc-server
+```
+
 ### 2. 봇 실행 (권장)
 
 가장 간단한 방법은 Make를 사용하는 것입니다:
@@ -185,6 +196,19 @@ docker compose up -d mcbot
 | `STOP_TIMEOUT_SECONDS` | ❌ | `120`                     | 서버 종료 타임아웃 (초, Docker가 컨테이너를 그레이스풀하게 중지하기 위해 기다리는 시간) |
 | `SERVER_OPERATION_TIMEOUT_SECONDS` | ❌ | `720`                     | 서버 작업(시작/종료) 전체 타임아웃 (초, 버튼 클릭부터 최종 결과 처리까지의 상위 타임아웃) |
 | `EMBED_UPDATE_TIMEOUT_SECONDS` | ❌ | `10`                      | 임베드 메시지 업데이트 타임아웃 (초, Discord로 상태 임베드를 전송/수정할 때의 최대 대기 시간) |
+| `MC_SERVER_RESTART_POLICY` | ❌ | `no`                      | mc-server 재시작 정책 |
+| `MC_SERVER_PORT_PUBLISH` | ❌ | `25565:25565`             | mc-server 포트 매핑 (호스트:컨테이너) |
+| `UID` | ❌ | `1000`                    | 컨테이너 내부 사용자 UID |
+| `GID` | ❌ | `1000`                    | 컨테이너 내부 사용자 GID |
+| `VERSION` | ❌ | `1.20.1`                  | 마인크래프트 서버 버전 |
+| `TYPE` | ❌ | `FORGE`                   | 마인크래프트 서버 타입 |
+| `DIFFICULTY` | ❌ | `easy`                    | 서버 난이도 |
+| `MEMORY` | ❌ | `14G`                     | 서버 메모리 |
+| `INIT_MEMORY` | ❌ | `14G`                     | 서버 초기 메모리 |
+| `MOTD` | ❌ | `SNOWY'S SERVER`          | 서버 MOTD |
+| `VIEW_DISTANCE` | ❌ | `8`                       | 렌더 거리 |
+| `SIMULATION_DISTANCE` | ❌ | `8`                       | 시뮬레이션 거리 |
+| `ENABLE_RCON` | ❌ | `true`                    | RCON 활성화 여부 |
 | `MC_JOIN_LOG_PATTERN` | ❌ | `]: (.+) joined the game` | 플레이어 접속 로그 패턴 (정규식) |
 | `MC_LEAVE_LOG_PATTERN` | ❌ | `]: (.+) left the game`   | 플레이어 퇴장 로그 패턴 (정규식) |
 | `AUTO_RECOVER_ENABLED` | ❌ | `true` | 크래시 후 자동 복구 활성화 여부 |
@@ -197,6 +221,15 @@ docker compose up -d mcbot
 | `RCON_PORT` | ❌ | `25575` | RCON 서버 포트 |
 | `RCON_PASSWORD` | ❌ | - | RCON 비밀번호 (설정 시 Discord `/마크봇 rcon` 명령어 활성화) |
 | `RCON_TIMEOUT_SECONDS` | ❌ | `10` | RCON 명령 타임아웃 (초) |
+| `RCON_CMDS_STARTUP` | ❌ | - | RCON 시작 명령어 |
+
+### Compose 서비스 이름과 컨테이너 이름
+
+`MC_CONTAINER_NAME`은 런타임 컨테이너의 이름만 바꿉니다. Compose의 서비스 키는 계속 `mc-server`이며, 이 이름을 기준으로 Make 타겟과 예시 명령이 동작합니다. 그래서 `docker compose create mc-server`와 `make ensure-mc` 같은 명령은 그대로 사용해야 합니다.
+
+`RCON_HOST`의 기본값이 `mc-server`인 이유도 동일합니다. Compose 네트워크에서 서비스 DNS는 서비스 키로 고정되므로, 컨테이너 이름을 바꿔도 `mc-server`가 기본입니다.
+
+이미 설치된 환경에서 `MC_CONTAINER_NAME`을 바꾸면 Compose가 새 컨테이너 이름을 적용하지 못합니다. 이 경우 기존 서비스와 컨테이너를 재생성해야 합니다. 이는 mc-server가 Compose로 관리되는 설정을 바꿀 때 필요한 일반 규칙의 한 사례입니다.
 
 ### 서버 준비 완료 자동 감지
 
@@ -210,11 +243,11 @@ mcbot은 대표적인 Minecraft 서버 이미지의 "서버 준비 완료" 로�
 
 ### RCON 설정
 
-RCON은 선택적 기능입니다. `RCON_PASSWORD`를 설정하면 Discord에서 RCON 명령어를 사용할 수 있습니다.
+RCON은 선택적 기능입니다. `mc-server` 컨테이너는 기본값으로 RCON이 켜져 있습니다 (`ENABLE_RCON` 기본값 `true`).
 
 `/마크봇 rcon` 명령어는 등록 자체는 글로벌로 유지되지만, 실제 실행은 `MCBOT_TRUSTED_GUILD_ID`로 지정한 서버에서만 허용됩니다.
 
-**활성화 방법**: `.env` 파일에 `MCBOT_TRUSTED_GUILD_ID`와 `RCON_PASSWORD`를 설정합니다.
+**활성화 방법**: `.env` 파일에 `MCBOT_TRUSTED_GUILD_ID`와 `RCON_PASSWORD`를 설정한 뒤 봇을 재시작합니다.
 
 ```bash
 # .env 파일
@@ -225,12 +258,19 @@ RCON_PASSWORD=your_secure_password
 **동작 방식**:
 - `RCON_PASSWORD` 설정 시:
   - `mc-server`: 해당 비밀번호로 RCON 인증
-  - `mcbot`: `/마크봇 rcon` 명령어 정상 작동
+  - `mcbot`: 봇 재시작 후 `/마크봇 rcon` 명령어 정상 작동
 - `RCON_PASSWORD` 미설정 시:
-  - `mc-server`: 랜덤 비밀번호로 RCON 작동 (내부 기능 정상 작동, `RCON_CMDS_STARTUP` 포함)
+  - `mc-server`: 랜덤 비밀번호로 RCON 작동
   - `mcbot`: `/마크봇 rcon` 명령어 실행 시 설정 안내 메시지 표시
 
-`docker-compose.yml`은 `RCON_PASSWORD`가 설정된 경우 해당 문자열 값을 `mc-server` 컨테이너에 전달합니다. RCON을 쓰지 않을 때는 값을 빈 문자열로 두지 말고 `.env`에서 해당 줄 자체를 제거해야 하며, 그 경우 `itzg/minecraft-server`의 기본 동작에 따라 랜덤 비밀번호가 사용됩니다.
+`docker-compose.yml`은 `RCON_PASSWORD`와 `RCON_CMDS_STARTUP`을 pass-through로 유지합니다. 값을 쓰지 않을 때는 `.env`에서 해당 줄 자체를 제거해야 하며, 그 경우 `itzg/minecraft-server`의 기본 동작에 따라 랜덤 비밀번호가 사용됩니다.
+
+`RCON_CMDS_STARTUP`는 예시용이며 기본값이 없습니다. 과거처럼 `keepInventory`가 자동 적용되지 않으니 필요하면 직접 설정하세요.
+
+```bash
+# .env 파일 (예시)
+RCON_CMDS_STARTUP=gamerule keepInventory true
+```
 
 `RCON_PASSWORD`가 공백만 있으면 미설정으로 취급됩니다. 실수로 앞뒤 공백이 붙은 비밀번호는 인증 불일치를 막기 위해 시작 시 에러로 거부됩니다.
 
