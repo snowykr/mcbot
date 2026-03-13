@@ -22,6 +22,10 @@ type StatusEmbedUpdater interface {
 	Update(ctx context.Context) error
 }
 
+type RCONExecutor interface {
+	Execute(ctx context.Context, command string) (string, error)
+}
+
 type StopConfirmationContext struct {
 	ConfirmationID string
 	UserID         string
@@ -63,14 +67,16 @@ type Handler struct {
 	cfg                   *config.Config
 	controller            ServerController
 	statusEmbed           StatusEmbedUpdater
+	rconClient            RCONExecutor
 	stopConfirmationStore *StopConfirmationStore
 }
 
-func NewHandler(cfg *config.Config, controller ServerController, statusEmbed StatusEmbedUpdater) *Handler {
+func NewHandler(cfg *config.Config, controller ServerController, statusEmbed StatusEmbedUpdater, rconClient RCONExecutor) *Handler {
 	return &Handler{
 		cfg:                   cfg,
 		controller:            controller,
 		statusEmbed:           statusEmbed,
+		rconClient:            rconClient,
 		stopConfirmationStore: NewStopConfirmationStore(),
 	}
 }
@@ -91,25 +97,24 @@ func (h *Handler) HandleInteraction(s *discordgo.Session, i *discordgo.Interacti
 }
 
 func (h *Handler) handleApplicationCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	commandName := i.ApplicationCommandData().Name
-	log.Printf("슬래시 커맨드 수신 (더 이상 지원하지 않음): %s (ID: %s, GuildID: %s, UserID: %s)",
-		commandName, i.ID, i.GuildID, i.User.ID)
+	data := i.ApplicationCommandData()
+	commandName := data.Name
 
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "이 봇은 슬래시 커맨드를 더 이상 지원하지 않습니다.\n버튼을 통해 서버를 제어해주세요.",
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
-	})
-	if err != nil {
-		log.Printf("슬래시 커맨드 응답 실패: %v", err)
+	if commandName == "마크봇" && len(data.Options) > 0 {
+		subCommand := data.Options[0]
+		if subCommand.Name == "rcon" {
+			h.handleRconCommand(s, i, subCommand.Options)
+			return
+		}
 	}
+
+	log.Printf("알 수 없는 슬래시 커맨드: %s (UserID: %s)", commandName, h.getUserID(i))
+	h.respondEphemeral(s, i, "알 수 없는 명령어입니다.")
 }
 
 func (h *Handler) handleUnsupportedInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	log.Printf("지원하지 않는 인터랙션 타입: %v (ID: %s, GuildID: %s, UserID: %s)",
-		i.Type, i.ID, i.GuildID, i.User.ID)
+		i.Type, i.ID, i.GuildID, h.getUserID(i))
 
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -139,6 +144,10 @@ func (h *Handler) handleComponentInteraction(s *discordgo.Session, i *discordgo.
 }
 
 func (h *Handler) handleToggleComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if !h.ensureTrustedGuild(s, i) {
+		return
+	}
+
 	if !h.hasRequiredRole(s, i) {
 		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -219,6 +228,10 @@ func (h *Handler) handleStopConfirmationRequest(s *discordgo.Session, i *discord
 }
 
 func (h *Handler) handleStopConfirmComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if !h.ensureTrustedGuild(s, i) {
+		return
+	}
+
 	customID := i.MessageComponentData().CustomID
 	confirmationID := strings.TrimPrefix(customID, ComponentIDConfirmStopPrefix)
 
@@ -274,6 +287,10 @@ func (h *Handler) handleStopConfirmComponent(s *discordgo.Session, i *discordgo.
 }
 
 func (h *Handler) handleStopCancelComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if !h.ensureTrustedGuild(s, i) {
+		return
+	}
+
 	customID := i.MessageComponentData().CustomID
 	confirmationID := strings.TrimPrefix(customID, ComponentIDCancelStopPrefix)
 
@@ -348,6 +365,30 @@ func (h *Handler) hasRequiredRole(s *discordgo.Session, i *discordgo.Interaction
 		}
 	}
 
+	return false
+}
+
+func (h *Handler) isTrustedGuild(i *discordgo.InteractionCreate) bool {
+	if h.cfg == nil || strings.TrimSpace(h.cfg.TrustedGuildID) == "" {
+		return false
+	}
+
+	return i.GuildID != "" && i.GuildID == h.cfg.TrustedGuildID
+}
+
+func noAllowedMentions() *discordgo.MessageAllowedMentions {
+	return &discordgo.MessageAllowedMentions{
+		Parse: []discordgo.AllowedMentionType{},
+	}
+}
+
+func (h *Handler) ensureTrustedGuild(s *discordgo.Session, i *discordgo.InteractionCreate) bool {
+	if h.isTrustedGuild(i) {
+		return true
+	}
+
+	log.Printf("신뢰되지 않은 길드에서 privileged interaction 거부 (GuildID: %s, UserID: %s)", i.GuildID, h.getUserID(i))
+	h.respondEphemeral(s, i, "🚫 이 서버에서는 사용할 수 없는 명령어입니다.")
 	return false
 }
 
@@ -512,4 +553,127 @@ func (h *Handler) getUserID(i *discordgo.InteractionCreate) string {
 		return i.User.ID
 	}
 	return "unknown"
+}
+
+func (h *Handler) respondEphemeral(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content:         content,
+			Flags:           discordgo.MessageFlagsEphemeral,
+			AllowedMentions: noAllowedMentions(),
+		},
+	})
+	if err != nil {
+		log.Printf("ephemeral 응답 실패: %v", err)
+	}
+}
+
+func (h *Handler) respondEphemeralFollowup(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	_, err := s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content:         content,
+		Flags:           discordgo.MessageFlagsEphemeral,
+		AllowedMentions: noAllowedMentions(),
+	})
+	if err != nil {
+		log.Printf("ephemeral followup 응답 실패: %v", err)
+	}
+}
+
+func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.InteractionCreate, options []*discordgo.ApplicationCommandInteractionDataOption) {
+	userID := h.getUserID(i)
+	username := h.getUsername(i)
+
+	if !h.ensureTrustedGuild(s, i) {
+		return
+	}
+
+	// RCON command is always registered regardless of RCON_PASSWORD configuration (UX trade-off).
+	// Return a friendly error if RCON is not configured for this deployment.
+	if h.rconClient == nil {
+		log.Printf("[RCON] RCON 클라이언트 없음 (RCON_PASSWORD 미설정) (User: %s, ID: %s)", username, userID)
+		h.respondEphemeral(s, i, "❌ RCON이 활성화되지 않았습니다. `RCON_PASSWORD` 환경 변수 설정 후 봇을 재시작해주세요.")
+		return
+	}
+
+	var command string
+	for _, opt := range options {
+		if opt.Name == "command" {
+			command = opt.StringValue()
+			break
+		}
+	}
+
+	if command == "" {
+		h.respondEphemeral(s, i, "❌ 명령어를 입력해주세요.")
+		return
+	}
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Flags:           discordgo.MessageFlagsEphemeral,
+			AllowedMentions: noAllowedMentions(),
+		},
+	})
+	if err != nil {
+		log.Printf("[RCON] deferred 응답 실패: %v", err)
+		return
+	}
+
+	if !h.hasRequiredRole(s, i) {
+		log.Printf("[RCON] 권한 거부 (User: %s, ID: %s)", username, userID)
+		h.respondEphemeralFollowup(s, i, "🚫 `"+h.cfg.McbotRoleName+"` 역할이 필요합니다.")
+		return
+	}
+
+	presenceCtx, presenceCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
+	defer presenceCancel()
+
+	presence := h.controller.Presence(presenceCtx)
+
+	if presence.ServerState != state.StateRunning {
+		h.respondEphemeralFollowup(s, i, "❌ 서버가 실행 중이 아닙니다. (현재 상태: "+presence.ServerState.Korean()+")")
+		return
+	}
+
+	log.Printf("[RCON] 명령 실행 (User: %s, ID: %s)", username, userID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), h.cfg.RCONTimeout)
+	defer cancel()
+
+	response, rconErr := h.rconClient.Execute(ctx, command)
+
+	var content string
+	if rconErr != nil {
+		log.Printf("[RCON] 실행 실패 (User: %s, ID: %s, Error: %v)", username, userID, rconErr)
+		content = "❌ RCON 실행 실패: " + EscapeDiscordText(rconErr.Error())
+	} else {
+		log.Printf("[RCON] 실행 성공 (User: %s, ID: %s)", username, userID)
+		content = "✅ 명령 실행 완료"
+		if response != "" {
+			content += "\n```txt\n" + formatRCONResponse(response) + "\n```"
+		}
+	}
+
+	h.respondEphemeralFollowup(s, i, content)
+}
+
+func formatRCONResponse(response string) string {
+	const maxResponseRunes = 1800
+	const truncatedSuffix = "\n... (응답이 너무 길어 잘렸습니다)"
+
+	safe := strings.ReplaceAll(response, "```", "``\u200b`")
+	runes := []rune(safe)
+	if len(runes) <= maxResponseRunes {
+		return safe
+	}
+
+	suffixRunes := []rune(truncatedSuffix)
+	truncateAt := maxResponseRunes - len(suffixRunes)
+	if truncateAt < 0 {
+		truncateAt = 0
+	}
+
+	return string(runes[:truncateAt]) + truncatedSuffix
 }

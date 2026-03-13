@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"github.com/snowy/mcbot/internal/config"
 	"github.com/snowy/mcbot/internal/discord"
 	"github.com/snowy/mcbot/internal/mcserver"
+	"github.com/snowy/mcbot/internal/rcon"
 	"github.com/snowy/mcbot/internal/state"
 )
 
@@ -23,7 +25,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("설정 로드 실패: %v", err)
 	}
-	log.Printf("설정 로드 완료 (컨테이너: %s, 역할: %s)", cfg.MCContainerName, cfg.McbotRoleName)
+	log.Printf("설정 로드 완료 (컨테이너: %s, 역할: %s, RCON: %v)", cfg.MCContainerName, cfg.McbotRoleName, cfg.RCONEnabled())
 
 	session, err := discordgo.New("Bot " + cfg.DiscordToken)
 	if err != nil {
@@ -43,7 +45,12 @@ func main() {
 
 	statusEmbed := discord.NewStatusEmbedManager(session, cfg, controller)
 
-	handler := discord.NewHandler(cfg, controller, statusEmbed)
+	var rconClient discord.RCONExecutor
+	if cfg.RCONEnabled() {
+		rconClient = rcon.NewClient(cfg.RCONHost, cfg.RCONPort, cfg.RCONPassword, cfg.RCONTimeout)
+	}
+
+	handler := discord.NewHandler(cfg, controller, statusEmbed, rconClient)
 
 	controller.SetOnStateChange(func(newState state.ServerState) {
 		log.Printf("[STATE_CHANGE] 상태 변경 감지: %s", newState.Korean())
@@ -94,6 +101,8 @@ func main() {
 			log.Printf("Discord 세션 종료 실패: %v", err)
 		}
 	}()
+
+	registerSlashCommands(session)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -291,4 +300,78 @@ func performFinalUpdate(statusEmbed *discord.StatusEmbedManager) {
 	} else {
 		log.Println("[MONITOR] 봇 오프라인 상태 업데이트 완료")
 	}
+}
+
+// slashCommands defines all slash commands to register.
+// RCON subcommand is always included regardless of RCON_PASSWORD configuration.
+//
+// UX Trade-off: Discord caches slash commands, so conditional registration
+// causes poor UX - users must refresh Discord client to see new commands.
+// Instead, we always register all commands and handle disabled features
+// gracefully at runtime with ephemeral error messages.
+var slashCommands = []*discordgo.ApplicationCommand{
+	{
+		Name:        "마크봇",
+		Description: "마크봇 명령어",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "rcon",
+				Description: "마인크래프트 서버에 RCON 명령어 실행",
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:        discordgo.ApplicationCommandOptionString,
+						Name:        "command",
+						Description: "실행할 RCON 명령어",
+						Required:    true,
+					},
+				},
+			},
+		},
+	},
+}
+
+func registerSlashCommands(s *discordgo.Session) []*discordgo.ApplicationCommand {
+	applicationID, err := resolveSlashCommandApplicationID(s)
+	if err != nil {
+		log.Printf("슬래시 커맨드 동기화 건너뜀: %v", err)
+		return nil
+	}
+
+	registered, err := s.ApplicationCommandBulkOverwrite(applicationID, "", slashCommands)
+	if err != nil {
+		log.Printf("슬래시 커맨드 동기화 실패: %v", err)
+		return nil
+	}
+
+	for _, cmd := range registered {
+		log.Printf("슬래시 커맨드 동기화 완료: /%s", cmd.Name)
+	}
+
+	return registered
+}
+
+func resolveSlashCommandApplicationID(s *discordgo.Session) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("discord session is nil")
+	}
+
+	if s.State != nil {
+		if s.State.Application != nil && s.State.Application.ID != "" {
+			return s.State.Application.ID, nil
+		}
+		if s.State.User != nil && s.State.User.ID != "" {
+			return s.State.User.ID, nil
+		}
+	}
+
+	app, err := s.Application("@me")
+	if err != nil {
+		return "", fmt.Errorf("application ID 조회 실패: %w", err)
+	}
+	if app == nil || app.ID == "" {
+		return "", fmt.Errorf("application ID가 비어 있습니다")
+	}
+
+	return app.ID, nil
 }

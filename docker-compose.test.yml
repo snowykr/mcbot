@@ -24,7 +24,6 @@ services:
       ENABLE_ROLLING_LOGS: "false"
       
       # 테스트 시나리오용 설정
-      ENABLE_RCON: "true"
       RCON_PASSWORD: "test"
       
     volumes:
