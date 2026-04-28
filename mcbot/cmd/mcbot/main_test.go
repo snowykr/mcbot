@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,7 @@ type discordAPITestServer struct {
 	server             *httptest.Server
 	mu                 sync.Mutex
 	requests           []recordedDiscordRequest
+	handlerErrors      []error
 	oauthApplicationID string
 }
 
@@ -142,7 +144,9 @@ func newDiscordAPITestServer(t *testing.T, opts discordAPITestServerOptions) *di
 	testServer.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			t.Fatalf("failed to read request body: %v", err)
+			testServer.recordHandlerError(fmt.Errorf("failed to read request body: %w", err))
+			http.Error(w, "failed to read request body", http.StatusInternalServerError)
+			return
 		}
 
 		testServer.mu.Lock()
@@ -155,13 +159,18 @@ func newDiscordAPITestServer(t *testing.T, opts discordAPITestServerOptions) *di
 
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v"+discordgo.APIVersion+"/oauth2/applications/@me":
-			writeJSONResponse(t, w, &discordgo.Application{ID: testServer.oauthApplicationID})
+			if err := writeJSONResponse(w, &discordgo.Application{ID: testServer.oauthApplicationID}); err != nil {
+				testServer.recordHandlerError(err)
+				http.Error(w, "failed to write response", http.StatusInternalServerError)
+			}
 			return
 
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/v"+discordgo.APIVersion+"/applications/") && strings.HasSuffix(r.URL.Path, "/commands"):
 			var payload []*discordgo.ApplicationCommand
 			if err := json.Unmarshal(body, &payload); err != nil {
-				t.Fatalf("failed to unmarshal request body: %v", err)
+				testServer.recordHandlerError(fmt.Errorf("failed to unmarshal request body: %w", err))
+				http.Error(w, "failed to unmarshal request body", http.StatusBadRequest)
+				return
 			}
 
 			appID := applicationIDFromCommandPath(r.URL.Path)
@@ -175,13 +184,20 @@ func newDiscordAPITestServer(t *testing.T, opts discordAPITestServerOptions) *di
 				})
 			}
 
-			writeJSONResponse(t, w, response)
+			if err := writeJSONResponse(w, response); err != nil {
+				testServer.recordHandlerError(err)
+				http.Error(w, "failed to write response", http.StatusInternalServerError)
+			}
 			return
 		}
 
-		t.Fatalf("unexpected Discord API request: %s %s", r.Method, r.URL.Path)
+		testServer.recordHandlerError(fmt.Errorf("unexpected Discord API request: %s %s", r.Method, r.URL.Path))
+		http.NotFound(w, r)
 	}))
 	t.Cleanup(testServer.server.Close)
+	t.Cleanup(func() {
+		testServer.assertNoHandlerErrors(t)
+	})
 
 	restore := overrideDiscordEndpoints(testServer.server.URL)
 	t.Cleanup(restore)
@@ -226,6 +242,29 @@ func (s *discordAPITestServer) recordedRequests() []recordedDiscordRequest {
 	return requests
 }
 
+func (s *discordAPITestServer) recordHandlerError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handlerErrors = append(s.handlerErrors, err)
+}
+
+func (s *discordAPITestServer) assertNoHandlerErrors(t *testing.T) {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.handlerErrors) == 0 {
+		return
+	}
+
+	messages := make([]string, 0, len(s.handlerErrors))
+	for _, err := range s.handlerErrors {
+		messages = append(messages, err.Error())
+	}
+	t.Fatalf("Discord API test server handler errors: %s", strings.Join(messages, "; "))
+}
+
 func assertRegisteredCommands(t *testing.T, registered []*discordgo.ApplicationCommand) {
 	t.Helper()
 
@@ -257,16 +296,15 @@ func assertCommandPayload(t *testing.T, body []byte) {
 	}
 }
 
-func writeJSONResponse(t *testing.T, w http.ResponseWriter, response any) {
-	t.Helper()
-
+func writeJSONResponse(w http.ResponseWriter, response any) error {
 	encoded, err := json.Marshal(response)
 	if err != nil {
-		t.Fatalf("failed to marshal response body: %v", err)
+		return fmt.Errorf("failed to marshal response body: %w", err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(encoded)
+	return nil
 }
 
 func applicationIDFromCommandPath(path string) string {

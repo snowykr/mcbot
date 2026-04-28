@@ -47,19 +47,12 @@ func (c *Client) Execute(ctx context.Context, command string) (string, error) {
 		return "", err
 	}
 
-	deadline := c.timeout
-	if ctxDeadline, ok := ctx.Deadline(); ok {
-		remaining := time.Until(ctxDeadline)
-		if remaining < deadline {
-			deadline = remaining
-		}
-	}
-
+	deadline := effectiveOperationDeadline(ctx, c.timeout)
 	if deadline <= 0 {
 		return "", ErrTimeout
 	}
 
-	conn, err := gorcon.Dial(c.address, c.password, gorcon.SetDialTimeout(deadline), gorcon.SetDeadline(deadline))
+	conn, stopContextWatcher, err := c.dial(ctx, deadline)
 	if err != nil {
 		if mappedErr := mapContextError(ctx.Err()); mappedErr != nil {
 			return "", mappedErr
@@ -77,6 +70,7 @@ func (c *Client) Execute(ctx context.Context, command string) (string, error) {
 			logutil.Debugf("[RCON] connection close error: %v", err)
 		}
 	}()
+	defer stopContextWatcher()
 
 	response, err := conn.Execute(command)
 	if err != nil {
@@ -90,6 +84,54 @@ func (c *Client) Execute(ctx context.Context, command string) (string, error) {
 	}
 
 	return response, nil
+}
+
+func effectiveOperationDeadline(ctx context.Context, fallback time.Duration) time.Duration {
+	deadline := fallback
+	if ctxDeadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(ctxDeadline)
+		if remaining < deadline {
+			deadline = remaining
+		}
+	}
+	return deadline
+}
+
+func (c *Client) dial(ctx context.Context, deadline time.Duration) (*gorcon.Conn, func(), error) {
+	dialer := net.Dialer{Timeout: deadline}
+	rawConn, err := dialer.DialContext(ctx, "tcp", c.address)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rcon: %w", err)
+	}
+
+	stopContextWatcher := closeConnOnContextDone(ctx, rawConn)
+	conn, err := gorcon.Open(rawConn, c.password, gorcon.SetDeadline(deadline))
+	if err != nil {
+		stopContextWatcher()
+		if closeErr := rawConn.Close(); closeErr != nil {
+			logutil.Debugf("[RCON] connection close after dial error: %v", closeErr)
+		}
+		return nil, nil, err
+	}
+
+	return conn, stopContextWatcher, nil
+}
+
+func closeConnOnContextDone(ctx context.Context, conn net.Conn) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			if err := conn.Close(); err != nil {
+				logutil.Debugf("[RCON] connection close after context cancellation: %v", err)
+			}
+		case <-done:
+		}
+	}()
+
+	return func() {
+		close(done)
+	}
 }
 
 func mapContextError(err error) error {

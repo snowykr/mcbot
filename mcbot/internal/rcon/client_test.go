@@ -135,6 +135,76 @@ func TestClientExecute_CommandTimeout(t *testing.T) {
 	}
 }
 
+func TestClientExecute_ContextCanceledWhileAuthBlocked(t *testing.T) {
+	server := rcontest.NewServer(rcontest.SetSettings(rcontest.Settings{
+		Password:          "secret",
+		AuthResponseDelay: 300 * time.Millisecond,
+	}))
+	defer server.Close()
+
+	host, port := splitServerAddr(t, server.Addr())
+	client := NewClient(host, port, "secret", 2*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan error, 1)
+
+	start := time.Now()
+	go func() {
+		_, err := client.Execute(ctx, "list")
+		resultCh <- err
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-resultCh:
+		if !errors.Is(err, ErrCanceled) {
+			t.Fatalf("expected ErrCanceled, got %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+			t.Fatalf("Execute returned after %s, want prompt cancellation", elapsed)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Execute did not return promptly after context cancellation")
+	}
+}
+
+func TestClientExecute_ContextCanceledWhileCommandBlocked(t *testing.T) {
+	server := rcontest.NewServer(rcontest.SetSettings(rcontest.Settings{
+		Password:             "secret",
+		CommandResponseDelay: 300 * time.Millisecond,
+	}))
+	defer server.Close()
+
+	host, port := splitServerAddr(t, server.Addr())
+	client := NewClient(host, port, "secret", 2*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan error, 1)
+
+	start := time.Now()
+	go func() {
+		_, err := client.Execute(ctx, "list")
+		resultCh <- err
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-resultCh:
+		if !errors.Is(err, ErrCanceled) {
+			t.Fatalf("expected ErrCanceled, got %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+			t.Fatalf("Execute returned after %s, want prompt cancellation", elapsed)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Execute did not return promptly after context cancellation")
+	}
+}
+
 func splitServerAddr(t *testing.T, addr string) (string, int) {
 	t.Helper()
 

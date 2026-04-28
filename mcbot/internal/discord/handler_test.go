@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -118,9 +119,10 @@ type recordedDiscordRequest struct {
 }
 
 type discordAPITestServer struct {
-	server   *httptest.Server
-	mu       sync.Mutex
-	requests []recordedDiscordRequest
+	server        *httptest.Server
+	mu            sync.Mutex
+	requests      []recordedDiscordRequest
+	handlerErrors []error
 }
 
 func newDiscordAPITestSession(t *testing.T) (*discordgo.Session, *discordAPITestServer) {
@@ -130,7 +132,9 @@ func newDiscordAPITestSession(t *testing.T) (*discordgo.Session, *discordAPITest
 	testServer.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			t.Fatalf("failed to read request body: %v", err)
+			testServer.recordHandlerError(fmt.Errorf("failed to read request body: %w", err))
+			http.Error(w, "failed to read request body", http.StatusInternalServerError)
+			return
 		}
 
 		testServer.mu.Lock()
@@ -152,6 +156,9 @@ func newDiscordAPITestSession(t *testing.T) (*discordgo.Session, *discordAPITest
 		}
 	}))
 	t.Cleanup(testServer.server.Close)
+	t.Cleanup(func() {
+		testServer.assertNoHandlerErrors(t)
+	})
 
 	restore := overrideDiscordEndpoints(testServer.server.URL)
 	t.Cleanup(restore)
@@ -194,6 +201,29 @@ func (s *discordAPITestServer) recordedRequests() []recordedDiscordRequest {
 	requests := make([]recordedDiscordRequest, len(s.requests))
 	copy(requests, s.requests)
 	return requests
+}
+
+func (s *discordAPITestServer) recordHandlerError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handlerErrors = append(s.handlerErrors, err)
+}
+
+func (s *discordAPITestServer) assertNoHandlerErrors(t *testing.T) {
+	t.Helper()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.handlerErrors) == 0 {
+		return
+	}
+
+	messages := make([]string, 0, len(s.handlerErrors))
+	for _, err := range s.handlerErrors {
+		messages = append(messages, err.Error())
+	}
+	t.Fatalf("Discord API test server handler errors: %s", strings.Join(messages, "; "))
 }
 
 func addGuildRole(t *testing.T, session *discordgo.Session, guildID, roleID, roleName string) {
