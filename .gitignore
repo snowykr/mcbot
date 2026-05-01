@@ -19,3 +19,6 @@
 # Go
 /mcbot/mcbot
 /mcbot/vendor/
+
+# Backups
+*.tar.gz
