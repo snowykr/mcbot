@@ -18,6 +18,8 @@ services:
   mc-server:
     image: itzg/minecraft-server
     container_name: ${MC_CONTAINER_NAME:-mc-server}
+    # Reap short-lived helpers such as rcon-cmds-daemon when RCON_CMDS_STARTUP is used.
+    init: true
     tty: true
     stdin_open: true
     restart: "${MC_SERVER_RESTART_POLICY:-no}"

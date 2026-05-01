@@ -16,6 +16,9 @@ func TestComposeConfig_Defaults(t *testing.T) {
 	if mcServer.Restart != "no" {
 		t.Fatalf("restart = %q, want %q", mcServer.Restart, "no")
 	}
+	if !mcServer.Init {
+		t.Fatal("init = false, want true")
+	}
 	if len(mcServer.Ports) != 1 {
 		t.Fatalf("ports length = %d, want 1", len(mcServer.Ports))
 	}

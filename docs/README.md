@@ -265,12 +265,14 @@ RCON_PASSWORD=your_secure_password
 
 `docker-compose.yml`은 `RCON_PASSWORD`와 `RCON_CMDS_STARTUP`을 pass-through로 유지합니다. 값을 쓰지 않을 때는 `.env`에서 해당 줄 자체를 제거해야 하며, 그 경우 `itzg/minecraft-server`의 기본 동작에 따라 랜덤 비밀번호가 사용됩니다.
 
-`RCON_CMDS_STARTUP`는 예시용이며 기본값이 없습니다. 과거처럼 `keepInventory`가 자동 적용되지 않으니 필요하면 직접 설정하세요.
+`RCON_CMDS_STARTUP`는 계속 지원되는 운영 환경 변수입니다. 다만 기본값은 없습니다. 과거처럼 `keepInventory`가 자동 적용되지 않으니 필요하면 직접 설정하세요.
 
 ```bash
 # .env 파일 (예시)
 RCON_CMDS_STARTUP=gamerule keepInventory true
 ```
+
+`RCON_CMDS_STARTUP`를 사용하면 `itzg/minecraft-server` 이미지가 시작 시 `rcon-cmds-daemon` 보조 프로세스를 실행합니다. 이 프로세스가 종료된 뒤 zombie로 남지 않도록 `docker-compose.yml`의 `mc-server` 서비스는 `init: true`를 사용합니다. 이 설정을 제거하면 SSH 로그인 또는 `ps`에서 `[rcon-cmds-daemo] <defunct>`가 보일 수 있습니다.
 
 `RCON_PASSWORD`가 공백만 있으면 미설정으로 취급됩니다. 실수로 앞뒤 공백이 붙은 비밀번호는 인증 불일치를 막기 위해 시작 시 에러로 거부됩니다.
 

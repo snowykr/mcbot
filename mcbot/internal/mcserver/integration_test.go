@@ -4,6 +4,7 @@ package mcserver
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,6 +104,49 @@ func TestIntegration_RuntimeWatcher_UnexpectedStop(t *testing.T) {
 	}
 
 	t.Log("✓ 예기치 않은 종료 감지 후 crashed 처리 확인")
+}
+
+func TestIntegration_RCONStartupCommands_DoNotLeaveZombieProcess(t *testing.T) {
+	helper := NewIntegrationTestHelper(t)
+	helper.SetupWithEnv(map[string]string{
+		"RCON_CMDS_STARTUP": "gamerule keepInventory true",
+	})
+
+	initEnabled, err := helper.ContainerInitEnabled()
+	if err != nil {
+		t.Fatalf("container init 설정 확인 실패: %v", err)
+	}
+	if !initEnabled {
+		t.Fatal("mc-test container init = false, want true to reap RCON startup helper processes")
+	}
+
+	helper.WaitForLogSubstring("No addition rcon commands are given, stopping rcon cmd service", 30*time.Second)
+
+	processTable, err := helper.ProcessTable()
+	if err != nil {
+		t.Fatalf("process table 조회 실패: %v", err)
+	}
+	if hasRCONZombieProcess(processTable) {
+		t.Fatalf("rcon-cmds-daemo zombie process detected after RCON_CMDS_STARTUP completed:\n%s", processTable)
+	}
+
+	t.Log("✓ RCON_CMDS_STARTUP 실행 후 rcon-cmds-daemo zombie 미발생 확인")
+}
+
+func hasRCONZombieProcess(processTable string) bool {
+	for _, line := range strings.Split(processTable, "\n") {
+		if !strings.Contains(line, "rcon-cmds-daemo") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 5 && (fields[3] == "Z" || strings.HasPrefix(fields[4], "Z")) {
+			return true
+		}
+		if strings.Contains(line, "<defunct>") {
+			return true
+		}
+	}
+	return false
 }
 
 func TestIntegration_SyncWatcher_ExternalStart(t *testing.T) {

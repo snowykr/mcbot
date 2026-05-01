@@ -1,6 +1,8 @@
 services:
   mc-test:
     image: itzg/minecraft-server
+    # Match production process reaping for RCON startup helper processes.
+    init: true
     tty: true
     stdin_open: true
     restart: "no"

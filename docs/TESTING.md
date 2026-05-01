@@ -114,7 +114,25 @@ make test-integration-verbose
 4. `docker stop`으로 컨테이너 강제 종료
 5. 최종 상태가 `StateCrashed`인지 확인
 
-#### 3. Sync Watcher - 외부 시작 감지
+#### 3. RCON_CMDS_STARTUP - zombie 프로세스 회귀 방지
+**파일**: `integration_test.go::TestIntegration_RCONStartupCommands_DoNotLeaveZombieProcess`
+
+**검증 내용**:
+- `RCON_CMDS_STARTUP`를 설정한 상태로 테스트 서버 시작
+- Compose `init: true`가 실제 컨테이너에 적용되었는지 확인
+- `rcon-cmds-daemon`이 startup command 실행 후 종료되어도 `<defunct>` zombie로 남지 않는지 확인
+
+**시나리오**:
+1. `RCON_CMDS_STARTUP=gamerule keepInventory true` 환경으로 테스트 컨테이너 시작
+2. 서버 ready 로그 대기
+3. RCON startup command daemon 종료 로그 대기
+4. 컨테이너 내부 process table에서 `rcon-cmds-daemo` zombie 부재 확인
+
+**수동 재현 참고**:
+- `docker run` 또는 Compose에서 `init` 없이 `RCON_CMDS_STARTUP`를 설정하면 `[rcon-cmds-daemo] <defunct>`가 남을 수 있습니다.
+- `docker run --init` 또는 Compose `init: true`를 사용하면 Docker init/tini가 종료된 보조 프로세스를 reap합니다.
+
+#### 4. Sync Watcher - 외부 시작 감지
 **파일**: `integration_test.go::TestIntegration_SyncWatcher_ExternalStart`
 
 **검증 내용**:
@@ -130,7 +148,7 @@ make test-integration-verbose
 5. Ready 로그 대기
 6. 최종 상태가 `StateRunning`인지 확인
 
-#### 4. Container Watcher - Inspect 연속 실패
+#### 5. Container Watcher - Inspect 연속 실패
 **파일**: `integration_test.go::TestIntegration_ContainerWatcher_InspectFailure`
 
 **검증 내용**:
@@ -143,7 +161,7 @@ make test-integration-verbose
 3. Runtime watcher 시작 (inspect 실패 반복)
 4. 설정된 임계치(2회) 도달 후 `StateCrashed` 전이 확인
 
-#### 5. Watcher 재시작 - 크래시 후 복구
+#### 6. Watcher 재시작 - 크래시 후 복구
 **파일**: `integration_test.go::TestIntegration_WatcherRestart_AfterCrash`
 
 **검증 내용**:

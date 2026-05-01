@@ -50,6 +50,7 @@ type composeConfig struct {
 
 type composeService struct {
 	ContainerName string                 `json:"container_name"`
+	Init          bool                   `json:"init"`
 	Environment   map[string]any         `json:"environment"`
 	Ports         []composePublishedPort `json:"ports"`
 	Restart       string                 `json:"restart"`
@@ -199,6 +200,10 @@ func TestComposeConfigHelper_RendersDefaults(t *testing.T) {
 
 	if mcServer.ContainerName != "mc-server" {
 		t.Fatalf("container_name = %q, want %q", mcServer.ContainerName, "mc-server")
+	}
+
+	if !mcServer.Init {
+		t.Fatal("init = false, want true")
 	}
 
 	if len(mcServer.Ports) != 1 {
