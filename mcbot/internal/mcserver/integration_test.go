@@ -145,6 +145,7 @@ func TestIntegration_SyncWatcher_ExternalStart(t *testing.T) {
 	}
 
 	t.Log("외부에서 컨테이너 시작")
+	startedAt := time.Now()
 	if err := helper.StartContainer(); err != nil {
 		t.Fatalf("컨테이너 시작 실패: %v", err)
 	}
@@ -163,7 +164,7 @@ func TestIntegration_SyncWatcher_ExternalStart(t *testing.T) {
 	}
 
 	t.Log("서버 ready 로그 대기 중...")
-	helper.WaitForServerReady(120 * time.Second)
+	helper.WaitForServerReadySince(120*time.Second, startedAt)
 
 	maxWait := 30
 	for i := 0; i < maxWait; i++ {
@@ -256,11 +257,12 @@ func TestIntegration_WatcherRestart_AfterCrash(t *testing.T) {
 	}
 
 	t.Log("컨테이너 재시작 후 워처 재시작 시도")
+	restartedAt := time.Now()
 	if err := helper.StartContainer(); err != nil {
 		t.Fatalf("컨테이너 재시작 실패: %v", err)
 	}
 
-	helper.WaitForServerReady(120 * time.Second)
+	helper.WaitForServerReadySince(120*time.Second, restartedAt)
 
 	stateManager.SetRunning(10 * time.Second)
 	controller.logMux.Start(time.Now().Add(-5 * time.Second))

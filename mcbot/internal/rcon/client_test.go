@@ -205,6 +205,29 @@ func TestClientExecute_ContextCanceledWhileCommandBlocked(t *testing.T) {
 	}
 }
 
+func TestClientExecute_ContextDeadlineWhileCommandBlocked(t *testing.T) {
+	server := rcontest.NewServer(rcontest.SetSettings(rcontest.Settings{
+		Password:             "secret",
+		CommandResponseDelay: 300 * time.Millisecond,
+	}))
+	defer server.Close()
+
+	host, port := splitServerAddr(t, server.Addr())
+	client := NewClient(host, port, "secret", 2*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := client.Execute(ctx, "list")
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("expected ErrTimeout, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("Execute returned after %s, want prompt deadline handling", elapsed)
+	}
+}
+
 func splitServerAddr(t *testing.T, addr string) (string, int) {
 	t.Helper()
 

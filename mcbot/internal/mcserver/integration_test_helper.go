@@ -168,6 +168,10 @@ func (h *IntegrationTestHelper) ContainerName() (string, error) {
 }
 
 func (h *IntegrationTestHelper) WaitForServerReady(timeout time.Duration) {
+	h.WaitForServerReadySince(timeout, time.Time{})
+}
+
+func (h *IntegrationTestHelper) WaitForServerReadySince(timeout time.Duration, since time.Time) {
 	h.t.Helper()
 
 	readyPatterns, err := newReadyMatchers()
@@ -192,7 +196,13 @@ func (h *IntegrationTestHelper) WaitForServerReady(timeout time.Duration) {
 				continue
 			}
 
-			cmd := exec.CommandContext(context.Background(), "docker", "logs", "--tail", "50", containerID)
+			args := []string{"logs", "--tail", "50"}
+			if !since.IsZero() {
+				args = append(args, "--since", fmt.Sprintf("%d", since.Unix()))
+			}
+			args = append(args, containerID)
+
+			cmd := exec.CommandContext(context.Background(), "docker", args...)
 			output, err := cmd.CombinedOutput()
 			if err != nil {
 				h.t.Logf("로그 확인 실패: %v", err)

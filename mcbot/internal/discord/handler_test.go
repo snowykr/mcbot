@@ -150,7 +150,9 @@ func newDiscordAPITestSession(t *testing.T) (*discordgo.Session, *discordAPITest
 			w.WriteHeader(http.StatusNoContent)
 		case strings.Contains(r.URL.Path, "/webhooks/"):
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"followup-message-id"}`))
+			if _, err := w.Write([]byte(`{"id":"followup-message-id"}`)); err != nil {
+				testServer.recordHandlerError(fmt.Errorf("failed to write followup response: %w", err))
+			}
 		default:
 			http.NotFound(w, r)
 		}

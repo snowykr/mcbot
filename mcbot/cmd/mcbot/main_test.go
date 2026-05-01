@@ -303,7 +303,9 @@ func writeJSONResponse(w http.ResponseWriter, response any) error {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(encoded)
+	if _, err := w.Write(encoded); err != nil {
+		return fmt.Errorf("failed to write response body: %w", err)
+	}
 	return nil
 }
 
