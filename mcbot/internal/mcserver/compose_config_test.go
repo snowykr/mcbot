@@ -54,6 +54,7 @@ func TestComposeConfig_Defaults(t *testing.T) {
 	assertComposeEnvValue(t, mcServer.Environment, "ENABLE_RCON", "true")
 	assertComposeEnvValue(t, mcServer.Environment, "USE_AIKAR_FLAGS", "true")
 	assertComposeEnvNil(t, mcServer.Environment, "RCON_PASSWORD")
+	assertComposeEnvNil(t, mcServer.Environment, "RCON_PORT")
 	assertComposeEnvNil(t, mcServer.Environment, "RCON_CMDS_STARTUP")
 
 	if len(mcServer.EnvFile) != 0 {
@@ -129,9 +130,12 @@ func TestComposeConfig_RCONStartupPassThrough(t *testing.T) {
 
 		cfg := renderComposeConfig(t, nil)
 		mcServer := requireComposeService(t, cfg, "mc-server")
+		mcBot := requireComposeService(t, cfg, "mcbot")
 
 		assertComposeEnvNil(t, mcServer.Environment, "RCON_PASSWORD")
+		assertComposeEnvNil(t, mcServer.Environment, "RCON_PORT")
 		assertComposeEnvNil(t, mcServer.Environment, "RCON_CMDS_STARTUP")
+		assertComposeEnvMissingOrNil(t, mcBot.Environment, "RCON_PORT")
 	})
 
 	t.Run("set", func(t *testing.T) {
@@ -139,37 +143,45 @@ func TestComposeConfig_RCONStartupPassThrough(t *testing.T) {
 
 		cfg := renderComposeConfig(t, map[string]string{
 			"RCON_PASSWORD":     "super-secret",
+			"RCON_PORT":         "25580",
 			"RCON_CMDS_STARTUP": "/gamerule keepInventory true",
 		})
 		mcServer := requireComposeService(t, cfg, "mc-server")
+		mcBot := requireComposeService(t, cfg, "mcbot")
 
 		assertComposeEnvValue(t, mcServer.Environment, "RCON_PASSWORD", "super-secret")
+		assertComposeEnvValue(t, mcServer.Environment, "RCON_PORT", "25580")
 		assertComposeEnvValue(t, mcServer.Environment, "RCON_CMDS_STARTUP", "/gamerule keepInventory true")
+		assertComposeEnvValue(t, mcBot.Environment, "RCON_PORT", "25580")
 	})
 
 	t.Run("project .env", func(t *testing.T) {
 		t.Parallel()
 
-		cfg := renderComposeConfigWithProjectEnv(t, "RCON_PASSWORD=env-file-secret\nRCON_CMDS_STARTUP=/say from env file\n")
+		cfg := renderComposeConfigWithProjectEnv(t, "RCON_PASSWORD=env-file-secret\nRCON_PORT=25580\nRCON_CMDS_STARTUP=/say from env file\n")
 		mcServer := requireComposeService(t, cfg, "mc-server")
 		mcBot := requireComposeService(t, cfg, "mcbot")
 
 		assertComposeEnvValue(t, mcServer.Environment, "RCON_PASSWORD", "env-file-secret")
+		assertComposeEnvValue(t, mcServer.Environment, "RCON_PORT", "25580")
 		assertComposeEnvValue(t, mcServer.Environment, "RCON_CMDS_STARTUP", "/say from env file")
 		assertComposeEnvValue(t, mcBot.Environment, "RCON_PASSWORD", "env-file-secret")
+		assertComposeEnvValue(t, mcBot.Environment, "RCON_PORT", "25580")
 		assertComposeEnvValue(t, mcBot.Environment, "RCON_CMDS_STARTUP", "/say from env file")
 	})
 
 	t.Run("explicit env file with existing empty project .env", func(t *testing.T) {
 		t.Parallel()
 
-		cfg := renderComposeConfigWithEnvFile(t, "RCON_PASSWORD=explicit-env-file-secret\nRCON_CMDS_STARTUP=/say from explicit env file\n")
+		cfg := renderComposeConfigWithEnvFile(t, "RCON_PASSWORD=explicit-env-file-secret\nRCON_PORT=25580\nRCON_CMDS_STARTUP=/say from explicit env file\n")
 		mcServer := requireComposeService(t, cfg, "mc-server")
 		mcBot := requireComposeService(t, cfg, "mcbot")
 
 		assertComposeEnvValue(t, mcServer.Environment, "RCON_PASSWORD", "explicit-env-file-secret")
+		assertComposeEnvValue(t, mcServer.Environment, "RCON_PORT", "25580")
 		assertComposeEnvValue(t, mcServer.Environment, "RCON_CMDS_STARTUP", "/say from explicit env file")
 		assertComposeEnvMissingOrNil(t, mcBot.Environment, "RCON_PASSWORD")
+		assertComposeEnvValue(t, mcBot.Environment, "RCON_PORT", "25580")
 		assertComposeEnvMissingOrNil(t, mcBot.Environment, "RCON_CMDS_STARTUP")
 	})
 
@@ -178,15 +190,17 @@ func TestComposeConfig_RCONStartupPassThrough(t *testing.T) {
 
 		cfg := renderComposeConfigWithProjectAndExplicitEnvFiles(
 			t,
-			"RCON_PASSWORD=project-env-secret\nRCON_CMDS_STARTUP=/say from project env\n",
-			"RCON_PASSWORD=explicit-env-file-secret\nRCON_CMDS_STARTUP=/say from explicit env file\n",
+			"RCON_PASSWORD=project-env-secret\nRCON_PORT=25581\nRCON_CMDS_STARTUP=/say from project env\n",
+			"RCON_PASSWORD=explicit-env-file-secret\nRCON_PORT=25580\nRCON_CMDS_STARTUP=/say from explicit env file\n",
 		)
 		mcServer := requireComposeService(t, cfg, "mc-server")
 		mcBot := requireComposeService(t, cfg, "mcbot")
 
 		assertComposeEnvValue(t, mcServer.Environment, "RCON_PASSWORD", "explicit-env-file-secret")
+		assertComposeEnvValue(t, mcServer.Environment, "RCON_PORT", "25580")
 		assertComposeEnvValue(t, mcServer.Environment, "RCON_CMDS_STARTUP", "/say from explicit env file")
 		assertComposeEnvValue(t, mcBot.Environment, "RCON_PASSWORD", "project-env-secret")
+		assertComposeEnvValue(t, mcBot.Environment, "RCON_PORT", "25580")
 		assertComposeEnvValue(t, mcBot.Environment, "RCON_CMDS_STARTUP", "/say from project env")
 	})
 

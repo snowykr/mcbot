@@ -43,6 +43,7 @@ var composeConfigScrubbedEnvKeys = []string{
 	"SIMULATION_DISTANCE",
 	"ENABLE_RCON",
 	"RCON_PASSWORD",
+	"RCON_PORT",
 	"RCON_CMDS_STARTUP",
 }
 
@@ -341,6 +342,7 @@ func TestComposeConfigHelper_RendersDefaults(t *testing.T) {
 	t.Setenv("MC_CONTAINER_NAME", "leaked-name")
 	t.Setenv("MC_SERVER_PORT_PUBLISH", "9999:25565")
 	t.Setenv("RCON_PASSWORD", "leaked-rcon-password")
+	t.Setenv("RCON_PORT", "25580")
 	t.Setenv("RCON_CMDS_STARTUP", "/say leaked startup command")
 
 	cfg := renderComposeConfig(t, nil)
@@ -376,6 +378,10 @@ func TestComposeConfigHelper_RendersDefaults(t *testing.T) {
 
 	if got := mcServer.Environment["RCON_PASSWORD"]; got != nil {
 		t.Fatalf("RCON_PASSWORD = %#v, want nil", got)
+	}
+
+	if got := mcServer.Environment["RCON_PORT"]; got != nil {
+		t.Fatalf("RCON_PORT = %#v, want nil", got)
 	}
 
 	if got := mcServer.Environment["RCON_CMDS_STARTUP"]; got != nil {

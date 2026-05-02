@@ -12,6 +12,7 @@ services:
       MCBOT_ROLE_NAME: ${MCBOT_ROLE_NAME:-마크봇}
       READY_TIMEOUT_SECONDS: "${READY_TIMEOUT_SECONDS:-600}"
       STOP_TIMEOUT_SECONDS: "${STOP_TIMEOUT_SECONDS:-120}"
+      RCON_PORT:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
@@ -40,6 +41,7 @@ services:
       ENABLE_RCON: "${ENABLE_RCON:-true}"
       USE_AIKAR_FLAGS: "true"
       RCON_PASSWORD:
+      RCON_PORT:
       RCON_CMDS_STARTUP:
 
     volumes:
