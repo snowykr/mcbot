@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/snowy/mcbot/internal/logutil"
@@ -15,6 +16,7 @@ type Config struct {
 	MCContainerName        string
 	ReadyTimeout           time.Duration
 	McbotRoleName          string
+	TrustedGuildID         string
 	StopTimeoutSeconds     int
 	EmbedChannelID         string
 	MCJoinLogPattern       string
@@ -27,6 +29,15 @@ type Config struct {
 
 	CrashDetectionInterval    time.Duration
 	MaxInspectFailureAttempts int
+
+	RCONHost     string
+	RCONPort     int
+	RCONPassword string
+	RCONTimeout  time.Duration
+}
+
+func (c *Config) RCONEnabled() bool {
+	return strings.TrimSpace(c.RCONPassword) != ""
 }
 
 func Load() (*Config, error) {
@@ -34,6 +45,7 @@ func Load() (*Config, error) {
 		DiscordToken:       os.Getenv("DISCORD_TOKEN"),
 		MCContainerName:    getEnvOrDefault("MC_CONTAINER_NAME", "mc-server"),
 		McbotRoleName:      getEnvOrDefault("MCBOT_ROLE_NAME", "마크봇"),
+		TrustedGuildID:     os.Getenv("MCBOT_TRUSTED_GUILD_ID"),
 		StopTimeoutSeconds: getEnvIntOrDefault("STOP_TIMEOUT_SECONDS", 120),
 		EmbedChannelID:     os.Getenv("EMBED_CHANNEL_ID"),
 		MCJoinLogPattern:   getEnvOrDefault("MC_JOIN_LOG_PATTERN", `]: (.+) joined the game`),
@@ -61,6 +73,27 @@ func Load() (*Config, error) {
 
 	cfg.MaxInspectFailureAttempts = getEnvIntOrDefault("MAX_INSPECT_FAILURE_ATTEMPTS", 3)
 
+	cfg.RCONHost = getEnvOrDefault("RCON_HOST", "mc-server")
+	rconPort, err := getEnvIntIfSet("RCON_PORT")
+	if err != nil {
+		return nil, fmt.Errorf("invalid RCON_PORT: %w", err)
+	}
+	if rconPort == nil {
+		cfg.RCONPort = 25575
+	} else {
+		cfg.RCONPort = *rconPort
+	}
+	cfg.RCONPassword = os.Getenv("RCON_PASSWORD")
+	rconTimeoutSecValue, err := getEnvIntIfSet("RCON_TIMEOUT_SECONDS")
+	if err != nil {
+		return nil, fmt.Errorf("invalid RCON_TIMEOUT_SECONDS: %w", err)
+	}
+	rconTimeoutSec := 10
+	if rconTimeoutSecValue != nil {
+		rconTimeoutSec = *rconTimeoutSecValue
+	}
+	cfg.RCONTimeout = time.Duration(rconTimeoutSec) * time.Second
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -78,8 +111,18 @@ func (c *Config) validate() error {
 	if c.McbotRoleName == "" {
 		return errors.New("MCBOT_ROLE_NAME is required")
 	}
+	if err := validateRequiredSnowflakeID("MCBOT_TRUSTED_GUILD_ID", c.TrustedGuildID); err != nil {
+		return err
+	}
 	if c.EmbedChannelID == "" {
 		return errors.New("EMBED_CHANNEL_ID is required")
+	}
+	trimmedPassword := strings.TrimSpace(c.RCONPassword)
+	if c.RCONPassword != "" && trimmedPassword == "" {
+		c.RCONPassword = ""
+	}
+	if trimmedPassword != "" && c.RCONPassword != trimmedPassword {
+		return errors.New("RCON_PASSWORD must not have leading or trailing whitespace")
 	}
 	if c.ReadyTimeout <= 0 {
 		return errors.New("READY_TIMEOUT_SECONDS must be positive")
@@ -113,6 +156,43 @@ func (c *Config) validate() error {
 	if c.MaxInspectFailureAttempts < 1 {
 		return errors.New("MAX_INSPECT_FAILURE_ATTEMPTS must be at least 1")
 	}
+	if c.RCONEnabled() {
+		trimmedRCONHost := strings.TrimSpace(c.RCONHost)
+		if trimmedRCONHost == "" {
+			return errors.New("RCON_HOST is required when RCON is enabled")
+		}
+		if c.RCONHost != trimmedRCONHost {
+			return errors.New("RCON_HOST must not have leading or trailing whitespace")
+		}
+		if c.RCONPort < 1 || c.RCONPort > 65535 {
+			return errors.New("RCON_PORT must be between 1 and 65535 when RCON is enabled")
+		}
+		if c.RCONTimeout <= 0 {
+			return errors.New("RCON_TIMEOUT_SECONDS must be positive")
+		}
+	}
+	return nil
+}
+
+func validateRequiredSnowflakeID(key, value string) error {
+	trimmedValue := strings.TrimSpace(value)
+	if trimmedValue == "" {
+		return fmt.Errorf("%s is required", key)
+	}
+	if value != trimmedValue {
+		return fmt.Errorf("%s must not have leading or trailing whitespace", key)
+	}
+	parsedValue, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%s must be a Discord snowflake ID (digits only)", key)
+	}
+	if strconv.FormatUint(parsedValue, 10) != value {
+		return fmt.Errorf("%s must be a canonical Discord snowflake ID (no leading zeros)", key)
+	}
+	if parsedValue == 0 {
+		return fmt.Errorf("%s must be a non-zero Discord snowflake ID", key)
+	}
+
 	return nil
 }
 
@@ -130,6 +210,20 @@ func getEnvIntOrDefault(key string, defaultVal int) int {
 		}
 	}
 	return defaultVal
+}
+
+func getEnvIntIfSet(key string) (*int, error) {
+	val := os.Getenv(key)
+	if val == "" {
+		return nil, nil
+	}
+
+	intVal, err := strconv.Atoi(val)
+	if err != nil {
+		return nil, err
+	}
+
+	return &intVal, nil
 }
 
 func getEnvBoolOrDefault(key string, defaultVal bool) bool {

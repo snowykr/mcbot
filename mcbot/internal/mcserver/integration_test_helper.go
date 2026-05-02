@@ -5,7 +5,10 @@ package mcserver
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -20,7 +23,7 @@ const (
 type IntegrationTestHelper struct {
 	t            *testing.T
 	serviceName  string
-	composeFile  string
+	composeFiles []string
 	projectName  string
 	teardownOnce sync.Once
 }
@@ -29,35 +32,108 @@ func NewIntegrationTestHelper(t *testing.T) *IntegrationTestHelper {
 	projectName := fmt.Sprintf("mcbot_test_%d", time.Now().UnixNano())
 
 	return &IntegrationTestHelper{
-		t:           t,
-		serviceName: testServiceName,
-		composeFile: testComposeFile,
-		projectName: projectName,
+		t:            t,
+		serviceName:  testServiceName,
+		composeFiles: []string{testComposeFile},
+		projectName:  projectName,
 	}
 }
 
 func (h *IntegrationTestHelper) Setup() {
+	h.SetupWithEnv(nil)
+}
+
+func (h *IntegrationTestHelper) SetupWithEnv(envOverrides map[string]string) {
 	h.t.Helper()
 	h.t.Logf("[SETUP] Docker Compose 환경 시작 (project: %s)", h.projectName)
 
+	h.applyEnvOverrides(envOverrides)
 	h.PreClean()
+	h.t.Cleanup(func() {
+		h.Teardown()
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", h.projectName, "-f", h.composeFile, "up", "-d")
+	cmd := exec.CommandContext(ctx, "docker", h.composeArgs("up", "-d")...)
+	cmd.Env = composeCommandEnv()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		h.t.Fatalf("docker compose up 실패: %v\nOutput: %s", err, string(output))
 	}
 
 	h.t.Logf("[SETUP] 컨테이너 시작 완료, 서버 준비 대기 중...")
-	h.WaitForServerReady(120 * time.Second)
+	h.WaitForServerReady(180 * time.Second)
 	h.t.Logf("[SETUP] 서버 준비 완료")
+}
 
-	h.t.Cleanup(func() {
-		h.Teardown()
-	})
+func (h *IntegrationTestHelper) applyEnvOverrides(envOverrides map[string]string) {
+	h.t.Helper()
+
+	if len(envOverrides) == 0 {
+		return
+	}
+
+	overridePath := filepath.Join(h.t.TempDir(), "compose.env.override.yml")
+	if err := os.WriteFile(overridePath, []byte(renderComposeEnvOverride(envOverrides)), 0o600); err != nil {
+		h.t.Fatalf("compose env override 파일 생성 실패: %v", err)
+	}
+
+	h.composeFiles = append(h.composeFiles, overridePath)
+}
+
+func renderComposeEnvOverride(envOverrides map[string]string) string {
+	keys := make([]string, 0, len(envOverrides))
+	for key := range envOverrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteString("services:\n")
+	b.WriteString("  mc-test:\n")
+	b.WriteString("    environment:\n")
+	for _, key := range keys {
+		fmt.Fprintf(&b, "      %s: %q\n", key, envOverrides[key])
+	}
+	return b.String()
+}
+
+func (h *IntegrationTestHelper) composeArgs(args ...string) []string {
+	composeArgs := []string{"compose", "-p", h.projectName}
+	for _, file := range h.composeFiles {
+		composeArgs = append(composeArgs, "-f", file)
+	}
+	return append(composeArgs, args...)
+}
+
+func composeCommandEnv() []string {
+	return withoutEnv(os.Environ(), "RCON_CMDS_STARTUP")
+}
+
+func withoutEnv(base []string, blockedKeys ...string) []string {
+	if len(blockedKeys) == 0 {
+		return base
+	}
+
+	blocked := make(map[string]struct{}, len(blockedKeys))
+	for _, key := range blockedKeys {
+		blocked[key] = struct{}{}
+	}
+
+	filtered := make([]string, 0, len(base))
+	for _, entry := range base {
+		key, _, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		if _, ok := blocked[key]; ok {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 func (h *IntegrationTestHelper) PreClean() {
@@ -67,7 +143,8 @@ func (h *IntegrationTestHelper) PreClean() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", h.projectName, "-f", h.composeFile, "down", "-v", "--remove-orphans")
+	cmd := exec.CommandContext(ctx, "docker", h.composeArgs("down", "-v", "--remove-orphans")...)
+	cmd.Env = composeCommandEnv()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		h.t.Logf("[PRE-CLEAN] 경고: %v\nOutput: %s", err, string(output))
@@ -87,7 +164,8 @@ func (h *IntegrationTestHelper) Teardown() {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, "docker", "compose", "-p", h.projectName, "-f", h.composeFile, "down", "-v", "--remove-orphans")
+		cmd := exec.CommandContext(ctx, "docker", h.composeArgs("down", "-v", "--remove-orphans")...)
+		cmd.Env = composeCommandEnv()
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			h.t.Logf("[TEARDOWN] 경고: %v\nOutput: %s", err, string(output))
@@ -168,6 +246,18 @@ func (h *IntegrationTestHelper) ContainerName() (string, error) {
 }
 
 func (h *IntegrationTestHelper) WaitForServerReady(timeout time.Duration) {
+	h.WaitForServerReadySince(timeout, time.Time{})
+}
+
+func dockerLogsSinceArgs(containerID string, since time.Time) []string {
+	args := []string{"logs", "--tail", "50"}
+	if !since.IsZero() {
+		args = append(args, "--since", since.UTC().Format(time.RFC3339Nano))
+	}
+	return append(args, containerID)
+}
+
+func (h *IntegrationTestHelper) WaitForServerReadySince(timeout time.Duration, since time.Time) {
 	h.t.Helper()
 
 	readyPatterns, err := newReadyMatchers()
@@ -192,7 +282,9 @@ func (h *IntegrationTestHelper) WaitForServerReady(timeout time.Duration) {
 				continue
 			}
 
-			cmd := exec.CommandContext(context.Background(), "docker", "logs", "--tail", "50", containerID)
+			args := dockerLogsSinceArgs(containerID, since)
+
+			cmd := exec.CommandContext(context.Background(), "docker", args...)
 			output, err := cmd.CombinedOutput()
 			if err != nil {
 				h.t.Logf("로그 확인 실패: %v", err)
@@ -262,7 +354,8 @@ func (h *IntegrationTestHelper) StartContainer() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-p", h.projectName, "-f", h.composeFile, "start", h.serviceName)
+	cmd := exec.CommandContext(ctx, "docker", h.composeArgs("start", h.serviceName)...)
+	cmd.Env = composeCommandEnv()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("docker compose start 실패: %w, output: %s", err, string(output))
@@ -298,7 +391,8 @@ func (h *IntegrationTestHelper) DumpArtifactsIfFailed() {
 	defer cancel()
 
 	h.t.Logf("=== Docker Compose PS ===")
-	psCmd := exec.CommandContext(ctx, "docker", "compose", "-p", h.projectName, "-f", h.composeFile, "ps", "-a")
+	psCmd := exec.CommandContext(ctx, "docker", h.composeArgs("ps", "-a")...)
+	psCmd.Env = composeCommandEnv()
 	if psOutput, err := psCmd.CombinedOutput(); err == nil {
 		h.t.Logf("%s", string(psOutput))
 	} else {
@@ -387,4 +481,70 @@ func (h *IntegrationTestHelper) GetRecentLogs(lines int) (string, error) {
 		return "", fmt.Errorf("로그 조회 실패: %w", err)
 	}
 	return string(output), nil
+}
+
+func (h *IntegrationTestHelper) WaitForLogSubstring(substring string, timeout time.Duration) string {
+	h.t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			logs, _ := h.GetRecentLogs(120)
+			h.t.Fatalf("로그에서 %q 대기 타임아웃 (%v)\nRecent logs:\n%s", substring, timeout, logs)
+		case <-ticker.C:
+			logs, err := h.GetRecentLogs(120)
+			if err != nil {
+				h.t.Logf("로그 조회 실패: %v", err)
+				continue
+			}
+			if strings.Contains(logs, substring) {
+				return logs
+			}
+		}
+	}
+}
+
+func (h *IntegrationTestHelper) ProcessTable() (string, error) {
+	h.t.Helper()
+
+	containerID, err := h.ContainerID()
+	if err != nil {
+		return "", fmt.Errorf("컨테이너 ID 조회 실패: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "docker", "exec", containerID, "ps", "-eo", "pid,ppid,user,state,stat,comm,args")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("process table 조회 실패: %w, output: %s", err, string(output))
+	}
+	return string(output), nil
+}
+
+func (h *IntegrationTestHelper) ContainerInitEnabled() (bool, error) {
+	h.t.Helper()
+
+	containerID, err := h.ContainerID()
+	if err != nil {
+		return false, fmt.Errorf("컨테이너 ID 조회 실패: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.HostConfig.Init}}", containerID)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("container init 설정 조회 실패: %w, output: %s", err, string(output))
+	}
+
+	return strings.TrimSpace(string(output)) == "true", nil
 }

@@ -30,6 +30,15 @@
 - 버튼이 "봇 오프라인"으로 표시되고 비활성화되어 사용자에게 봇 상태를 명확히 전달
 - 봇이 다시 시작되면 자동으로 현재 서버 상태로 업데이트됨
 
+### RCON 명령어 (선택적 기능)
+- `/마크봇 rcon <command>` 슬래시 명령어로 마인크래프트 서버에 직접 명령 실행
+- `MCBOT_TRUSTED_GUILD_ID`로 지정한 Discord 서버에서만 실행 가능
+- `마크봇` 역할을 가진 사용자만 사용 가능
+- 서버가 실행 중(Running)일 때만 명령어 실행 가능
+- 응답이 길 경우 자동으로 1800자로 잘림
+- **활성화 조건**: `RCON_PASSWORD` 환경 변수 설정 시 자동 활성화
+- **미설정 시**: 명령어 실행 시 설정 안내 메시지 표시
+
 ## 사전 요구사항
 
 1. Discord 봇 생성 및 토큰 발급
@@ -46,6 +55,10 @@
    - Discord 개발자 모드 활성화 (사용자 설정 > 고급 > 개발자 모드)
    - 채널을 우클릭하여 "ID 복사"
 
+4. 봇을 신뢰할 Discord 서버(길드) ID 확인
+   - Discord 개발자 모드 활성화
+   - 서버 아이콘을 우클릭하여 "ID 복사"
+
 ## 설치 및 실행
 
 ### 1. 환경 변수 설정
@@ -56,7 +69,21 @@ cp .env.example .env
 
 `.env` 파일을 열고 다음 필수 항목을 입력합니다:
 - `DISCORD_TOKEN`: Discord 봇 토큰
+- `MCBOT_TRUSTED_GUILD_ID`: 봇의 privileged 기능을 허용할 Discord 서버 snowflake ID (숫자 문자열)
 - `EMBED_CHANNEL_ID`: 상시 임베드 메시지를 표시할 채널 ID
+
+`EMBED_CHANNEL_ID`는 반드시 `MCBOT_TRUSTED_GUILD_ID`와 같은 서버에 속한 채널이어야 합니다. 다른 서버 채널을 지정하면 버튼은 표시될 수 있어도 실행은 거부됩니다.
+
+mc-server 관련 설정은 `.env.example`에서 필요한 항목만 주석을 해제해 선택적으로 오버라이드합니다.
+
+기본 UID/GID는 기존 배포의 `./data` 볼륨 소유권과 호환되도록 1001입니다. 1000 등 다른 값으로 바꾸는 환경이라면 기존 `/data` 볼륨의 소유권도 함께 맞춰야 합니다.
+
+mc-server 관련 값을 바꾼 경우에는 기존 컨테이너를 재생성해야 반영됩니다. 실행 중이라면 먼저 중지한 다음 아래처럼 재생성하세요:
+
+```bash
+docker compose stop mc-server
+docker compose rm -sf mc-server && docker compose create mc-server
+```
 
 ### 2. 봇 실행 (권장)
 
@@ -164,10 +191,24 @@ docker compose up -d mcbot
 | `EMBED_CHANNEL_ID` | ✅ | -                         | 상시 임베드 메시지를 표시할 채널 ID |
 | `MC_CONTAINER_NAME` | ❌ | `mc-server`               | MC 서버 컨테이너 이름 |
 | `MCBOT_ROLE_NAME` | ❌ | `마크봇`                     | 봇 사용 권한 역할 이름 |
+| `MCBOT_TRUSTED_GUILD_ID` | ✅ | -                         | privileged 기능을 허용할 Discord 서버(길드) ID |
 | `READY_TIMEOUT_SECONDS` | ❌ | `600`                     | 서버 시작 타임아웃 (초, 서버가 "준비 완료" 로그를 남길 때까지 대기하는 최대 시간) |
 | `STOP_TIMEOUT_SECONDS` | ❌ | `120`                     | 서버 종료 타임아웃 (초, Docker가 컨테이너를 그레이스풀하게 중지하기 위해 기다리는 시간) |
 | `SERVER_OPERATION_TIMEOUT_SECONDS` | ❌ | `720`                     | 서버 작업(시작/종료) 전체 타임아웃 (초, 버튼 클릭부터 최종 결과 처리까지의 상위 타임아웃) |
 | `EMBED_UPDATE_TIMEOUT_SECONDS` | ❌ | `10`                      | 임베드 메시지 업데이트 타임아웃 (초, Discord로 상태 임베드를 전송/수정할 때의 최대 대기 시간) |
+| `MC_SERVER_RESTART_POLICY` | ❌ | `no`                      | mc-server 재시작 정책 |
+| `MC_SERVER_PORT_PUBLISH` | ❌ | `25565:25565`             | mc-server 포트 매핑 (호스트:컨테이너) |
+| `UID` | ❌ | `1001`                    | 컨테이너 내부 사용자 UID |
+| `GID` | ❌ | `1001`                    | 컨테이너 내부 사용자 GID |
+| `VERSION` | ❌ | `1.20.1`                  | 마인크래프트 서버 버전 |
+| `TYPE` | ❌ | `FORGE`                   | 마인크래프트 서버 타입 |
+| `DIFFICULTY` | ❌ | `easy`                    | 서버 난이도 |
+| `MEMORY` | ❌ | `14G`                     | 서버 메모리 |
+| `INIT_MEMORY` | ❌ | `14G`                     | 서버 초기 메모리 |
+| `MOTD` | ❌ | `SNOWY'S SERVER`          | 서버 MOTD |
+| `VIEW_DISTANCE` | ❌ | `8`                       | 렌더 거리 |
+| `SIMULATION_DISTANCE` | ❌ | `8`                       | 시뮬레이션 거리 |
+| `ENABLE_RCON` | ❌ | `true`                    | RCON 활성화 여부 |
 | `MC_JOIN_LOG_PATTERN` | ❌ | `]: (.+) joined the game` | 플레이어 접속 로그 패턴 (정규식) |
 | `MC_LEAVE_LOG_PATTERN` | ❌ | `]: (.+) left the game`   | 플레이어 퇴장 로그 패턴 (정규식) |
 | `AUTO_RECOVER_ENABLED` | ❌ | `true` | 크래시 후 자동 복구 활성화 여부 |
@@ -176,6 +217,19 @@ docker compose up -d mcbot
 | `CRASH_DETECTION_INTERVAL_SECONDS` | ❌ | `2` | 컨테이너 상태 감시 주기 (초) |
 | `MAX_INSPECT_FAILURE_ATTEMPTS` | ❌ | `3` | 컨테이너 상태 확인 연속 실패 허용 횟수 |
 | `MCBOT_DEBUG` | ❌ | `false` | 디버그 로그 활성화 (`true` 또는 `1`로 설정) |
+| `RCON_HOST` | ❌ | `mc-server` | RCON 서버 호스트 (컨테이너 이름 또는 IP) |
+| `RCON_PORT` | ❌ | `25575` | RCON 서버 포트 |
+| `RCON_PASSWORD` | ❌ | - | RCON 비밀번호 (설정 시 Discord `/마크봇 rcon` 명령어 활성화) |
+| `RCON_TIMEOUT_SECONDS` | ❌ | `10` | RCON 명령 타임아웃 (초) |
+| `RCON_CMDS_STARTUP` | ❌ | - | RCON 시작 명령어 |
+
+### Compose 서비스 이름과 컨테이너 이름
+
+`MC_CONTAINER_NAME`은 런타임 컨테이너의 이름만 바꿉니다. Compose의 서비스 키는 계속 `mc-server`이며, 이 이름을 기준으로 Make 타겟과 예시 명령이 동작합니다. 그래서 `docker compose create mc-server`와 `make ensure-mc` 같은 명령은 그대로 사용해야 합니다.
+
+`RCON_HOST`의 기본값이 `mc-server`인 이유도 동일합니다. Compose 네트워크에서 서비스 DNS는 서비스 키로 고정되므로, 컨테이너 이름을 바꿔도 `mc-server`가 기본입니다.
+
+이미 설치된 환경에서 `MC_CONTAINER_NAME`을 바꾸면 Compose가 새 컨테이너 이름을 적용하지 못합니다. 이 경우 기존 서비스와 컨테이너를 재생성해야 합니다. 이는 mc-server가 Compose로 관리되는 설정을 바꿀 때 필요한 일반 규칙의 한 사례입니다.
 
 ### 서버 준비 완료 자동 감지
 
@@ -186,6 +240,48 @@ mcbot은 대표적인 Minecraft 서버 이미지의 "서버 준비 완료" 로�
 - Paper/Spigot 계열
 
 로그에서 로딩 시간(초 단위)을 자동으로 추출하여 Discord 임베드에 표시합니다.
+
+### RCON 설정
+
+RCON은 선택적 기능입니다. `mc-server` 컨테이너는 기본값으로 RCON이 켜져 있습니다 (`ENABLE_RCON` 기본값 `true`).
+
+`/마크봇 rcon` 명령어는 등록 자체는 글로벌로 유지되지만, 실제 실행은 `MCBOT_TRUSTED_GUILD_ID`로 지정한 서버에서만 허용됩니다.
+
+**활성화 방법**: `.env` 파일에 `MCBOT_TRUSTED_GUILD_ID`와 `RCON_PASSWORD`를 설정한 뒤 봇을 재시작합니다.
+
+```bash
+# .env 파일
+MCBOT_TRUSTED_GUILD_ID=123456789012345678
+RCON_PASSWORD=your_secure_password
+```
+
+**동작 방식**:
+- `RCON_PASSWORD` 설정 시:
+  - `mc-server`: 해당 비밀번호로 RCON 인증
+  - `mcbot`: 봇 재시작 후 `/마크봇 rcon` 명령어 정상 작동
+- `RCON_PASSWORD` 미설정 시:
+  - `mc-server`: 랜덤 비밀번호로 RCON 작동
+  - `mcbot`: `/마크봇 rcon` 명령어 실행 시 설정 안내 메시지 표시
+
+`docker-compose.yml`은 `RCON_PASSWORD`와 `RCON_CMDS_STARTUP`을 pass-through로 유지합니다. Compose는 셸에 export된 값뿐 아니라 프로젝트 `.env` 또는 `--env-file` 값도 `mc-server`의 pass-through 키에 반영합니다. 다만 봇 컨테이너는 서비스 설정의 `env_file: .env`로 환경을 받으며, Compose의 `--env-file`은 이 서비스용 `.env` 파일을 대체하지 않습니다. 전체 스택과 `/마크봇 rcon`까지 활성화하려면 프로젝트 `.env`를 유지하고 그 안에 `RCON_PASSWORD`를 두는 구성이 가장 명확합니다. 프로젝트 `.env`와 `--env-file`에 서로 다른 RCON 값을 섞으면 `mc-server`와 `mcbot`이 서로 다른 비밀번호를 사용할 수 있으니 피하세요. 값을 쓰지 않을 때는 사용 중인 env 소스에서 해당 값을 unset하거나 줄 자체를 제거해야 하며, 그 경우 `itzg/minecraft-server`의 기본 동작에 따라 랜덤 비밀번호가 사용됩니다.
+
+보안 주의: `.env`에는 실제 Discord/RCON 비밀번호가 들어갈 수 있으므로 버전 관리에 커밋하지 말고 파일 권한을 제한하세요 (`chmod 600 .env`). Docker 환경 변수는 Docker 접근 권한이 있는 사용자에게 노출될 수 있으므로 공유 호스트에서는 Docker secrets 또는 별도 비밀 관리자를 고려하세요.
+
+`RCON_CMDS_STARTUP`는 계속 지원되는 운영 환경 변수입니다. 다만 기본값은 없습니다. 과거처럼 `keepInventory`가 자동 적용되지 않으니 필요하면 직접 설정하세요.
+
+```bash
+# .env 파일 (예시)
+RCON_CMDS_STARTUP=gamerule keepInventory true
+```
+
+`RCON_CMDS_STARTUP`를 사용하면 `itzg/minecraft-server` 이미지가 시작 시 `rcon-cmds-daemon` 보조 프로세스를 실행합니다. 이 프로세스가 종료된 뒤 zombie로 남지 않도록 `docker-compose.yml`의 `mc-server` 서비스는 `init: true`를 사용합니다. 이 설정을 제거하면 SSH 로그인 또는 `ps`에서 `[rcon-cmds-daemo] <defunct>`가 보일 수 있습니다.
+
+`RCON_PASSWORD`가 공백만 있으면 미설정으로 취급됩니다. 실수로 앞뒤 공백이 붙은 비밀번호는 인증 불일치를 막기 위해 시작 시 에러로 거부됩니다.
+
+**사용 예시**:
+- `/마크봇 rcon list` - 접속 중인 플레이어 목록
+- `/마크봇 rcon say Hello!` - 서버 채팅에 메시지 전송
+- `/마크봇 rcon whitelist add PlayerName` - 화이트리스트 추가
 
 ### 타임아웃 변수 간 차이
 
@@ -292,6 +388,8 @@ mcbot은 대표적인 Minecraft 서버 이미지의 "서버 준비 완료" 로�
     │   │   ├── player_tracker.go       # 플레이어 접속 추적
     │   │   ├── player_tracker_test.go
     │   │   └── presence.go             # 서버 상태 표현
+    │   ├── rcon/                # RCON 클라이언트
+    │   │   └── client.go
     │   └── state/              # 서버 상태 관리
     │       ├── state.go
     │       └── state_test.go
@@ -312,7 +410,7 @@ make go-deps
 make go-build
 
 # 실행 (환경 변수 필요)
-DISCORD_TOKEN=your_token ./mcbot/mcbot
+DISCORD_TOKEN=your_token MCBOT_TRUSTED_GUILD_ID=123456789012345678 EMBED_CHANNEL_ID=123456789012345679 ./mcbot/mcbot
 ```
 
 ### 직접 Go 명령어 사용
@@ -325,5 +423,5 @@ cd mcbot && go mod tidy
 cd mcbot && go build -o mcbot ./cmd/mcbot
 
 # 실행 (환경 변수 필요)
-cd mcbot && DISCORD_TOKEN=your_token ./mcbot
+cd mcbot && DISCORD_TOKEN=your_token MCBOT_TRUSTED_GUILD_ID=123456789012345678 EMBED_CHANNEL_ID=123456789012345679 ./mcbot
 ```

@@ -4,6 +4,7 @@ package mcserver
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +106,49 @@ func TestIntegration_RuntimeWatcher_UnexpectedStop(t *testing.T) {
 	t.Log("✓ 예기치 않은 종료 감지 후 crashed 처리 확인")
 }
 
+func TestIntegration_RCONStartupCommands_DoNotLeaveZombieProcess(t *testing.T) {
+	helper := NewIntegrationTestHelper(t)
+	helper.SetupWithEnv(map[string]string{
+		"RCON_CMDS_STARTUP": "gamerule keepInventory true",
+	})
+
+	initEnabled, err := helper.ContainerInitEnabled()
+	if err != nil {
+		t.Fatalf("container init 설정 확인 실패: %v", err)
+	}
+	if !initEnabled {
+		t.Fatal("mc-test container init = false, want true to reap RCON startup helper processes")
+	}
+
+	helper.WaitForLogSubstring("No addition rcon commands are given, stopping rcon cmd service", 30*time.Second)
+
+	processTable, err := helper.ProcessTable()
+	if err != nil {
+		t.Fatalf("process table 조회 실패: %v", err)
+	}
+	if hasRCONZombieProcess(processTable) {
+		t.Fatalf("rcon-cmds-daemo zombie process detected after RCON_CMDS_STARTUP completed:\n%s", processTable)
+	}
+
+	t.Log("✓ RCON_CMDS_STARTUP 실행 후 rcon-cmds-daemo zombie 미발생 확인")
+}
+
+func hasRCONZombieProcess(processTable string) bool {
+	for _, line := range strings.Split(processTable, "\n") {
+		if !strings.Contains(line, "rcon-cmds-daemo") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 5 && (fields[3] == "Z" || strings.HasPrefix(fields[4], "Z")) {
+			return true
+		}
+		if strings.Contains(line, "<defunct>") {
+			return true
+		}
+	}
+	return false
+}
+
 func TestIntegration_SyncWatcher_ExternalStart(t *testing.T) {
 	helper := NewIntegrationTestHelper(t)
 	helper.Setup()
@@ -145,6 +189,7 @@ func TestIntegration_SyncWatcher_ExternalStart(t *testing.T) {
 	}
 
 	t.Log("외부에서 컨테이너 시작")
+	startedAt := time.Now()
 	if err := helper.StartContainer(); err != nil {
 		t.Fatalf("컨테이너 시작 실패: %v", err)
 	}
@@ -163,7 +208,7 @@ func TestIntegration_SyncWatcher_ExternalStart(t *testing.T) {
 	}
 
 	t.Log("서버 ready 로그 대기 중...")
-	helper.WaitForServerReady(120 * time.Second)
+	helper.WaitForServerReadySince(120*time.Second, startedAt)
 
 	maxWait := 30
 	for i := 0; i < maxWait; i++ {
@@ -256,11 +301,12 @@ func TestIntegration_WatcherRestart_AfterCrash(t *testing.T) {
 	}
 
 	t.Log("컨테이너 재시작 후 워처 재시작 시도")
+	restartedAt := time.Now()
 	if err := helper.StartContainer(); err != nil {
 		t.Fatalf("컨테이너 재시작 실패: %v", err)
 	}
 
-	helper.WaitForServerReady(120 * time.Second)
+	helper.WaitForServerReadySince(180*time.Second, restartedAt)
 
 	stateManager.SetRunning(10 * time.Second)
 	controller.logMux.Start(time.Now().Add(-5 * time.Second))

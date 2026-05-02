@@ -72,7 +72,7 @@ func EmbedStopFailed(errorMsg string) *discordgo.MessageEmbed {
 func EmbedPermissionDenied(requiredRole string) *discordgo.MessageEmbed {
 	return &discordgo.MessageEmbed{
 		Title:       "🚫 권한 없음",
-		Description: fmt.Sprintf("이 명령어를 사용하려면 `%s` 역할이 필요합니다.", requiredRole),
+		Description: fmt.Sprintf("이 명령어를 사용하려면 `%s` 역할이 필요합니다.", EscapeDiscordText(requiredRole)),
 		Color:       ColorError,
 		Timestamp:   time.Now().Format(time.RFC3339),
 	}

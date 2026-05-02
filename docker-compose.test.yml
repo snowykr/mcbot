@@ -1,6 +1,8 @@
 services:
   mc-test:
     image: itzg/minecraft-server
+    # Match production process reaping for RCON startup helper processes.
+    init: true
     tty: true
     stdin_open: true
     restart: "no"
@@ -24,7 +26,6 @@ services:
       ENABLE_ROLLING_LOGS: "false"
       
       # 테스트 시나리오용 설정
-      ENABLE_RCON: "true"
       RCON_PASSWORD: "test"
       
     volumes:

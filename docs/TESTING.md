@@ -114,7 +114,25 @@ make test-integration-verbose
 4. `docker stop`으로 컨테이너 강제 종료
 5. 최종 상태가 `StateCrashed`인지 확인
 
-#### 3. Sync Watcher - 외부 시작 감지
+#### 3. RCON_CMDS_STARTUP - zombie 프로세스 회귀 방지
+**파일**: `integration_test.go::TestIntegration_RCONStartupCommands_DoNotLeaveZombieProcess`
+
+**검증 내용**:
+- `RCON_CMDS_STARTUP`를 설정한 상태로 테스트 서버 시작
+- Compose `init: true`가 실제 컨테이너에 적용되었는지 확인
+- `rcon-cmds-daemon`이 startup command 실행 후 종료되어도 `<defunct>` zombie로 남지 않는지 확인
+
+**시나리오**:
+1. `RCON_CMDS_STARTUP=gamerule keepInventory true` 환경으로 테스트 컨테이너 시작
+2. 서버 ready 로그 대기
+3. RCON startup command daemon 종료 로그 대기
+4. 컨테이너 내부 process table에서 `rcon-cmds-daemo` zombie 부재 확인
+
+**수동 재현 참고**:
+- `docker run` 또는 Compose에서 `init` 없이 `RCON_CMDS_STARTUP`를 설정하면 `[rcon-cmds-daemo] <defunct>`가 남을 수 있습니다.
+- `docker run --init` 또는 Compose `init: true`를 사용하면 Docker init/tini가 종료된 보조 프로세스를 reap합니다.
+
+#### 4. Sync Watcher - 외부 시작 감지
 **파일**: `integration_test.go::TestIntegration_SyncWatcher_ExternalStart`
 
 **검증 내용**:
@@ -130,7 +148,7 @@ make test-integration-verbose
 5. Ready 로그 대기
 6. 최종 상태가 `StateRunning`인지 확인
 
-#### 4. Container Watcher - Inspect 연속 실패
+#### 5. Container Watcher - Inspect 연속 실패
 **파일**: `integration_test.go::TestIntegration_ContainerWatcher_InspectFailure`
 
 **검증 내용**:
@@ -143,7 +161,7 @@ make test-integration-verbose
 3. Runtime watcher 시작 (inspect 실패 반복)
 4. 설정된 임계치(2회) 도달 후 `StateCrashed` 전이 확인
 
-#### 5. Watcher 재시작 - 크래시 후 복구
+#### 6. Watcher 재시작 - 크래시 후 복구
 **파일**: `integration_test.go::TestIntegration_WatcherRestart_AfterCrash`
 
 **검증 내용**:
@@ -502,15 +520,18 @@ ports:
 - ephemeral 메시지로 권한 부족 안내
 - 상태 임베드는 변경되지 않음
 
-#### 1.5 슬래시 커맨드 (더 이상 지원하지 않음)
+#### 1.5 슬래시 커맨드 (`/마크봇 rcon`)
 
 **절차**:
 1. 봇 로그를 모니터링
-2. (테스트 목적으로) 슬래시 커맨드 입력
+2. 테스트 사용자가 `마크봇` 역할을 가지고 있고 서버가 실행 중인지 확인
+3. `/마크봇 rcon list` 입력
 
 **예상 결과**:
-- 사용자에게 ephemeral 메시지로 "이 봇은 슬래시 커맨드를 더 이상 지원하지 않습니다. 버튼을 통해 서버를 제어해주세요." 안내
-- 로그에 "슬래시 커맨드 수신 (더 이상 지원하지 않음): [커맨드명] (ID: [ID], GuildID: [GuildID], UserID: [UserID])" 기록
+- RCON이 비활성화된 배포라면 ephemeral 메시지로 설정 안내 표시
+- RCON이 활성화되고, 요청 사용자가 `마크봇` 역할을 가지고 있으며, 서버가 실행 중이라면 deferred 응답 후 ephemeral follow-up 메시지로 실행 결과 표시
+- 역할이 없거나 서버가 실행 중이 아니면 deferred 응답 후 ephemeral follow-up 오류 메시지 표시
+- 결과 메시지의 RCON 응답은 코드블록으로 감싸지며, 멘션은 파싱되지 않음
 - 봇이 크래시하지 않음
 
 #### 1.6 기타 지원하지 않는 Interaction 타입

@@ -14,7 +14,11 @@
 
 # Environment
 .env
+/.sisyphus/
 
 # Go
 /mcbot/mcbot
 /mcbot/vendor/
+
+# Backups
+*.tar.gz

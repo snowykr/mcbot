@@ -4,7 +4,7 @@ GO_DIR=mcbot
 .PHONY: up up-all up-mc ensure-mc down nuke go-deps go-build
 
 ensure-mc:
-	@if ! docker ps -a --format '{{.Names}}' | grep -q '^mc-server$$'; then \
+	@if ! docker compose ps -a --format '{{.Service}}' | grep -q '^$(MC_SERVICE)$$'; then \
 		echo 'mc-server 컨테이너를 생성합니다...'; \
 		docker compose create $(MC_SERVICE); \
 	else \
@@ -45,10 +45,10 @@ test-race:
 	cd $(GO_DIR) && go test -race ./...
 
 test-integration:
-	cd $(GO_DIR) && go test -tags=integration -v ./internal/mcserver/...
+	cd $(GO_DIR) && go test -tags=integration -timeout=20m -v ./internal/mcserver/...
 
 test-integration-verbose:
-	cd $(GO_DIR) && go test -tags=integration -v -count=1 ./internal/mcserver/...
+	cd $(GO_DIR) && go test -tags=integration -timeout=20m -v -count=1 ./internal/mcserver/...
 
 test-integration-clean:
 	@echo "통합 테스트 잔여 리소스 정리 중..."

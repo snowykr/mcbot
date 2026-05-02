@@ -8,40 +8,42 @@ services:
     env_file:
       - .env
     environment:
-      MC_CONTAINER_NAME: mc-server
-      MCBOT_ROLE_NAME: 마크봇
-      READY_TIMEOUT_SECONDS: "600"
-      STOP_TIMEOUT_SECONDS: "120"
+      MC_CONTAINER_NAME: ${MC_CONTAINER_NAME:-mc-server}
+      MCBOT_ROLE_NAME: ${MCBOT_ROLE_NAME:-마크봇}
+      READY_TIMEOUT_SECONDS: "${READY_TIMEOUT_SECONDS:-600}"
+      STOP_TIMEOUT_SECONDS: "${STOP_TIMEOUT_SECONDS:-120}"
+      RCON_PORT:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
   mc-server:
     image: itzg/minecraft-server
-    container_name: mc-server
+    container_name: ${MC_CONTAINER_NAME:-mc-server}
+    # Reap short-lived helpers such as rcon-cmds-daemon when RCON_CMDS_STARTUP is used.
+    init: true
     tty: true
     stdin_open: true
-    restart: "no"
+    restart: "${MC_SERVER_RESTART_POLICY:-no}"
     ports:
-      - "25565:25565"
+      - "${MC_SERVER_PORT_PUBLISH:-25565:25565}"
     environment:
       EULA: "TRUE"
-      UID: "1001"
-      GID: "1001"
-      VERSION: "1.20.1"
-      TYPE: "FORGE"
-      # DIFFICULTY: "peaceful"
-      ENABLE_RCON: "true"
-      RCON_CMDS_STARTUP: "gamerule keepInventory true"
-      
-      # --- 성능 최적화---
-      MEMORY: "14G"
-      INIT_MEMORY: "14G"
+      UID: "${UID:-1001}"
+      GID: "${GID:-1001}"
+      VERSION: "${VERSION:-1.20.1}"
+      TYPE: "${TYPE:-FORGE}"
+      DIFFICULTY: "${DIFFICULTY:-easy}"
+      MEMORY: "${MEMORY:-14G}"
+      INIT_MEMORY: "${INIT_MEMORY:-14G}"
+      MOTD: "${MOTD:-SNOWY'S SERVER}"
+      VIEW_DISTANCE: "${VIEW_DISTANCE:-8}"
+      SIMULATION_DISTANCE: "${SIMULATION_DISTANCE:-8}"
+      ENABLE_RCON: "${ENABLE_RCON:-true}"
       USE_AIKAR_FLAGS: "true"
-      # --- 게임 설정 ---
-      view-distance: 8
-      simulation-distance: 8
-      MOTD: "SNOWY'S SERVER"
-      
+      RCON_PASSWORD:
+      RCON_PORT:
+      RCON_CMDS_STARTUP:
+
     volumes:
       - ./data:/data
 

@@ -95,3 +95,17 @@ func TestFormatPlayers_NoTrailingNewline(t *testing.T) {
 		})
 	}
 }
+
+func TestEmbedPermissionDenied_EscapesRoleName(t *testing.T) {
+	embed := EmbedPermissionDenied("@everyone `Admin`")
+
+	if strings.Contains(embed.Description, "@everyone") {
+		t.Fatalf("description contains raw everyone mention: %q", embed.Description)
+	}
+	if !strings.Contains(embed.Description, "@\u200beveryone") {
+		t.Fatalf("description does not neutralize everyone mention: %q", embed.Description)
+	}
+	if !strings.Contains(embed.Description, "\\`Admin\\`") {
+		t.Fatalf("description does not escape role markdown: %q", embed.Description)
+	}
+}

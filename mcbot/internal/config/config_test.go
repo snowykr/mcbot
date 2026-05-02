@@ -38,10 +38,22 @@ func TestValidate_RequiredFields(t *testing.T) {
 			config: Config{
 				DiscordToken:    "token",
 				MCContainerName: "mc-server",
+				TrustedGuildID:  "123456789012345678",
 				EmbedChannelID:  "123456",
 			},
 			expectError: true,
 			errorMsg:    "MCBOT_ROLE_NAME is required",
+		},
+		{
+			name: "Missing TrustedGuildID",
+			config: Config{
+				DiscordToken:    "token",
+				MCContainerName: "mc-server",
+				McbotRoleName:   "마크봇",
+				EmbedChannelID:  "123456",
+			},
+			expectError: true,
+			errorMsg:    "MCBOT_TRUSTED_GUILD_ID is required",
 		},
 		{
 			name: "Missing EmbedChannelID",
@@ -49,6 +61,7 @@ func TestValidate_RequiredFields(t *testing.T) {
 				DiscordToken:    "token",
 				MCContainerName: "mc-server",
 				McbotRoleName:   "마크봇",
+				TrustedGuildID:  "123456789012345678",
 			},
 			expectError: true,
 			errorMsg:    "EMBED_CHANNEL_ID is required",
@@ -79,9 +92,14 @@ func TestValidate_DurationFields(t *testing.T) {
 		DiscordToken:           "token",
 		MCContainerName:        "mc-server",
 		McbotRoleName:          "마크봇",
+		TrustedGuildID:         "123456789012345678",
 		EmbedChannelID:         "123456",
 		StopTimeoutSeconds:     10,
 		ServerOperationTimeout: 60 * time.Second,
+		RCONHost:               "mc-server",
+		RCONPort:               25575,
+		RCONPassword:           "test",
+		RCONTimeout:            10 * time.Second,
 	}
 
 	tests := []struct {
@@ -193,6 +211,7 @@ func TestValidate_AttemptFields(t *testing.T) {
 		DiscordToken:           "token",
 		MCContainerName:        "mc-server",
 		McbotRoleName:          "마크봇",
+		TrustedGuildID:         "123456789012345678",
 		EmbedChannelID:         "123456",
 		ReadyTimeout:           1,
 		EmbedUpdateTimeout:     1,
@@ -201,6 +220,10 @@ func TestValidate_AttemptFields(t *testing.T) {
 		AutoRecoverEnabled:     true,
 		AutoRecoverInterval:    1,
 		CrashDetectionInterval: 1,
+		RCONHost:               "mc-server",
+		RCONPort:               25575,
+		RCONPassword:           "test",
+		RCONTimeout:            10 * time.Second,
 	}
 
 	tests := []struct {
@@ -268,6 +291,25 @@ func TestValidate_AttemptFields(t *testing.T) {
 			},
 			expectError: false,
 		},
+		{
+			name: "Zero RCONTimeout when RCON disabled (should pass)",
+			modifier: func(c *Config) {
+				c.MaxInspectFailureAttempts = 1
+				c.RCONPassword = ""
+				c.RCONTimeout = 0
+			},
+			expectError: false,
+		},
+		{
+			name: "Negative RCONTimeout when RCON enabled",
+			modifier: func(c *Config) {
+				c.MaxInspectFailureAttempts = 1
+				c.RCONPassword = "test"
+				c.RCONTimeout = -1
+			},
+			expectError: true,
+			errorMsg:    "RCON_TIMEOUT_SECONDS must be positive",
+		},
 	}
 
 	for _, tt := range tests {
@@ -330,6 +372,7 @@ func TestValidate_StopTimeoutSeconds(t *testing.T) {
 		DiscordToken:              "token",
 		MCContainerName:           "mc-server",
 		McbotRoleName:             "마크봇",
+		TrustedGuildID:            "123456789012345678",
 		EmbedChannelID:            "123456",
 		ReadyTimeout:              60 * time.Second,
 		EmbedUpdateTimeout:        10 * time.Second,
@@ -338,6 +381,10 @@ func TestValidate_StopTimeoutSeconds(t *testing.T) {
 		AutoRecoverEnabled:        false,
 		CrashDetectionInterval:    2 * time.Second,
 		MaxInspectFailureAttempts: 3,
+		RCONHost:                  "mc-server",
+		RCONPort:                  25575,
+		RCONPassword:              "test",
+		RCONTimeout:               10 * time.Second,
 	}
 
 	tests := []struct {
@@ -405,5 +452,452 @@ func TestValidate_StopTimeoutSeconds(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestValidate_RCONSettingsWhenEnabled(t *testing.T) {
+	baseConfig := Config{
+		DiscordToken:              "token",
+		MCContainerName:           "mc-server",
+		McbotRoleName:             "마크봇",
+		TrustedGuildID:            "123456789012345678",
+		EmbedChannelID:            "123456",
+		ReadyTimeout:              time.Second,
+		EmbedUpdateTimeout:        time.Second,
+		ServerOperationTimeout:    60 * time.Second,
+		StopTimeoutSeconds:        10,
+		CrashDetectionInterval:    time.Second,
+		MaxInspectFailureAttempts: 1,
+		RCONHost:                  "mc-server",
+		RCONPort:                  25575,
+		RCONPassword:              "configured",
+		RCONTimeout:               10 * time.Second,
+	}
+
+	tests := []struct {
+		name        string
+		modifier    func(*Config)
+		expectError string
+	}{
+		{
+			name: "Empty host",
+			modifier: func(c *Config) {
+				c.RCONHost = "   "
+			},
+			expectError: "RCON_HOST is required when RCON is enabled",
+		},
+		{
+			name: "Leading whitespace in host",
+			modifier: func(c *Config) {
+				c.RCONHost = " mc-server"
+			},
+			expectError: "RCON_HOST must not have leading or trailing whitespace",
+		},
+		{
+			name: "Trailing whitespace in host",
+			modifier: func(c *Config) {
+				c.RCONHost = "mc-server "
+			},
+			expectError: "RCON_HOST must not have leading or trailing whitespace",
+		},
+		{
+			name: "Zero port",
+			modifier: func(c *Config) {
+				c.RCONPort = 0
+			},
+			expectError: "RCON_PORT must be between 1 and 65535 when RCON is enabled",
+		},
+		{
+			name: "Too large port",
+			modifier: func(c *Config) {
+				c.RCONPort = 65536
+			},
+			expectError: "RCON_PORT must be between 1 and 65535 when RCON is enabled",
+		},
+		{
+			name: "Disabled RCON skips host and port validation",
+			modifier: func(c *Config) {
+				c.RCONPassword = ""
+				c.RCONHost = ""
+				c.RCONPort = 0
+				c.RCONTimeout = 0
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig
+			tt.modifier(&cfg)
+
+			err := cfg.validate()
+			if tt.expectError == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error %q but got nil", tt.expectError)
+			}
+			if err.Error() != tt.expectError {
+				t.Fatalf("expected error %q, got %q", tt.expectError, err.Error())
+			}
+		})
+	}
+}
+
+func TestRCONEnabled_TrimsWhitespacePassword(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+		enabled  bool
+	}{
+		{name: "Configured password", password: "secret", enabled: true},
+		{name: "Empty password", password: "", enabled: false},
+		{name: "Whitespace-only password", password: "   \t\n  ", enabled: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{RCONPassword: tt.password}
+			if got := cfg.RCONEnabled(); got != tt.enabled {
+				t.Fatalf("expected RCONEnabled=%v, got %v", tt.enabled, got)
+			}
+		})
+	}
+}
+
+func TestLoad_InvalidRCONNumericEnv(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "123456789012345678")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+
+	tests := []struct {
+		name    string
+		key     string
+		value   string
+		errText string
+	}{
+		{
+			name:    "Invalid RCON port",
+			key:     "RCON_PORT",
+			value:   "abc",
+			errText: "invalid RCON_PORT",
+		},
+		{
+			name:    "Invalid RCON timeout",
+			key:     "RCON_TIMEOUT_SECONDS",
+			value:   "abc",
+			errText: "invalid RCON_TIMEOUT_SECONDS",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.key, tt.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected load error containing %q but got nil", tt.errText)
+			}
+			if !strings.Contains(err.Error(), tt.errText) {
+				t.Fatalf("expected error containing %q, got %q", tt.errText, err.Error())
+			}
+
+			t.Setenv(tt.key, "")
+		})
+	}
+}
+
+func TestValidate_RCONPasswordWhitespacePolicy(t *testing.T) {
+	baseConfig := Config{
+		DiscordToken:              "token",
+		MCContainerName:           "mc-server",
+		McbotRoleName:             "마크봇",
+		TrustedGuildID:            "123456789012345678",
+		EmbedChannelID:            "123456",
+		ReadyTimeout:              time.Second,
+		EmbedUpdateTimeout:        time.Second,
+		ServerOperationTimeout:    60 * time.Second,
+		StopTimeoutSeconds:        10,
+		CrashDetectionInterval:    time.Second,
+		MaxInspectFailureAttempts: 1,
+		RCONHost:                  "mc-server",
+		RCONPort:                  25575,
+		RCONPassword:              "configured",
+		RCONTimeout:               10 * time.Second,
+	}
+
+	tests := []struct {
+		name            string
+		password        string
+		expectEnabled   bool
+		expectErrorText string
+	}{
+		{name: "Valid password", password: "configured", expectEnabled: true},
+		{name: "Empty password", password: "", expectEnabled: false},
+		{name: "Whitespace only password", password: "   \t\n  ", expectEnabled: false},
+		{name: "Leading whitespace", password: " configured", expectEnabled: true, expectErrorText: "RCON_PASSWORD must not have leading or trailing whitespace"},
+		{name: "Trailing whitespace", password: "configured ", expectEnabled: true, expectErrorText: "RCON_PASSWORD must not have leading or trailing whitespace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig
+			cfg.RCONPassword = tt.password
+
+			if got := cfg.RCONEnabled(); got != tt.expectEnabled {
+				t.Fatalf("expected RCONEnabled=%v, got %v", tt.expectEnabled, got)
+			}
+
+			err := cfg.validate()
+			if tt.expectErrorText == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error %q but got nil", tt.expectErrorText)
+			}
+			if err.Error() != tt.expectErrorText {
+				t.Fatalf("expected error %q, got %q", tt.expectErrorText, err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_RCONPasswordWhitespacePolicy(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "123456789012345678")
+
+	tests := []struct {
+		name            string
+		password        string
+		expectEnabled   bool
+		expectErrorText string
+	}{
+		{name: "Valid password", password: "configured", expectEnabled: true},
+		{name: "Whitespace only password", password: "   \t\n  ", expectEnabled: false},
+		{name: "Leading whitespace", password: " configured", expectErrorText: "RCON_PASSWORD must not have leading or trailing whitespace"},
+		{name: "Trailing whitespace", password: "configured ", expectErrorText: "RCON_PASSWORD must not have leading or trailing whitespace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RCON_PASSWORD", tt.password)
+
+			cfg, err := Load()
+			if tt.expectErrorText == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if got := cfg.RCONEnabled(); got != tt.expectEnabled {
+					t.Fatalf("expected RCONEnabled=%v, got %v", tt.expectEnabled, got)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error %q but got nil", tt.expectErrorText)
+			}
+			if !strings.Contains(err.Error(), tt.expectErrorText) {
+				t.Fatalf("expected error containing %q, got %q", tt.expectErrorText, err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_RCONHostWhitespacePolicy(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "123456789012345678")
+	t.Setenv("RCON_PASSWORD", "configured")
+
+	tests := []struct {
+		name            string
+		host            string
+		expectErrorText string
+	}{
+		{name: "Valid host", host: "mc-server"},
+		{name: "Whitespace only host", host: "   \t\n  ", expectErrorText: "RCON_HOST is required when RCON is enabled"},
+		{name: "Leading whitespace", host: " mc-server", expectErrorText: "RCON_HOST must not have leading or trailing whitespace"},
+		{name: "Trailing whitespace", host: "mc-server ", expectErrorText: "RCON_HOST must not have leading or trailing whitespace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RCON_HOST", tt.host)
+
+			_, err := Load()
+			if tt.expectErrorText == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error %q but got nil", tt.expectErrorText)
+			}
+			if !strings.Contains(err.Error(), tt.expectErrorText) {
+				t.Fatalf("expected error containing %q, got %q", tt.expectErrorText, err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_RCONHostWhitespaceValidationSkippedWhenDisabled(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "123456789012345678")
+	t.Setenv("RCON_HOST", " mc-server")
+
+	tests := []struct {
+		name     string
+		password string
+	}{
+		{name: "Empty password", password: ""},
+		{name: "Whitespace only password", password: "   \t\n  "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RCON_PASSWORD", tt.password)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.RCONEnabled() {
+				t.Fatal("expected RCON to be disabled")
+			}
+		})
+	}
+}
+
+func TestValidate_TrustedGuildIDWhitespacePolicy(t *testing.T) {
+	baseConfig := Config{
+		DiscordToken:              "token",
+		MCContainerName:           "mc-server",
+		McbotRoleName:             "마크봇",
+		TrustedGuildID:            "123456789012345678",
+		EmbedChannelID:            "123456",
+		ReadyTimeout:              time.Second,
+		EmbedUpdateTimeout:        time.Second,
+		ServerOperationTimeout:    60 * time.Second,
+		StopTimeoutSeconds:        10,
+		CrashDetectionInterval:    time.Second,
+		MaxInspectFailureAttempts: 1,
+	}
+
+	tests := []struct {
+		name            string
+		guildID         string
+		expectErrorText string
+	}{
+		{name: "Valid guild ID", guildID: "123456789012345678"},
+		{name: "Zero guild ID", guildID: "0", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must be a non-zero Discord snowflake ID"},
+		{name: "Non-numeric guild ID", guildID: "guild-id", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must be a Discord snowflake ID (digits only)"},
+		{name: "Leading zeros", guildID: "0123456789012345678", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must be a canonical Discord snowflake ID (no leading zeros)"},
+		{name: "Whitespace only guild ID", guildID: "   \t\n  ", expectErrorText: "MCBOT_TRUSTED_GUILD_ID is required"},
+		{name: "Leading whitespace", guildID: " 123456789012345678", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must not have leading or trailing whitespace"},
+		{name: "Trailing whitespace", guildID: "123456789012345678 ", expectErrorText: "MCBOT_TRUSTED_GUILD_ID must not have leading or trailing whitespace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := baseConfig
+			cfg.TrustedGuildID = tt.guildID
+
+			err := cfg.validate()
+			if tt.expectErrorText == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error %q but got nil", tt.expectErrorText)
+			}
+			if err.Error() != tt.expectErrorText {
+				t.Fatalf("expected error %q, got %q", tt.expectErrorText, err.Error())
+			}
+		})
+	}
+}
+
+func TestLoad_TrustedGuildIDWhitespaceRejected(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", " 123456789012345678")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected load error but got nil")
+	}
+	if !strings.Contains(err.Error(), "MCBOT_TRUSTED_GUILD_ID must not have leading or trailing whitespace") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_MissingTrustedGuildID(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected load error but got nil")
+	}
+	if !strings.Contains(err.Error(), "MCBOT_TRUSTED_GUILD_ID is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_InvalidTrustedGuildIDRejected(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "guild-id")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected load error but got nil")
+	}
+	if !strings.Contains(err.Error(), "MCBOT_TRUSTED_GUILD_ID must be a Discord snowflake ID (digits only)") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_TrustedGuildIDZeroRejected(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "0")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected load error but got nil")
+	}
+	if !strings.Contains(err.Error(), "MCBOT_TRUSTED_GUILD_ID must be a non-zero Discord snowflake ID") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_TrustedGuildIDWithLeadingZerosRejected(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("EMBED_CHANNEL_ID", "123456")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "0123456789012345678")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected load error but got nil")
+	}
+	if !strings.Contains(err.Error(), "MCBOT_TRUSTED_GUILD_ID must be a canonical Discord snowflake ID (no leading zeros)") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
