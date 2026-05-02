@@ -9,9 +9,9 @@ services:
       - .env
     environment:
       MC_CONTAINER_NAME: ${MC_CONTAINER_NAME:-mc-server}
-      MCBOT_ROLE_NAME: 마크봇
-      READY_TIMEOUT_SECONDS: "600"
-      STOP_TIMEOUT_SECONDS: "120"
+      MCBOT_ROLE_NAME: ${MCBOT_ROLE_NAME:-마크봇}
+      READY_TIMEOUT_SECONDS: "${READY_TIMEOUT_SECONDS:-600}"
+      STOP_TIMEOUT_SECONDS: "${STOP_TIMEOUT_SECONDS:-120}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
@@ -41,7 +41,7 @@ services:
       USE_AIKAR_FLAGS: "true"
       RCON_PASSWORD:
       RCON_CMDS_STARTUP:
-    
+
     volumes:
       - ./data:/data
 

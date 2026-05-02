@@ -149,16 +149,7 @@ func (h *Handler) handleToggleComponent(s *discordgo.Session, i *discordgo.Inter
 	}
 
 	if !h.hasRequiredRole(s, i) {
-		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Embeds: []*discordgo.MessageEmbed{EmbedPermissionDenied(h.cfg.McbotRoleName)},
-				Flags:  discordgo.MessageFlagsEphemeral,
-			},
-		})
-		if err != nil {
-			log.Printf("권한 거부 응답 실패: %v", err)
-		}
+		h.respondPermissionDenied(s, i)
 		return
 	}
 
@@ -262,6 +253,12 @@ func (h *Handler) handleStopConfirmComponent(s *discordgo.Session, i *discordgo.
 		if err != nil {
 			log.Printf("사용자 불일치 응답 실패: %v", err)
 		}
+		return
+	}
+
+	if !h.hasRequiredRole(s, i) {
+		h.stopConfirmationStore.Delete(confirmationID)
+		h.respondPermissionDenied(s, i)
 		return
 	}
 
@@ -379,6 +376,20 @@ func (h *Handler) isTrustedGuild(i *discordgo.InteractionCreate) bool {
 func noAllowedMentions() *discordgo.MessageAllowedMentions {
 	return &discordgo.MessageAllowedMentions{
 		Parse: []discordgo.AllowedMentionType{},
+	}
+}
+
+func (h *Handler) respondPermissionDenied(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Embeds:          []*discordgo.MessageEmbed{EmbedPermissionDenied(h.cfg.McbotRoleName)},
+			Flags:           discordgo.MessageFlagsEphemeral,
+			AllowedMentions: noAllowedMentions(),
+		},
+	})
+	if err != nil {
+		log.Printf("권한 거부 응답 실패: %v", err)
 	}
 }
 
@@ -588,6 +599,12 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 		return
 	}
 
+	if !h.hasRequiredRole(s, i) {
+		log.Printf("[RCON] 권한 거부 (User: %s, ID: %s)", username, userID)
+		h.respondEphemeral(s, i, "🚫 `"+EscapeDiscordText(h.cfg.McbotRoleName)+"` 역할이 필요합니다.")
+		return
+	}
+
 	// RCON command is always registered regardless of RCON_PASSWORD configuration (UX trade-off).
 	// Return a friendly error if RCON is not configured for this deployment.
 	if h.rconClient == nil {
@@ -618,12 +635,6 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 	})
 	if err != nil {
 		log.Printf("[RCON] deferred 응답 실패: %v", err)
-		return
-	}
-
-	if !h.hasRequiredRole(s, i) {
-		log.Printf("[RCON] 권한 거부 (User: %s, ID: %s)", username, userID)
-		h.respondEphemeralFollowup(s, i, "🚫 `"+h.cfg.McbotRoleName+"` 역할이 필요합니다.")
 		return
 	}
 

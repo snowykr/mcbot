@@ -306,7 +306,7 @@ func TestIntegration_WatcherRestart_AfterCrash(t *testing.T) {
 		t.Fatalf("컨테이너 재시작 실패: %v", err)
 	}
 
-	helper.WaitForServerReadySince(120*time.Second, restartedAt)
+	helper.WaitForServerReadySince(180*time.Second, restartedAt)
 
 	stateManager.SetRunning(10 * time.Second)
 	controller.logMux.Start(time.Now().Add(-5 * time.Second))

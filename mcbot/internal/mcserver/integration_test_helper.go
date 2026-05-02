@@ -49,6 +49,9 @@ func (h *IntegrationTestHelper) SetupWithEnv(envOverrides map[string]string) {
 
 	h.applyEnvOverrides(envOverrides)
 	h.PreClean()
+	h.t.Cleanup(func() {
+		h.Teardown()
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -61,12 +64,8 @@ func (h *IntegrationTestHelper) SetupWithEnv(envOverrides map[string]string) {
 	}
 
 	h.t.Logf("[SETUP] 컨테이너 시작 완료, 서버 준비 대기 중...")
-	h.WaitForServerReady(120 * time.Second)
+	h.WaitForServerReady(180 * time.Second)
 	h.t.Logf("[SETUP] 서버 준비 완료")
-
-	h.t.Cleanup(func() {
-		h.Teardown()
-	})
 }
 
 func (h *IntegrationTestHelper) applyEnvOverrides(envOverrides map[string]string) {

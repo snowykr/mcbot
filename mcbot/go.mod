@@ -1,6 +1,6 @@
 module github.com/snowy/mcbot
 
-go 1.25.3
+go 1.25.9
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0

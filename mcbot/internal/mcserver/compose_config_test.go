@@ -2,7 +2,10 @@
 
 package mcserver
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestComposeConfig_Defaults(t *testing.T) {
 	t.Parallel()
@@ -77,6 +80,9 @@ func TestComposeConfig_Overrides(t *testing.T) {
 
 	cfg := renderComposeConfig(t, map[string]string{
 		"MC_CONTAINER_NAME":        "snowy-mc",
+		"MCBOT_ROLE_NAME":          "CustomBotRole",
+		"READY_TIMEOUT_SECONDS":    "900",
+		"STOP_TIMEOUT_SECONDS":     "30",
 		"MC_SERVER_RESTART_POLICY": "always",
 		"MC_SERVER_PORT_PUBLISH":   "25570:25565",
 		"UID":                      "1234",
@@ -85,6 +91,7 @@ func TestComposeConfig_Overrides(t *testing.T) {
 		"ENABLE_RCON":              "false",
 	})
 	mcServer := requireComposeService(t, cfg, "mc-server")
+	mcBot := requireComposeService(t, cfg, "mcbot")
 
 	if mcServer.ContainerName != "snowy-mc" {
 		t.Fatalf("container_name = %q, want %q", mcServer.ContainerName, "snowy-mc")
@@ -108,6 +115,10 @@ func TestComposeConfig_Overrides(t *testing.T) {
 	assertComposeEnvValue(t, mcServer.Environment, "GID", "5678")
 	assertComposeEnvValue(t, mcServer.Environment, "TYPE", "PAPER")
 	assertComposeEnvValue(t, mcServer.Environment, "ENABLE_RCON", "false")
+	assertComposeEnvValue(t, mcBot.Environment, "MC_CONTAINER_NAME", "snowy-mc")
+	assertComposeEnvValue(t, mcBot.Environment, "MCBOT_ROLE_NAME", "CustomBotRole")
+	assertComposeEnvValue(t, mcBot.Environment, "READY_TIMEOUT_SECONDS", "900")
+	assertComposeEnvValue(t, mcBot.Environment, "STOP_TIMEOUT_SECONDS", "30")
 }
 
 func TestComposeConfig_RCONStartupPassThrough(t *testing.T) {
@@ -134,6 +145,61 @@ func TestComposeConfig_RCONStartupPassThrough(t *testing.T) {
 
 		assertComposeEnvValue(t, mcServer.Environment, "RCON_PASSWORD", "super-secret")
 		assertComposeEnvValue(t, mcServer.Environment, "RCON_CMDS_STARTUP", "/gamerule keepInventory true")
+	})
+
+	t.Run("project .env", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := renderComposeConfigWithProjectEnv(t, "RCON_PASSWORD=env-file-secret\nRCON_CMDS_STARTUP=/say from env file\n")
+		mcServer := requireComposeService(t, cfg, "mc-server")
+		mcBot := requireComposeService(t, cfg, "mcbot")
+
+		assertComposeEnvValue(t, mcServer.Environment, "RCON_PASSWORD", "env-file-secret")
+		assertComposeEnvValue(t, mcServer.Environment, "RCON_CMDS_STARTUP", "/say from env file")
+		assertComposeEnvValue(t, mcBot.Environment, "RCON_PASSWORD", "env-file-secret")
+		assertComposeEnvValue(t, mcBot.Environment, "RCON_CMDS_STARTUP", "/say from env file")
+	})
+
+	t.Run("explicit env file with existing empty project .env", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := renderComposeConfigWithEnvFile(t, "RCON_PASSWORD=explicit-env-file-secret\nRCON_CMDS_STARTUP=/say from explicit env file\n")
+		mcServer := requireComposeService(t, cfg, "mc-server")
+		mcBot := requireComposeService(t, cfg, "mcbot")
+
+		assertComposeEnvValue(t, mcServer.Environment, "RCON_PASSWORD", "explicit-env-file-secret")
+		assertComposeEnvValue(t, mcServer.Environment, "RCON_CMDS_STARTUP", "/say from explicit env file")
+		assertComposeEnvMissingOrNil(t, mcBot.Environment, "RCON_PASSWORD")
+		assertComposeEnvMissingOrNil(t, mcBot.Environment, "RCON_CMDS_STARTUP")
+	})
+
+	t.Run("explicit env file does not replace divergent project .env for mcbot", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := renderComposeConfigWithProjectAndExplicitEnvFiles(
+			t,
+			"RCON_PASSWORD=project-env-secret\nRCON_CMDS_STARTUP=/say from project env\n",
+			"RCON_PASSWORD=explicit-env-file-secret\nRCON_CMDS_STARTUP=/say from explicit env file\n",
+		)
+		mcServer := requireComposeService(t, cfg, "mc-server")
+		mcBot := requireComposeService(t, cfg, "mcbot")
+
+		assertComposeEnvValue(t, mcServer.Environment, "RCON_PASSWORD", "explicit-env-file-secret")
+		assertComposeEnvValue(t, mcServer.Environment, "RCON_CMDS_STARTUP", "/say from explicit env file")
+		assertComposeEnvValue(t, mcBot.Environment, "RCON_PASSWORD", "project-env-secret")
+		assertComposeEnvValue(t, mcBot.Environment, "RCON_CMDS_STARTUP", "/say from project env")
+	})
+
+	t.Run("explicit env file without project .env fails for mcbot env_file", func(t *testing.T) {
+		t.Parallel()
+
+		err := renderComposeConfigWithEnvFileMissingProjectEnvErr(t, "RCON_PASSWORD=explicit-env-file-secret\n")
+		if err == nil {
+			t.Fatal("docker compose config succeeded without project .env, want failure")
+		}
+		if !strings.Contains(err.Error(), ".env") {
+			t.Fatalf("error = %v, want mention of missing .env", err)
+		}
 	})
 }
 
@@ -169,5 +235,14 @@ func assertComposeEnvNil(t *testing.T, env map[string]any, key string) {
 	}
 	if got != nil {
 		t.Fatalf("%s = %#v, want nil", key, got)
+	}
+}
+
+func assertComposeEnvMissingOrNil(t *testing.T, env map[string]any, key string) {
+	t.Helper()
+
+	got, ok := env[key]
+	if ok && got != nil {
+		t.Fatalf("%s = %#v, want missing or nil", key, got)
 	}
 }

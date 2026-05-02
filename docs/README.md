@@ -263,7 +263,9 @@ RCON_PASSWORD=your_secure_password
   - `mc-server`: 랜덤 비밀번호로 RCON 작동
   - `mcbot`: `/마크봇 rcon` 명령어 실행 시 설정 안내 메시지 표시
 
-`docker-compose.yml`은 `RCON_PASSWORD`와 `RCON_CMDS_STARTUP`을 pass-through로 유지합니다. 값을 쓰지 않을 때는 `.env`에서 해당 줄 자체를 제거해야 하며, 그 경우 `itzg/minecraft-server`의 기본 동작에 따라 랜덤 비밀번호가 사용됩니다.
+`docker-compose.yml`은 `RCON_PASSWORD`와 `RCON_CMDS_STARTUP`을 pass-through로 유지합니다. Compose는 셸에 export된 값뿐 아니라 프로젝트 `.env` 또는 `--env-file` 값도 `mc-server`의 pass-through 키에 반영합니다. 다만 봇 컨테이너는 서비스 설정의 `env_file: .env`로 환경을 받으며, Compose의 `--env-file`은 이 서비스용 `.env` 파일을 대체하지 않습니다. 전체 스택과 `/마크봇 rcon`까지 활성화하려면 프로젝트 `.env`를 유지하고 그 안에 `RCON_PASSWORD`를 두는 구성이 가장 명확합니다. 프로젝트 `.env`와 `--env-file`에 서로 다른 RCON 값을 섞으면 `mc-server`와 `mcbot`이 서로 다른 비밀번호를 사용할 수 있으니 피하세요. 값을 쓰지 않을 때는 사용 중인 env 소스에서 해당 값을 unset하거나 줄 자체를 제거해야 하며, 그 경우 `itzg/minecraft-server`의 기본 동작에 따라 랜덤 비밀번호가 사용됩니다.
+
+보안 주의: `.env`에는 실제 Discord/RCON 비밀번호가 들어갈 수 있으므로 버전 관리에 커밋하지 말고 파일 권한을 제한하세요 (`chmod 600 .env`). Docker 환경 변수는 Docker 접근 권한이 있는 사용자에게 노출될 수 있으므로 공유 호스트에서는 Docker secrets 또는 별도 비밀 관리자를 고려하세요.
 
 `RCON_CMDS_STARTUP`는 계속 지원되는 운영 환경 변수입니다. 다만 기본값은 없습니다. 과거처럼 `keepInventory`가 자동 적용되지 않으니 필요하면 직접 설정하세요.
 

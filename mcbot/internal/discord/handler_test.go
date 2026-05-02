@@ -31,6 +31,7 @@ var discordEndpointOverrideMu sync.Mutex
 type testServerController struct {
 	startCh         chan mcserver.StartResult
 	stopCh          chan mcserver.StopResult
+	stopStarted     chan struct{}
 	presenceVal     mcserver.PresenceState
 	presenceStarted chan struct{}
 	presenceBlock   <-chan struct{}
@@ -41,6 +42,13 @@ func (t *testServerController) Start(_ context.Context) <-chan mcserver.StartRes
 }
 
 func (t *testServerController) Stop(_ context.Context) <-chan mcserver.StopResult {
+	if t.stopStarted != nil {
+		select {
+		case <-t.stopStarted:
+		default:
+			close(t.stopStarted)
+		}
+	}
 	return t.stopCh
 }
 
@@ -485,21 +493,18 @@ func TestHandleInteraction_RCONPermissionDenied(t *testing.T) {
 	handler.HandleInteraction(session, interaction)
 
 	requests := api.recordedRequests()
-	if len(requests) != 2 {
-		t.Fatalf("expected 2 requests, got %d", len(requests))
-	}
-
-	deferred := decodeInteractionResponse(t, requests[0].Body)
-	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
-		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
 	}
 	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
 
-	followup := decodeWebhookParams(t, requests[1].Body)
-	if !strings.Contains(followup.Content, "역할이 필요합니다") {
-		t.Fatalf("unexpected followup content: %q", followup.Content)
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate response, got %v", response.Type)
 	}
-	assertAllowedMentionsParseEmpty(t, requests[1].Body)
+	if response.Data == nil || !strings.Contains(response.Data.Content, "역할이 필요합니다") {
+		t.Fatalf("unexpected response data: %+v", response.Data)
+	}
 }
 
 func TestHandleInteraction_RCONRejectsWhenTrustedGuildUnset(t *testing.T) {
@@ -689,6 +694,58 @@ func TestHandleInteraction_StopCancelWrongGuildRespondsEphemeral(t *testing.T) {
 		t.Fatalf("unexpected response content: %+v", response.Data)
 	}
 	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
+}
+
+func TestHandleInteraction_StopConfirmRechecksRoleBeforeStop(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+
+	stopStarted := make(chan struct{})
+	controller := &testServerController{
+		stopCh:      make(chan mcserver.StopResult),
+		stopStarted: stopStarted,
+	}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:  "마크봇",
+		TrustedGuildID: testGuildID,
+	}, controller, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	handler.stopConfirmationStore.Save(StopConfirmationContext{
+		ConfirmationID: "confirmation-id",
+		UserID:         "user-id",
+		Interaction: &discordgo.Interaction{
+			AppID: "123456789012345678",
+			Token: "original-interaction-token",
+		},
+		MessageID: "followup-message-id",
+	})
+
+	interaction := newComponentInteraction(ComponentIDConfirmStopPrefix+"confirmation-id", testGuildID, nil)
+
+	handler.HandleInteraction(session, interaction)
+
+	select {
+	case <-stopStarted:
+		t.Fatal("stop started even though confirmer no longer has the required role")
+	default:
+	}
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 permission-denied response, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate response, got %v", response.Type)
+	}
+	if response.Data == nil || len(response.Data.Embeds) != 1 || !strings.Contains(response.Data.Embeds[0].Description, "역할이 필요합니다") {
+		t.Fatalf("unexpected response data: %+v", response.Data)
+	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
+
+	if _, ok := handler.stopConfirmationStore.Get("confirmation-id"); ok {
+		t.Fatal("confirmation was not deleted after role revalidation failed")
+	}
 }
 
 func TestHandleInteraction_RCONNoGuildRespondsEphemeral(t *testing.T) {
