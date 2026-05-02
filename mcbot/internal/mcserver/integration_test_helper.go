@@ -249,6 +249,14 @@ func (h *IntegrationTestHelper) WaitForServerReady(timeout time.Duration) {
 	h.WaitForServerReadySince(timeout, time.Time{})
 }
 
+func dockerLogsSinceArgs(containerID string, since time.Time) []string {
+	args := []string{"logs", "--tail", "50"}
+	if !since.IsZero() {
+		args = append(args, "--since", since.UTC().Format(time.RFC3339Nano))
+	}
+	return append(args, containerID)
+}
+
 func (h *IntegrationTestHelper) WaitForServerReadySince(timeout time.Duration, since time.Time) {
 	h.t.Helper()
 
@@ -274,11 +282,7 @@ func (h *IntegrationTestHelper) WaitForServerReadySince(timeout time.Duration, s
 				continue
 			}
 
-			args := []string{"logs", "--tail", "50"}
-			if !since.IsZero() {
-				args = append(args, "--since", fmt.Sprintf("%d", since.Unix()))
-			}
-			args = append(args, containerID)
+			args := dockerLogsSinceArgs(containerID, since)
 
 			cmd := exec.CommandContext(context.Background(), "docker", args...)
 			output, err := cmd.CombinedOutput()

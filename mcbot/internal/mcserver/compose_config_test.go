@@ -41,8 +41,8 @@ func TestComposeConfig_Defaults(t *testing.T) {
 	}
 
 	assertComposeEnvValue(t, mcServer.Environment, "EULA", "TRUE")
-	assertComposeEnvValue(t, mcServer.Environment, "UID", "1000")
-	assertComposeEnvValue(t, mcServer.Environment, "GID", "1000")
+	assertComposeEnvValue(t, mcServer.Environment, "UID", "1001")
+	assertComposeEnvValue(t, mcServer.Environment, "GID", "1001")
 	assertComposeEnvValue(t, mcServer.Environment, "VERSION", "1.20.1")
 	assertComposeEnvValue(t, mcServer.Environment, "TYPE", "FORGE")
 	assertComposeEnvValue(t, mcServer.Environment, "DIFFICULTY", "easy")

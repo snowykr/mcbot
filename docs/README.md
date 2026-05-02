@@ -76,7 +76,7 @@ cp .env.example .env
 
 mc-server 관련 설정은 `.env.example`에서 필요한 항목만 주석을 해제해 선택적으로 오버라이드합니다.
 
-UID/GID를 1000에서 1001로 올려야 하는 환경(OCI, Oracle VM 등)이라면 기존 `/data` 볼륨의 소유권도 함께 맞춰야 합니다. 이미 1001:1001 소유인 볼륨을 1000:1000으로 내리면 권한 문제가 생길 수 있습니다.
+기본 UID/GID는 기존 배포의 `./data` 볼륨 소유권과 호환되도록 1001입니다. 1000 등 다른 값으로 바꾸는 환경이라면 기존 `/data` 볼륨의 소유권도 함께 맞춰야 합니다.
 
 mc-server 관련 값을 바꾼 경우에는 기존 컨테이너를 재생성해야 반영됩니다. 실행 중이라면 먼저 중지한 다음 아래처럼 재생성하세요:
 
@@ -198,8 +198,8 @@ docker compose up -d mcbot
 | `EMBED_UPDATE_TIMEOUT_SECONDS` | ❌ | `10`                      | 임베드 메시지 업데이트 타임아웃 (초, Discord로 상태 임베드를 전송/수정할 때의 최대 대기 시간) |
 | `MC_SERVER_RESTART_POLICY` | ❌ | `no`                      | mc-server 재시작 정책 |
 | `MC_SERVER_PORT_PUBLISH` | ❌ | `25565:25565`             | mc-server 포트 매핑 (호스트:컨테이너) |
-| `UID` | ❌ | `1000`                    | 컨테이너 내부 사용자 UID |
-| `GID` | ❌ | `1000`                    | 컨테이너 내부 사용자 GID |
+| `UID` | ❌ | `1001`                    | 컨테이너 내부 사용자 UID |
+| `GID` | ❌ | `1001`                    | 컨테이너 내부 사용자 GID |
 | `VERSION` | ❌ | `1.20.1`                  | 마인크래프트 서버 버전 |
 | `TYPE` | ❌ | `FORGE`                   | 마인크래프트 서버 타입 |
 | `DIFFICULTY` | ❌ | `easy`                    | 서버 난이도 |
