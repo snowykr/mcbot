@@ -1,16 +1,26 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/snowy/mcbot/internal/config"
+	"github.com/snowy/mcbot/internal/mcserver"
+	"github.com/snowy/mcbot/internal/state"
 )
 
 type recordedDiscordRequest struct {
@@ -33,6 +43,342 @@ type discordAPITestServerOptions struct {
 	oauthApplicationID string
 }
 
+const testGuildID = "123456789012345679"
+
+func TestBootstrapEmbedChannelPrecedence(t *testing.T) {
+	runtimeStorePath := filepath.Join(t.TempDir(), "runtime-config.json")
+	overrideBootstrapRuntimeStore(t, runtimeStorePath)
+
+	t.Run("runtime override wins over env", func(t *testing.T) {
+		runtimeID := "123456789012345678"
+		envID := "223456789012345678"
+		if err := config.NewRuntimeEmbedChannelStore(runtimeStorePath).Save(context.Background(), runtimeID); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+
+		cfg := &config.Config{EmbedChannelID: envID}
+		logs := captureLogs(t, func() {
+			if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != runtimeID {
+				t.Fatalf("resolved embed channel = %q, want %q", got, runtimeID)
+			}
+		})
+		if !strings.Contains(logs, "source=runtime override") {
+			t.Fatalf("expected runtime override log, got %q", logs)
+		}
+		if strings.Contains(logs, "source=env fallback") {
+			t.Fatalf("unexpected env fallback log: %q", logs)
+		}
+	})
+
+	t.Run("missing runtime file falls back to env", func(t *testing.T) {
+		if err := os.Remove(runtimeStorePath); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("Remove() error = %v", err)
+		}
+		cfg := &config.Config{EmbedChannelID: "323456789012345678"}
+		logs := captureLogs(t, func() {
+			if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != cfg.EmbedChannelID {
+				t.Fatalf("resolved embed channel = %q, want %q", got, cfg.EmbedChannelID)
+			}
+		})
+		if !strings.Contains(logs, "source=env fallback") {
+			t.Fatalf("expected env fallback log, got %q", logs)
+		}
+	})
+
+	t.Run("missing runtime file and empty env stays unconfigured", func(t *testing.T) {
+		if err := os.Remove(runtimeStorePath); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("Remove() error = %v", err)
+		}
+		cfg := &config.Config{}
+		logs := captureLogs(t, func() {
+			if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != "" {
+				t.Fatalf("resolved embed channel = %q, want empty", got)
+			}
+		})
+		if !strings.Contains(logs, "source=unconfigured") {
+			t.Fatalf("expected unconfigured log, got %q", logs)
+		}
+	})
+}
+
+func TestBootstrapIgnoresMalformedRuntimeOverride(t *testing.T) {
+	runtimeStorePath := filepath.Join(t.TempDir(), "runtime-config.json")
+	overrideBootstrapRuntimeStore(t, runtimeStorePath)
+
+	tests := []struct {
+		name     string
+		contents string
+	}{
+		{name: "invalid JSON", contents: "{not-json"},
+		{name: "invalid snowflake", contents: `{"embed_channel_id":"012345678901234567"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.WriteFile(runtimeStorePath, []byte(tt.contents), 0o644); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+
+			cfg := &config.Config{EmbedChannelID: "423456789012345678"}
+			logs := captureLogs(t, func() {
+				if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != cfg.EmbedChannelID {
+					t.Fatalf("resolved embed channel = %q, want %q", got, cfg.EmbedChannelID)
+				}
+			})
+			if !strings.Contains(logs, "[WARN] runtime embed channel override unavailable:") {
+				t.Fatalf("expected warning log, got %q", logs)
+			}
+			if !strings.Contains(logs, "source=env fallback") {
+				t.Fatalf("expected env fallback log, got %q", logs)
+			}
+		})
+	}
+}
+
+func TestBootstrapStartsWithStaleSavedChannel(t *testing.T) {
+	runtimeStorePath := filepath.Join(t.TempDir(), "runtime-config.json")
+	overrideBootstrapRuntimeStore(t, runtimeStorePath)
+
+	runtimeID := "523456789012345678"
+	if err := config.NewRuntimeEmbedChannelStore(runtimeStorePath).Save(context.Background(), runtimeID); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	cfg := &config.Config{EmbedChannelID: "623456789012345678"}
+	logs := captureLogs(t, func() {
+		if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != runtimeID {
+			t.Fatalf("resolved embed channel = %q, want %q", got, runtimeID)
+		}
+	})
+	if !strings.Contains(logs, "source=runtime override") {
+		t.Fatalf("expected runtime override log, got %q", logs)
+	}
+	if strings.Contains(logs, "source=env fallback") {
+		t.Fatalf("unexpected env fallback log: %q", logs)
+	}
+}
+
+func TestNewDiscordHandler_WiresRuntimeConfiguratorWithResolvedChannel(t *testing.T) {
+	runtimeStore := &testRuntimeEmbedChannelStore{
+		loadChannelID: "111111111111111111",
+		loadFound:     true,
+		saveErrs:      []error{errors.New("persist failed")},
+	}
+
+	cfg := &config.Config{
+		TrustedGuildID:         testGuildID,
+		McbotRoleName:          "마크봇",
+		ServerOperationTimeout: time.Second,
+	}
+	cfg.EmbedChannelID = resolveStartupEmbedChannelID(context.Background(), cfg, runtimeStore)
+	if got, want := cfg.EmbedChannelID, runtimeStore.loadChannelID; got != want {
+		t.Fatalf("resolved embed channel = %q, want %q", got, want)
+	}
+
+	controller := &testMainController{presenceValue: mcserver.PresenceState{ServerState: state.StateRunning}}
+	statusEmbed := &testMainStatusEmbed{}
+	handler := newDiscordHandler(cfg, controller, statusEmbed, nil, runtimeStore)
+
+	session := newMainInteractionSession(t)
+	seedMainChannelCommandState(t, session, testGuildID, "target-channel", "target-channel", discordgo.ChannelTypeGuildText, "role-id", "마크봇", discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionEmbedLinks|discordgo.PermissionReadMessageHistory, true)
+
+	handler.HandleInteraction(session, newMainChannelInteraction("target-channel", []string{"role-id"}))
+
+	if got, want := runtimeStore.saveCalls, []string{"target-channel", runtimeStore.loadChannelID}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("store save calls = %v, want %v", got, want)
+	}
+	if runtimeStore.clearCalls != 0 {
+		t.Fatalf("store clear calls = %d, want 0", runtimeStore.clearCalls)
+	}
+	if got, want := statusEmbed.switchCalls, []string{"target-channel", runtimeStore.loadChannelID}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("status embed switch calls = %v, want %v", got, want)
+	}
+}
+
+func overrideBootstrapRuntimeStore(t *testing.T, path string) {
+	t.Helper()
+
+	oldFactory := newRuntimeEmbedChannelStore
+	newRuntimeEmbedChannelStore = func() *config.RuntimeEmbedChannelStore {
+		return config.NewRuntimeEmbedChannelStore(path)
+	}
+	t.Cleanup(func() {
+		newRuntimeEmbedChannelStore = oldFactory
+	})
+}
+
+func captureLogs(t *testing.T, fn func()) string {
+	t.Helper()
+
+	var buf bytes.Buffer
+	oldFlags := log.Flags()
+	oldPrefix := log.Prefix()
+	log.SetFlags(0)
+	log.SetPrefix("")
+	log.SetOutput(&buf)
+	t.Cleanup(func() {
+		log.SetOutput(os.Stderr)
+		log.SetFlags(oldFlags)
+		log.SetPrefix(oldPrefix)
+	})
+
+	fn()
+	return buf.String()
+}
+
+type testRuntimeEmbedChannelStore struct {
+	loadChannelID string
+	loadFound     bool
+	loadErr       error
+	saveCalls     []string
+	saveErrs      []error
+	clearCalls    int
+}
+
+func (s *testRuntimeEmbedChannelStore) Load(context.Context) (string, bool, error) {
+	return s.loadChannelID, s.loadFound, s.loadErr
+}
+
+func (s *testRuntimeEmbedChannelStore) Save(_ context.Context, channelID string) error {
+	s.saveCalls = append(s.saveCalls, channelID)
+	if len(s.saveErrs) == 0 {
+		return nil
+	}
+	err := s.saveErrs[0]
+	s.saveErrs = s.saveErrs[1:]
+	return err
+}
+
+func (s *testRuntimeEmbedChannelStore) Clear(context.Context) error {
+	s.clearCalls++
+	return nil
+}
+
+type testMainStatusEmbed struct {
+	switchCalls []string
+}
+
+func (e *testMainStatusEmbed) Update(context.Context) error {
+	return nil
+}
+
+func (e *testMainStatusEmbed) SwitchChannel(_ context.Context, channelID string, _ mcserver.PresenceState) error {
+	e.switchCalls = append(e.switchCalls, channelID)
+	return nil
+}
+
+type testMainController struct {
+	presenceValue mcserver.PresenceState
+}
+
+func (c *testMainController) Start(context.Context) <-chan mcserver.StartResult {
+	ch := make(chan mcserver.StartResult)
+	close(ch)
+	return ch
+}
+
+func (c *testMainController) Stop(context.Context) <-chan mcserver.StopResult {
+	ch := make(chan mcserver.StopResult)
+	close(ch)
+	return ch
+}
+
+func (c *testMainController) Presence(context.Context) mcserver.PresenceState {
+	return c.presenceValue
+}
+
+func newMainInteractionSession(t *testing.T) *discordgo.Session {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(server.Close)
+	restore := overrideDiscordEndpoints(server.URL)
+	t.Cleanup(restore)
+
+	session, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("failed to create discord session: %v", err)
+	}
+	session.Client = server.Client()
+	return session
+}
+
+func seedMainChannelCommandState(t *testing.T, session *discordgo.Session, guildID, channelID, channelName string, channelType discordgo.ChannelType, roleID, roleName string, rolePermissions int64, memberHasRole bool) {
+	t.Helper()
+
+	if err := session.State.GuildAdd(&discordgo.Guild{
+		ID: guildID,
+		Roles: []*discordgo.Role{{
+			ID:          roleID,
+			Name:        roleName,
+			Permissions: rolePermissions,
+		}},
+	}); err != nil {
+		t.Fatalf("failed to add guild state: %v", err)
+	}
+
+	if err := session.State.ChannelAdd(&discordgo.Channel{
+		ID:      channelID,
+		GuildID: guildID,
+		Name:    channelName,
+		Type:    channelType,
+	}); err != nil {
+		t.Fatalf("failed to add channel state: %v", err)
+	}
+
+	memberRoles := []string{}
+	if memberHasRole {
+		memberRoles = []string{roleID}
+	}
+
+	if err := session.State.MemberAdd(&discordgo.Member{
+		GuildID: guildID,
+		User: &discordgo.User{
+			ID:       "test-bot-user-id",
+			Username: "bot",
+		},
+		Roles: memberRoles,
+	}); err != nil {
+		t.Fatalf("failed to add member state: %v", err)
+	}
+
+	session.State.User = &discordgo.User{ID: "test-bot-user-id", Username: "bot"}
+}
+
+func newMainChannelInteraction(channelID string, roles []string) *discordgo.InteractionCreate {
+	return &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:      "123456789012345670",
+			AppID:   "123456789012345678",
+			Token:   "interaction-token",
+			Type:    discordgo.InteractionApplicationCommand,
+			GuildID: testGuildID,
+			Member: &discordgo.Member{
+				Roles: roles,
+				User: &discordgo.User{
+					ID:       "test-bot-user-id",
+					Username: "test-user",
+				},
+			},
+			Data: discordgo.ApplicationCommandInteractionData{
+				Name: "마크봇",
+				Options: []*discordgo.ApplicationCommandInteractionDataOption{{
+					Name: "채널",
+					Type: discordgo.ApplicationCommandOptionSubCommand,
+					Options: []*discordgo.ApplicationCommandInteractionDataOption{{
+						Name:  "channel",
+						Type:  discordgo.ApplicationCommandOptionChannel,
+						Value: channelID,
+					}},
+				}},
+			},
+		},
+	}
+}
+
 func TestRegisterSlashCommands_UsesStateApplicationID(t *testing.T) {
 	testServer := newDiscordAPITestServer(t, discordAPITestServerOptions{})
 
@@ -52,6 +398,27 @@ func TestRegisterSlashCommands_UsesStateApplicationID(t *testing.T) {
 	}
 	if requests[0].Method != http.MethodPut {
 		t.Fatalf("expected PUT request, got %s", requests[0].Method)
+	}
+	assertCommandOverwriteRequest(t, requests[0], "app-id")
+	assertCommandPayload(t, requests[0].Body)
+}
+
+func TestRegisterSlashCommands_IncludesChannelSubcommand(t *testing.T) {
+	testServer := newDiscordAPITestServer(t, discordAPITestServerOptions{})
+
+	session, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("failed to create discord session: %v", err)
+	}
+	session.Client = testServer.server.Client()
+	session.State.Application = &discordgo.Application{ID: "app-id"}
+
+	registered := registerSlashCommands(session)
+	assertRegisteredCommands(t, registered)
+
+	requests := testServer.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
 	}
 	assertCommandOverwriteRequest(t, requests[0], "app-id")
 	assertCommandPayload(t, requests[0].Body)
@@ -271,6 +638,12 @@ func assertRegisteredCommands(t *testing.T, registered []*discordgo.ApplicationC
 	if len(registered) != len(slashCommands) {
 		t.Fatalf("expected %d registered commands, got %d", len(slashCommands), len(registered))
 	}
+	if len(registered) == 0 {
+		t.Fatalf("expected at least one registered command")
+	}
+	if registered[0].Name != slashCommands[0].Name {
+		t.Fatalf("expected first registered command %q, got %q", slashCommands[0].Name, registered[0].Name)
+	}
 }
 
 func assertCommandOverwriteRequest(t *testing.T, request recordedDiscordRequest, appID string) {
@@ -288,12 +661,61 @@ func assertCommandPayload(t *testing.T, body []byte) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatalf("failed to unmarshal request body: %v", err)
 	}
-	if len(payload) != len(slashCommands) {
-		t.Fatalf("expected %d commands in payload, got %d", len(slashCommands), len(payload))
+	if len(payload) != 1 {
+		t.Fatalf("expected 1 command in payload, got %d", len(payload))
 	}
-	if payload[0].Name != slashCommands[0].Name {
-		t.Fatalf("expected payload command name %q, got %q", slashCommands[0].Name, payload[0].Name)
+	root := payload[0]
+	if root.Name != "마크봇" {
+		t.Fatalf("expected payload command name %q, got %q", "마크봇", root.Name)
 	}
+	if len(root.Options) != 2 {
+		t.Fatalf("expected 2 subcommands, got %d", len(root.Options))
+	}
+
+	rcon := findOptionByName(t, root.Options, "rcon")
+	if rcon.Type != discordgo.ApplicationCommandOptionSubCommand {
+		t.Fatalf("expected rcon subcommand type, got %v", rcon.Type)
+	}
+	if len(rcon.Options) != 1 {
+		t.Fatalf("expected 1 rcon option, got %d", len(rcon.Options))
+	}
+	rconCommand := rcon.Options[0]
+	if rconCommand.Name != "command" || rconCommand.Type != discordgo.ApplicationCommandOptionString || !rconCommand.Required {
+		t.Fatalf("unexpected rcon option: %+v", rconCommand)
+	}
+
+	channel := findOptionByName(t, root.Options, "채널")
+	if channel.Type != discordgo.ApplicationCommandOptionSubCommand {
+		t.Fatalf("expected 채널 subcommand type, got %v", channel.Type)
+	}
+	if len(channel.Options) != 1 {
+		t.Fatalf("expected 1 channel option, got %d", len(channel.Options))
+	}
+	channelOption := channel.Options[0]
+	if channelOption.Name != "channel" {
+		t.Fatalf("expected channel option name %q, got %q", "channel", channelOption.Name)
+	}
+	if channelOption.Type != discordgo.ApplicationCommandOptionChannel {
+		t.Fatalf("expected channel option type %v, got %v", discordgo.ApplicationCommandOptionChannel, channelOption.Type)
+	}
+	if !channelOption.Required {
+		t.Fatalf("expected channel option to be required")
+	}
+	if len(channelOption.ChannelTypes) != 2 || channelOption.ChannelTypes[0] != discordgo.ChannelTypeGuildText || channelOption.ChannelTypes[1] != discordgo.ChannelTypeGuildNews {
+		t.Fatalf("unexpected channel types: %#v", channelOption.ChannelTypes)
+	}
+}
+
+func findOptionByName(t *testing.T, options []*discordgo.ApplicationCommandOption, name string) *discordgo.ApplicationCommandOption {
+	t.Helper()
+
+	for _, option := range options {
+		if option.Name == name {
+			return option
+		}
+	}
+	t.Fatalf("option %q not found", name)
+	return nil
 }
 
 func writeJSONResponse(w http.ResponseWriter, response any) error {

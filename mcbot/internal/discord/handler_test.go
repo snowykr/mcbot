@@ -24,6 +24,7 @@ import (
 const (
 	testGuildID      = "123456789012345678"
 	testOtherGuildID = "987654321098765432"
+	testBotUserID    = "246813579024681357"
 )
 
 var discordEndpointOverrideMu sync.Mutex
@@ -120,6 +121,86 @@ func (t *testRCONExecutor) Execute(ctx context.Context, command string) (string,
 	return t.response, t.err
 }
 
+type testChannelConfigurator struct {
+	mu            sync.Mutex
+	called        bool
+	callCount     int
+	lastChannelID string
+	lastPresence  mcserver.PresenceState
+	err           error
+	started       chan struct{}
+	block         <-chan struct{}
+	once          sync.Once
+}
+
+func (t *testChannelConfigurator) ConfigureChannel(_ context.Context, channelID string, presence mcserver.PresenceState) error {
+	t.mu.Lock()
+	t.called = true
+	t.callCount++
+	t.lastChannelID = channelID
+	t.lastPresence = presence
+	t.mu.Unlock()
+
+	if t.started != nil {
+		t.once.Do(func() { close(t.started) })
+	}
+
+	if t.block != nil {
+		<-t.block
+	}
+
+	return t.err
+}
+
+func (t *testChannelConfigurator) snapshot() (called bool, callCount int, lastChannelID string, lastPresence mcserver.PresenceState) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.called, t.callCount, t.lastChannelID, t.lastPresence
+}
+
+type testRuntimeEmbedChannelStore struct {
+	mu            sync.Mutex
+	loadChannelID string
+	loadFound     bool
+	loadErr       error
+	saveCalls     []string
+	clearCalls    int
+}
+
+func (s *testRuntimeEmbedChannelStore) Load(context.Context) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadChannelID, s.loadFound, s.loadErr
+}
+
+func (s *testRuntimeEmbedChannelStore) Save(_ context.Context, channelID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saveCalls = append(s.saveCalls, channelID)
+	return nil
+}
+
+func (s *testRuntimeEmbedChannelStore) Clear(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clearCalls++
+	return nil
+}
+
+type testChannelSwitcher struct {
+	mu          sync.Mutex
+	switchCalls []string
+	presences   []mcserver.PresenceState
+}
+
+func (s *testChannelSwitcher) SwitchChannel(_ context.Context, channelID string, presence mcserver.PresenceState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.switchCalls = append(s.switchCalls, channelID)
+	s.presences = append(s.presences, presence)
+	return nil
+}
+
 type recordedDiscordRequest struct {
 	Method string
 	Path   string
@@ -156,6 +237,11 @@ func newDiscordAPITestSession(t *testing.T) (*discordgo.Session, *discordAPITest
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/callback"):
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/users/"):
+			w.Header().Set("Content-Type", "application/json")
+			if _, err := w.Write([]byte(`{"id":"` + testBotUserID + `","username":"bot"}`)); err != nil {
+				testServer.recordHandlerError(fmt.Errorf("failed to write /users/@me response: %w", err))
+			}
 		case strings.Contains(r.URL.Path, "/webhooks/"):
 			w.Header().Set("Content-Type", "application/json")
 			if _, err := w.Write([]byte(`{"id":"followup-message-id"}`)); err != nil {
@@ -187,17 +273,20 @@ func overrideDiscordEndpoints(baseURL string) func() {
 
 	oldEndpointDiscord := discordgo.EndpointDiscord
 	oldEndpointAPI := discordgo.EndpointAPI
+	oldEndpointUsers := discordgo.EndpointUsers
 	oldEndpointWebhooks := discordgo.EndpointWebhooks
 	oldEndpointApplications := discordgo.EndpointApplications
 
 	discordgo.EndpointDiscord = baseURL + "/"
 	discordgo.EndpointAPI = discordgo.EndpointDiscord + "api/v" + discordgo.APIVersion + "/"
+	discordgo.EndpointUsers = discordgo.EndpointAPI + "users/"
 	discordgo.EndpointWebhooks = discordgo.EndpointAPI + "webhooks/"
 	discordgo.EndpointApplications = discordgo.EndpointAPI + "applications"
 
 	return func() {
 		discordgo.EndpointDiscord = oldEndpointDiscord
 		discordgo.EndpointAPI = oldEndpointAPI
+		discordgo.EndpointUsers = oldEndpointUsers
 		discordgo.EndpointWebhooks = oldEndpointWebhooks
 		discordgo.EndpointApplications = oldEndpointApplications
 		discordEndpointOverrideMu.Unlock()
@@ -251,6 +340,48 @@ func addGuildRole(t *testing.T, session *discordgo.Session, guildID, roleID, rol
 	}
 }
 
+func seedChannelCommandState(t *testing.T, session *discordgo.Session, guildID, channelID, channelName string, channelType discordgo.ChannelType, roleID, roleName string, rolePermissions int64, memberHasRole bool) {
+	t.Helper()
+
+	if err := session.State.GuildAdd(&discordgo.Guild{
+		ID: guildID,
+		Roles: []*discordgo.Role{{
+			ID:          roleID,
+			Name:        roleName,
+			Permissions: rolePermissions,
+		}},
+	}); err != nil {
+		t.Fatalf("failed to add guild state: %v", err)
+	}
+
+	if err := session.State.ChannelAdd(&discordgo.Channel{
+		ID:      channelID,
+		GuildID: guildID,
+		Name:    channelName,
+		Type:    channelType,
+	}); err != nil {
+		t.Fatalf("failed to add channel state: %v", err)
+	}
+
+	memberRoles := []string{}
+	if memberHasRole {
+		memberRoles = []string{roleID}
+	}
+
+	if err := session.State.MemberAdd(&discordgo.Member{
+		GuildID: guildID,
+		User: &discordgo.User{
+			ID:       testBotUserID,
+			Username: "bot",
+		},
+		Roles: memberRoles,
+	}); err != nil {
+		t.Fatalf("failed to add member state: %v", err)
+	}
+
+	session.State.User = &discordgo.User{ID: testBotUserID, Username: "bot"}
+}
+
 func newApplicationCommandInteraction(commandName string, options []*discordgo.ApplicationCommandInteractionDataOption, roles []string) *discordgo.InteractionCreate {
 	return &discordgo.InteractionCreate{
 		Interaction: &discordgo.Interaction{
@@ -282,6 +413,18 @@ func newRCONInteraction(command string, roles []string) *discordgo.InteractionCr
 			Name:  "command",
 			Type:  discordgo.ApplicationCommandOptionString,
 			Value: command,
+		}},
+	}}, roles)
+}
+
+func newChannelInteraction(channelID string, roles []string) *discordgo.InteractionCreate {
+	return newApplicationCommandInteraction("마크봇", []*discordgo.ApplicationCommandInteractionDataOption{{
+		Name: "채널",
+		Type: discordgo.ApplicationCommandOptionSubCommand,
+		Options: []*discordgo.ApplicationCommandInteractionDataOption{{
+			Name:  "channel",
+			Type:  discordgo.ApplicationCommandOptionChannel,
+			Value: channelID,
 		}},
 	}}, roles)
 }
@@ -504,6 +647,488 @@ func TestHandleInteraction_RCONPermissionDenied(t *testing.T) {
 	}
 	if response.Data == nil || !strings.Contains(response.Data.Content, "역할이 필요합니다") {
 		t.Fatalf("unexpected response data: %+v", response.Data)
+	}
+}
+
+func TestHandleInteraction_ChannelCommand_WrongGuildRespondsEphemeralBeforeDeferred(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	configurator := &testChannelConfigurator{}
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelInteraction("target-channel", nil)
+	interaction.GuildID = testOtherGuildID
+
+	handler.HandleInteraction(session, interaction)
+
+	called, _, _, _ := configurator.snapshot()
+	if called {
+		t.Fatal("channel configurator was called for an untrusted guild")
+	}
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate response, got %v", response.Type)
+	}
+	if response.Data == nil || !strings.Contains(response.Data.Content, "이 서버에서는 사용할 수 없는 명령어") {
+		t.Fatalf("unexpected response content: %+v", response.Data)
+	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
+}
+
+func TestHandleInteraction_ChannelCommand_MissingRoleRespondsPermissionDenied(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+	configurator := &testChannelConfigurator{}
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelInteraction("target-channel", nil)
+
+	handler.HandleInteraction(session, interaction)
+
+	called, _, _, _ := configurator.snapshot()
+	if called {
+		t.Fatal("channel configurator was called despite missing role")
+	}
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate response, got %v", response.Type)
+	}
+	if response.Data == nil || len(response.Data.Embeds) != 1 || !strings.Contains(response.Data.Embeds[0].Description, "역할이 필요합니다") {
+		t.Fatalf("unexpected response data: %+v", response.Data)
+	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
+}
+
+func TestHandleInteraction_ChannelCommand_RejectsUnsupportedChannelType(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	seedChannelCommandState(t, session, testGuildID, "target-channel", "voice-channel", discordgo.ChannelTypeGuildVoice, "role-id", "마크봇",
+		discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionEmbedLinks|discordgo.PermissionReadMessageHistory, true)
+	configurator := &testChannelConfigurator{}
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelInteraction("target-channel", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	called, _, _, _ := configurator.snapshot()
+	if called {
+		t.Fatal("channel configurator was called for an unsupported channel type")
+	}
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "일반 채팅 채널 또는 공지 채널") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+}
+
+func TestHandleInteraction_ChannelCommand_RejectsChannelOutsideTrustedGuild(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+	seedChannelCommandState(t, session, testOtherGuildID, "target-channel", "target-channel", discordgo.ChannelTypeGuildText, "role-id", "마크봇",
+		discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionEmbedLinks|discordgo.PermissionReadMessageHistory, true)
+	configurator := &testChannelConfigurator{}
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelInteraction("target-channel", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	called, _, _, _ := configurator.snapshot()
+	if called {
+		t.Fatal("channel configurator was called for a channel outside the trusted guild")
+	}
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "이 서버의 채널이 아닙니다") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+}
+
+func TestHandleInteraction_ChannelCommand_RejectsWhenBotLacksHistoryEmbedOrSendPermission(t *testing.T) {
+	basePermissions := int64(discordgo.PermissionViewChannel | discordgo.PermissionSendMessages | discordgo.PermissionEmbedLinks | discordgo.PermissionReadMessageHistory)
+	for _, tc := range []struct {
+		name        string
+		drop        int64
+		dropMessage string
+	}{
+		{name: "history", drop: discordgo.PermissionReadMessageHistory, dropMessage: "메시지 기록 읽기"},
+		{name: "embed", drop: discordgo.PermissionEmbedLinks, dropMessage: "임베드 링크"},
+		{name: "send", drop: discordgo.PermissionSendMessages, dropMessage: "메시지 전송"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session, api := newDiscordAPITestSession(t)
+			seedChannelCommandState(t, session, testGuildID, "target-channel", "target-channel", discordgo.ChannelTypeGuildText, "role-id", "마크봇", basePermissions&^tc.drop, true)
+			configurator := &testChannelConfigurator{}
+
+			handler := NewHandler(&config.Config{
+				McbotRoleName:          "마크봇",
+				TrustedGuildID:         testGuildID,
+				ServerOperationTimeout: time.Second,
+			}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+			interaction := newChannelInteraction("target-channel", []string{"role-id"})
+
+			handler.HandleInteraction(session, interaction)
+
+			called, _, _, _ := configurator.snapshot()
+			if called {
+				t.Fatalf("channel configurator was called despite missing %s permission", tc.dropMessage)
+			}
+
+			requests := api.recordedRequests()
+			if len(requests) != 2 {
+				t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+			}
+
+			deferred := decodeInteractionResponse(t, requests[0].Body)
+			if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+				t.Fatalf("expected deferred response, got %v", deferred.Type)
+			}
+
+			followup := decodeWebhookParams(t, requests[1].Body)
+			if !strings.Contains(followup.Content, "권한") {
+				t.Fatalf("unexpected followup content: %q", followup.Content)
+			}
+		})
+	}
+}
+
+func TestHandleInteraction_ChannelCommand_RequiresChannelOption(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+	configurator := &testChannelConfigurator{}
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newApplicationCommandInteraction("마크봇", []*discordgo.ApplicationCommandInteractionDataOption{{
+		Name: "채널",
+		Type: discordgo.ApplicationCommandOptionSubCommand,
+	}}, []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	called, _, _, _ := configurator.snapshot()
+	if called {
+		t.Fatal("channel configurator was called despite missing channel option")
+	}
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "채널을 선택해주세요") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+}
+
+func TestHandleInteraction_ChannelCommand_ResolvesBotIdentityWhenStateUserMissing(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	seedChannelCommandState(t, session, testGuildID, "target-channel", "target-channel", discordgo.ChannelTypeGuildText, "role-id", "마크봇",
+		discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionEmbedLinks|discordgo.PermissionReadMessageHistory, true)
+	session.State.User = nil
+	configurator := &testChannelConfigurator{}
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		EmbedUpdateTimeout:     time.Second,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelInteraction("target-channel", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 3 {
+		t.Fatalf("expected deferred response, bot identity lookup, and followup, got %d requests", len(requests))
+	}
+
+	if requests[1].Method != http.MethodGet {
+		t.Fatalf("expected identity fallback GET request in the middle, got %s %s", requests[1].Method, requests[1].Path)
+	}
+
+	called, callCount, lastChannelID, lastPresence := configurator.snapshot()
+	if !called || callCount != 1 || lastChannelID != "target-channel" {
+		t.Fatalf("configurator call state = called:%v count:%d channel:%q, want one call to target-channel", called, callCount, lastChannelID)
+	}
+	if lastPresence.ServerState != state.StateRunning {
+		t.Fatalf("configurator presence = %v, want running", lastPresence.ServerState)
+	}
+
+	followup := decodeWebhookParams(t, requests[len(requests)-1].Body)
+	if !strings.Contains(followup.Content, "<#target-channel>") {
+		t.Fatalf("expected success followup to mention target channel, got %q", followup.Content)
+	}
+}
+
+func TestHandleInteraction_ChannelCommand_TrustedGuildAllowsExecution(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	seedChannelCommandState(t, session, testGuildID, "target-channel", "target-channel", discordgo.ChannelTypeGuildText, "role-id", "마크봇",
+		discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionEmbedLinks|discordgo.PermissionReadMessageHistory, true)
+
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	configurator := &testChannelConfigurator{started: started, block: unblock}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		EmbedUpdateTimeout:     time.Second,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelInteraction("target-channel", []string{"role-id"})
+
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		handler.HandleInteraction(session, interaction)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("channel configurator was not called")
+	}
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		close(unblock)
+		<-handlerDone
+		t.Fatalf("expected deferred response before reconfiguration finishes, got %d requests", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		close(unblock)
+		<-handlerDone
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
+
+	called, callCount, lastChannelID, lastPresence := configurator.snapshot()
+	if !called || callCount != 1 {
+		close(unblock)
+		<-handlerDone
+		t.Fatalf("configurator call state = called:%v count:%d, want one call", called, callCount)
+	}
+	if lastChannelID != "target-channel" {
+		close(unblock)
+		<-handlerDone
+		t.Fatalf("configurator channel = %q, want target-channel", lastChannelID)
+	}
+	if lastPresence.ServerState != state.StateRunning {
+		close(unblock)
+		<-handlerDone
+		t.Fatalf("configurator presence = %v, want running", lastPresence.ServerState)
+	}
+
+	close(unblock)
+
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not finish after reconfiguration completed")
+	}
+
+	requests = api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+}
+
+func TestHandleInteraction_ChannelCommand_RepairsUnconfiguredMode(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	seedChannelCommandState(t, session, testGuildID, "target-channel", "target-channel", discordgo.ChannelTypeGuildText, "role-id", "마크봇",
+		discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionEmbedLinks|discordgo.PermissionReadMessageHistory, true)
+
+	store := &testRuntimeEmbedChannelStore{}
+	manager := &testChannelSwitcher{}
+	configurator := NewChannelConfigurator(store, manager, "")
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		EmbedUpdateTimeout:     time.Second,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelInteraction("target-channel", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "<#target-channel>") {
+		t.Fatalf("expected success followup to mention target channel, got %q", followup.Content)
+	}
+
+	store.mu.Lock()
+	if len(store.saveCalls) != 1 || store.saveCalls[0] != "target-channel" {
+		store.mu.Unlock()
+		t.Fatalf("store save calls = %v, want [target-channel]", store.saveCalls)
+	}
+	if store.clearCalls != 0 {
+		store.mu.Unlock()
+		t.Fatalf("store clear calls = %d, want 0", store.clearCalls)
+	}
+	store.mu.Unlock()
+
+	manager.mu.Lock()
+	if len(manager.switchCalls) != 1 || manager.switchCalls[0] != "target-channel" {
+		manager.mu.Unlock()
+		t.Fatalf("manager switch calls = %v, want [target-channel]", manager.switchCalls)
+	}
+	manager.mu.Unlock()
+
+	if configurator.currentChannelID != "target-channel" {
+		t.Fatalf("configurator currentChannelID = %q, want target-channel", configurator.currentChannelID)
+	}
+}
+
+func TestHandleInteraction_ChannelCommand_ConfiguratorFailureRespondsEphemeral(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	seedChannelCommandState(t, session, testGuildID, "target-channel", "target-channel", discordgo.ChannelTypeGuildText, "role-id", "마크봇",
+		discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionEmbedLinks|discordgo.PermissionReadMessageHistory, true)
+	configurator := &testChannelConfigurator{err: errors.New("persist failed")}
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		EmbedUpdateTimeout:     time.Second,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelInteraction("target-channel", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and failure followup, got %d requests", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "채널 설정 실패") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+	called, _, lastChannelID, _ := configurator.snapshot()
+	if !called || lastChannelID != "target-channel" {
+		t.Fatalf("configurator call state = called:%v channel:%q, want target-channel", called, lastChannelID)
+	}
+}
+
+func TestHandleInteraction_ChannelCommand_SuccessFollowupMentionsTargetChannel(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	seedChannelCommandState(t, session, testGuildID, "target-channel", "target-channel", discordgo.ChannelTypeGuildText, "role-id", "마크봇",
+		discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionEmbedLinks|discordgo.PermissionReadMessageHistory, true)
+	configurator := &testChannelConfigurator{}
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		EmbedUpdateTimeout:     time.Second,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelInteraction("target-channel", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
+		t.Fatalf("expected deferred response, got %v", deferred.Type)
+	}
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "<#target-channel>") {
+		t.Fatalf("expected target channel mention in followup, got %q", followup.Content)
+	}
+	assertAllowedMentionsParseEmpty(t, requests[1].Body)
+
+	called, callCount, lastChannelID, _ := configurator.snapshot()
+	if !called || callCount != 1 || lastChannelID != "target-channel" {
+		t.Fatalf("configurator call state = called:%v count:%d channel:%q, want one call to target-channel", called, callCount, lastChannelID)
 	}
 }
 

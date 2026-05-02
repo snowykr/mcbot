@@ -114,8 +114,10 @@ func (c *Config) validate() error {
 	if err := validateRequiredSnowflakeID("MCBOT_TRUSTED_GUILD_ID", c.TrustedGuildID); err != nil {
 		return err
 	}
-	if c.EmbedChannelID == "" {
-		return errors.New("EMBED_CHANNEL_ID is required")
+	if c.EmbedChannelID != "" {
+		if err := validateOptionalSnowflakeID("EMBED_CHANNEL_ID", c.EmbedChannelID); err != nil {
+			return err
+		}
 	}
 	trimmedPassword := strings.TrimSpace(c.RCONPassword)
 	if c.RCONPassword != "" && trimmedPassword == "" {
@@ -194,6 +196,13 @@ func validateRequiredSnowflakeID(key, value string) error {
 	}
 
 	return nil
+}
+
+func validateOptionalSnowflakeID(key, value string) error {
+	if value == "" {
+		return nil
+	}
+	return validateRequiredSnowflakeID(key, value)
 }
 
 func getEnvOrDefault(key, defaultVal string) string {

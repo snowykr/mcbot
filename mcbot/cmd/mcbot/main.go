@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -17,6 +18,26 @@ import (
 	"github.com/snowy/mcbot/internal/state"
 )
 
+var newRuntimeEmbedChannelStore = func() *config.RuntimeEmbedChannelStore {
+	return config.NewRuntimeEmbedChannelStore(filepath.Join("/app/data/mcbot", "runtime-config.json"))
+}
+
+type channelConfiguratorStatusEmbed interface {
+	discord.StatusEmbedUpdater
+	SwitchChannel(ctx context.Context, channelID string, presence mcserver.PresenceState) error
+}
+
+type runtimeEmbedChannelStore interface {
+	Load(ctx context.Context) (channelID string, found bool, err error)
+	Save(ctx context.Context, channelID string) error
+	Clear(ctx context.Context) error
+}
+
+func newDiscordHandler(cfg *config.Config, controller discord.ServerController, statusEmbed channelConfiguratorStatusEmbed, rconClient discord.RCONExecutor, runtimeStore runtimeEmbedChannelStore) *discord.Handler {
+	channelConfigurator := discord.NewChannelConfigurator(runtimeStore, statusEmbed, cfg.EmbedChannelID)
+	return discord.NewHandler(cfg, controller, statusEmbed, rconClient, discord.WithChannelConfigurator(channelConfigurator))
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Println("마크봇을 시작합니다...")
@@ -25,6 +46,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("설정 로드 실패: %v", err)
 	}
+	runtimeEmbedChannelStore := newRuntimeEmbedChannelStore()
+	cfg.EmbedChannelID = resolveStartupEmbedChannelID(context.Background(), cfg, runtimeEmbedChannelStore)
 	log.Printf("설정 로드 완료 (컨테이너: %s, 역할: %s, RCON: %v)", cfg.MCContainerName, cfg.McbotRoleName, cfg.RCONEnabled())
 
 	session, err := discordgo.New("Bot " + cfg.DiscordToken)
@@ -50,7 +73,7 @@ func main() {
 		rconClient = rcon.NewClient(cfg.RCONHost, cfg.RCONPort, cfg.RCONPassword, cfg.RCONTimeout)
 	}
 
-	handler := discord.NewHandler(cfg, controller, statusEmbed, rconClient)
+	handler := newDiscordHandler(cfg, controller, statusEmbed, rconClient, runtimeEmbedChannelStore)
 
 	controller.SetOnStateChange(func(newState state.ServerState) {
 		log.Printf("[STATE_CHANGE] 상태 변경 감지: %s", newState.Korean())
@@ -121,6 +144,23 @@ func main() {
 	<-monitorDone
 	controller.Shutdown()
 	log.Println("마크봇이 정상적으로 종료되었습니다.")
+}
+
+func resolveStartupEmbedChannelID(ctx context.Context, cfg *config.Config, store runtimeEmbedChannelStore) string {
+	runtimeChannelID, found, err := store.Load(ctx)
+	if err != nil {
+		log.Printf("[WARN] runtime embed channel override unavailable: %v", err)
+	}
+	if found {
+		log.Printf("[BOOTSTRAP] embed channel source=runtime override channel_id=%s", runtimeChannelID)
+		return runtimeChannelID
+	}
+	if cfg.EmbedChannelID != "" {
+		log.Printf("[BOOTSTRAP] embed channel source=env fallback channel_id=%s", cfg.EmbedChannelID)
+		return cfg.EmbedChannelID
+	}
+	log.Printf("[BOOTSTRAP] embed channel source=unconfigured")
+	return ""
 }
 
 func serverMonitorLoop(
@@ -324,6 +364,20 @@ var slashCommands = []*discordgo.ApplicationCommand{
 						Name:        "command",
 						Description: "실행할 RCON 명령어",
 						Required:    true,
+					},
+				},
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "채널",
+				Description: "상태 임베드를 보낼 채널을 지정",
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:         discordgo.ApplicationCommandOptionChannel,
+						Name:         "channel",
+						Description:  "대상 채널",
+						Required:     true,
+						ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildText, discordgo.ChannelTypeGuildNews},
 					},
 				},
 			},
