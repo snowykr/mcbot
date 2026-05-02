@@ -748,6 +748,121 @@ func TestHandleInteraction_StopConfirmRechecksRoleBeforeStop(t *testing.T) {
 	}
 }
 
+func TestHandleInteraction_ToggleRunningStoresAndExpiresStopConfirmation(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:  "마크봇",
+		TrustedGuildID: testGuildID,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	handler.stopConfirmationStore.ttl = 20 * time.Millisecond
+
+	interaction := newComponentInteraction(ComponentIDToggle, testGuildID, []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	var requests []recordedDiscordRequest
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		requests = api.recordedRequests()
+		if len(requests) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(requests) < 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredMessageUpdate {
+		t.Fatalf("expected deferred message update, got %v", deferred.Type)
+	}
+
+	var followupPayload map[string]json.RawMessage
+	if err := json.Unmarshal(requests[1].Body, &followupPayload); err != nil {
+		t.Fatalf("failed to decode followup payload: %v", err)
+	}
+
+	var followupContent string
+	if err := json.Unmarshal(followupPayload["content"], &followupContent); err != nil {
+		t.Fatalf("failed to decode followup content: %v", err)
+	}
+	if !strings.Contains(followupContent, "정말 서버를 닫을까요?") {
+		t.Fatalf("unexpected followup content: %q", followupContent)
+	}
+
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		handler.stopConfirmationStore.mu.RLock()
+		_, ok := handler.stopConfirmationStore.m[interaction.ID]
+		handler.stopConfirmationStore.mu.RUnlock()
+		if !ok {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	handler.stopConfirmationStore.mu.RLock()
+	defer handler.stopConfirmationStore.mu.RUnlock()
+	if _, ok := handler.stopConfirmationStore.m[interaction.ID]; ok {
+		t.Fatal("stop confirmation was not automatically expired from the store")
+	}
+}
+
+func TestHandleInteraction_StopConfirmExpiredRespondsExpiredAndDoesNotStop(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+
+	stopStarted := make(chan struct{})
+	controller := &testServerController{
+		stopCh:      make(chan mcserver.StopResult),
+		stopStarted: stopStarted,
+	}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:  "마크봇",
+		TrustedGuildID: testGuildID,
+	}, controller, &testStatusEmbedUpdater{}, &testRCONExecutor{})
+	handler.stopConfirmationStore.ttl = 20 * time.Millisecond
+	handler.stopConfirmationStore.Save(StopConfirmationContext{
+		ConfirmationID: "confirmation-id",
+		UserID:         "user-id",
+		Interaction: &discordgo.Interaction{
+			AppID: "123456789012345678",
+			Token: "original-interaction-token",
+		},
+		MessageID: "followup-message-id",
+	})
+
+	time.Sleep(50 * time.Millisecond)
+
+	interaction := newComponentInteraction(ComponentIDConfirmStopPrefix+"confirmation-id", testGuildID, []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	select {
+	case <-stopStarted:
+		t.Fatal("stop started for an expired confirmation")
+	default:
+	}
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 expired-response request, got %d", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate expired response, got %v", response.Type)
+	}
+	if response.Data == nil || !strings.Contains(response.Data.Content, "이미 처리되었거나 만료되었습니다") {
+		t.Fatalf("unexpected response data: %+v", response.Data)
+	}
+}
+
 func TestHandleInteraction_RCONNoGuildRespondsEphemeral(t *testing.T) {
 	session, api := newDiscordAPITestSession(t)
 	addGuildRole(t, session, testGuildID, "role-id", "마크봇")

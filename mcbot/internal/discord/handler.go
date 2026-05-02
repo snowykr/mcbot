@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/snowy/mcbot/internal/config"
@@ -33,33 +34,78 @@ type StopConfirmationContext struct {
 	MessageID      string
 }
 
+const defaultStopConfirmationTTL = 15 * time.Minute
+
+type stopConfirmationEntry struct {
+	ctx       StopConfirmationContext
+	expiresAt time.Time
+}
+
 type StopConfirmationStore struct {
 	mu sync.RWMutex
-	m  map[string]StopConfirmationContext
+	m  map[string]stopConfirmationEntry
+	ttl time.Duration
 }
 
 func NewStopConfirmationStore() *StopConfirmationStore {
 	return &StopConfirmationStore{
-		m: make(map[string]StopConfirmationContext),
+		m:   make(map[string]stopConfirmationEntry),
+		ttl: defaultStopConfirmationTTL,
 	}
 }
 
 func (s *StopConfirmationStore) Save(ctx StopConfirmationContext) {
+	expiresAt := time.Now().Add(s.ttl)
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.m[ctx.ConfirmationID] = ctx
+	s.m[ctx.ConfirmationID] = stopConfirmationEntry{
+		ctx:       ctx,
+		expiresAt: expiresAt,
+	}
+	s.mu.Unlock()
+
+	time.AfterFunc(s.ttl, func() {
+		s.deleteIfExpired(ctx.ConfirmationID, expiresAt)
+	})
 }
 
 func (s *StopConfirmationStore) Get(confirmationID string) (StopConfirmationContext, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	ctx, ok := s.m[confirmationID]
-	return ctx, ok
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.m[confirmationID]
+	if !ok {
+		return StopConfirmationContext{}, false
+	}
+	if !time.Now().Before(entry.expiresAt) {
+		delete(s.m, confirmationID)
+		return StopConfirmationContext{}, false
+	}
+
+	return entry.ctx, true
 }
 
 func (s *StopConfirmationStore) Delete(confirmationID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delete(s.m, confirmationID)
+}
+
+func (s *StopConfirmationStore) deleteIfExpired(confirmationID string, expiresAt time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.m[confirmationID]
+	if !ok {
+		return
+	}
+	if !entry.expiresAt.Equal(expiresAt) {
+		return
+	}
+	if time.Now().Before(entry.expiresAt) {
+		return
+	}
+
 	delete(s.m, confirmationID)
 }
 
