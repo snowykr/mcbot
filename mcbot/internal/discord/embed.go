@@ -220,3 +220,30 @@ func BuildOfflineButton() discordgo.Button {
 		Disabled: true,
 	}
 }
+
+func EmbedInactiveControl(note string) *discordgo.MessageEmbed {
+	return &discordgo.MessageEmbed{
+		Title:       "🎮 마인크래프트 서버 상태",
+		Description: "⚪ **이 상태 메시지는 비활성화되었습니다**",
+		Color:       ColorOffline,
+		Fields: []*discordgo.MessageEmbedField{
+			{
+				Name:  "안내",
+				Value: note,
+			},
+		},
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: EmbedMarkerFooter,
+		},
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+}
+
+func BuildInactiveButton() discordgo.Button {
+	return discordgo.Button{
+		Label:    "비활성화됨",
+		Style:    discordgo.SecondaryButton,
+		CustomID: ComponentIDToggle,
+		Disabled: true,
+	}
+}

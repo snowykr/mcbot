@@ -58,13 +58,18 @@ func TestValidate_RequiredFields(t *testing.T) {
 		{
 			name: "Missing EmbedChannelID",
 			config: Config{
-				DiscordToken:    "token",
-				MCContainerName: "mc-server",
-				McbotRoleName:   "마크봇",
-				TrustedGuildID:  "123456789012345678",
+				DiscordToken:           "token",
+				MCContainerName:        "mc-server",
+				McbotRoleName:          "마크봇",
+				TrustedGuildID:         "123456789012345678",
+				ReadyTimeout:           time.Second,
+				EmbedUpdateTimeout:     time.Second,
+				ServerOperationTimeout: 60 * time.Second,
+				StopTimeoutSeconds:     10,
+				CrashDetectionInterval: time.Second,
+				MaxInspectFailureAttempts: 1,
 			},
-			expectError: true,
-			errorMsg:    "EMBED_CHANNEL_ID is required",
+			expectError: false,
 		},
 	}
 
@@ -607,6 +612,64 @@ func TestLoad_InvalidRCONNumericEnv(t *testing.T) {
 			}
 
 			t.Setenv(tt.key, "")
+		})
+	}
+}
+
+func TestLoad_AllowsMissingEmbedChannelID(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "123456789012345678")
+	t.Setenv("EMBED_CHANNEL_ID", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.EmbedChannelID != "" {
+		t.Fatalf("expected empty embed channel, got %q", cfg.EmbedChannelID)
+	}
+}
+
+func TestLoad_UsesEmbedChannelIDWhenPresent(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "123456789012345678")
+	t.Setenv("EMBED_CHANNEL_ID", "123456789012345679")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.EmbedChannelID != "123456789012345679" {
+		t.Fatalf("expected embed channel to be preserved, got %q", cfg.EmbedChannelID)
+	}
+}
+
+func TestLoad_InvalidEmbedChannelIDRejected(t *testing.T) {
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("MCBOT_TRUSTED_GUILD_ID", "123456789012345678")
+
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "Non-numeric", value: "abc123", want: "EMBED_CHANNEL_ID must be a Discord snowflake ID (digits only)"},
+		{name: "Zero", value: "0", want: "EMBED_CHANNEL_ID must be a non-zero Discord snowflake ID"},
+		{name: "Leading zeros", value: "012345678901234567", want: "EMBED_CHANNEL_ID must be a canonical Discord snowflake ID (no leading zeros)"},
+		{name: "Whitespace", value: " 123456789012345678", want: "EMBED_CHANNEL_ID must not have leading or trailing whitespace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("EMBED_CHANNEL_ID", tt.value)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected error containing %q but got nil", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected error containing %q, got %q", tt.want, err.Error())
+			}
 		})
 	}
 }

@@ -23,6 +23,14 @@ type StatusEmbedUpdater interface {
 	Update(ctx context.Context) error
 }
 
+type CurrentStatusMessageChecker interface {
+	IsCurrentStatusMessage(channelID, messageID string) bool
+}
+
+type ChannelConfigurationService interface {
+	ConfigureChannel(ctx context.Context, channelID string, presence mcserver.PresenceState) error
+}
+
 type RCONExecutor interface {
 	Execute(ctx context.Context, command string) (string, error)
 }
@@ -36,14 +44,19 @@ type StopConfirmationContext struct {
 
 const defaultStopConfirmationTTL = 15 * time.Minute
 
+const requiredChannelPermissions = discordgo.PermissionViewChannel |
+	discordgo.PermissionSendMessages |
+	discordgo.PermissionEmbedLinks |
+	discordgo.PermissionReadMessageHistory
+
 type stopConfirmationEntry struct {
 	ctx       StopConfirmationContext
 	expiresAt time.Time
 }
 
 type StopConfirmationStore struct {
-	mu sync.RWMutex
-	m  map[string]stopConfirmationEntry
+	mu  sync.RWMutex
+	m   map[string]stopConfirmationEntry
 	ttl time.Duration
 }
 
@@ -114,17 +127,34 @@ type Handler struct {
 	controller            ServerController
 	statusEmbed           StatusEmbedUpdater
 	rconClient            RCONExecutor
+	channelConfigurator   ChannelConfigurationService
 	stopConfirmationStore *StopConfirmationStore
 }
 
-func NewHandler(cfg *config.Config, controller ServerController, statusEmbed StatusEmbedUpdater, rconClient RCONExecutor) *Handler {
-	return &Handler{
+type HandlerOption func(*Handler)
+
+func WithChannelConfigurator(channelConfigurator ChannelConfigurationService) HandlerOption {
+	return func(h *Handler) {
+		h.channelConfigurator = channelConfigurator
+	}
+}
+
+func NewHandler(cfg *config.Config, controller ServerController, statusEmbed StatusEmbedUpdater, rconClient RCONExecutor, opts ...HandlerOption) *Handler {
+	h := &Handler{
 		cfg:                   cfg,
 		controller:            controller,
 		statusEmbed:           statusEmbed,
 		rconClient:            rconClient,
 		stopConfirmationStore: NewStopConfirmationStore(),
 	}
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(h)
+		}
+	}
+
+	return h
 }
 
 func (h *Handler) HandleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -150,6 +180,10 @@ func (h *Handler) handleApplicationCommand(s *discordgo.Session, i *discordgo.In
 		subCommand := data.Options[0]
 		if subCommand.Name == "rcon" {
 			h.handleRconCommand(s, i, subCommand.Options)
+			return
+		}
+		if subCommand.Name == "채널" {
+			h.handleChannelCommand(s, i, subCommand.Options)
 			return
 		}
 	}
@@ -207,6 +241,15 @@ func (h *Handler) handleToggleComponent(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 
+	// The initial Discord interaction response is consumed above. Any validation branch below
+	// must use a followup/edit response instead of InteractionRespond.
+	if !h.isCurrentStatusToggle(i) {
+		log.Printf("이전 상태 메시지 토글 무시 (ChannelID: %s, MessageID: %s, UserID: %s)",
+			h.getInteractionMessageChannelID(i), h.getInteractionMessageID(i), h.getUserID(i))
+		h.respondEphemeralFollowup(s, i, "이전 제어 메시지입니다. 최신 상태 메시지를 사용해주세요.")
+		return
+	}
+
 	presenceCtx, presenceCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
 	defer presenceCancel()
 
@@ -220,6 +263,31 @@ func (h *Handler) handleToggleComponent(s *discordgo.Session, i *discordgo.Inter
 	default:
 		log.Printf("버튼 클릭 무시: 현재 상태 %v", presence.ServerState)
 	}
+}
+
+func (h *Handler) isCurrentStatusToggle(i *discordgo.InteractionCreate) bool {
+	checker, ok := h.statusEmbed.(CurrentStatusMessageChecker)
+	if !ok {
+		return true
+	}
+	if i == nil || i.Message == nil {
+		return false
+	}
+	return checker.IsCurrentStatusMessage(i.Message.ChannelID, i.Message.ID)
+}
+
+func (h *Handler) getInteractionMessageID(i *discordgo.InteractionCreate) string {
+	if i == nil || i.Message == nil {
+		return ""
+	}
+	return i.Message.ID
+}
+
+func (h *Handler) getInteractionMessageChannelID(i *discordgo.InteractionCreate) string {
+	if i == nil || i.Message == nil {
+		return ""
+	}
+	return i.Message.ChannelID
 }
 
 func (h *Handler) handleStopConfirmationRequest(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -612,6 +680,24 @@ func (h *Handler) getUserID(i *discordgo.InteractionCreate) string {
 	return "unknown"
 }
 
+func (h *Handler) getBotUserID(s *discordgo.Session) string {
+	if s != nil && s.State != nil && s.State.User != nil && s.State.User.ID != "" {
+		return s.State.User.ID
+	}
+
+	if s != nil {
+		me, err := s.User("@me")
+		if err == nil && me != nil && me.ID != "" {
+			return me.ID
+		}
+		if err != nil {
+			log.Printf("봇 사용자 ID 조회 실패: %v", err)
+		}
+	}
+
+	return ""
+}
+
 func (h *Handler) respondEphemeral(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -714,6 +800,118 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 	}
 
 	h.respondEphemeralFollowup(s, i, content)
+}
+
+func (h *Handler) handleChannelCommand(s *discordgo.Session, i *discordgo.InteractionCreate, options []*discordgo.ApplicationCommandInteractionDataOption) {
+	userID := h.getUserID(i)
+	username := h.getUsername(i)
+
+	if !h.ensureTrustedGuild(s, i) {
+		return
+	}
+
+	if !h.hasRequiredRole(s, i) {
+		log.Printf("[CHANNEL] 권한 거부 (User: %s, ID: %s)", username, userID)
+		h.respondPermissionDenied(s, i)
+		return
+	}
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Flags:           discordgo.MessageFlagsEphemeral,
+			AllowedMentions: noAllowedMentions(),
+		},
+	})
+	if err != nil {
+		log.Printf("[CHANNEL] deferred 응답 실패: %v", err)
+		return
+	}
+
+	channel, validationMessage := h.resolveChannelCommandTarget(s, options)
+	if validationMessage != "" {
+		h.respondEphemeralFollowup(s, i, validationMessage)
+		return
+	}
+
+	if h.channelConfigurator == nil {
+		h.respondEphemeralFollowup(s, i, "❌ 채널 설정 기능이 준비되지 않았습니다.")
+		return
+	}
+
+	presenceCtx, presenceCancel := context.WithTimeout(context.Background(), h.cfg.EmbedUpdateTimeout)
+	presence := h.controller.Presence(presenceCtx)
+	presenceCancel()
+
+	configureCtx, configureCancel := context.WithTimeout(context.Background(), h.cfg.ServerOperationTimeout)
+	defer configureCancel()
+
+	if err := h.channelConfigurator.ConfigureChannel(configureCtx, channel.ID, presence); err != nil {
+		log.Printf("[CHANNEL] 설정 실패 (User: %s, ID: %s, ChannelID: %s, Error: %v)", username, userID, channel.ID, err)
+		h.respondEphemeralFollowup(s, i, "❌ 채널 설정 실패: "+EscapeDiscordText(err.Error()))
+		return
+	}
+
+	log.Printf("[CHANNEL] 설정 성공 (User: %s, ID: %s, ChannelID: %s)", username, userID, channel.ID)
+	h.respondEphemeralFollowup(s, i, "✅ 상태 임베드 채널을 <#"+channel.ID+">로 설정했습니다.")
+}
+
+func (h *Handler) resolveChannelCommandTarget(s *discordgo.Session, options []*discordgo.ApplicationCommandInteractionDataOption) (*discordgo.Channel, string) {
+	var channelOption *discordgo.ApplicationCommandInteractionDataOption
+	for _, opt := range options {
+		if opt.Name == "channel" && opt.Type == discordgo.ApplicationCommandOptionChannel {
+			channelOption = opt
+			break
+		}
+	}
+
+	if channelOption == nil {
+		return nil, "❌ 채널을 선택해주세요."
+	}
+
+	channel := channelOption.ChannelValue(s)
+	if channel == nil || channel.ID == "" {
+		return nil, "❌ 선택한 채널 정보를 확인할 수 없습니다."
+	}
+
+	if channel.Type != discordgo.ChannelTypeGuildText && channel.Type != discordgo.ChannelTypeGuildNews {
+		return nil, "❌ 상태 임베드 채널은 일반 채팅 채널 또는 공지 채널만 선택할 수 있습니다."
+	}
+
+	if strings.TrimSpace(channel.GuildID) != h.cfg.TrustedGuildID {
+		return nil, "❌ 선택한 채널은 이 서버의 채널이 아닙니다."
+	}
+
+	botUserID := h.getBotUserID(s)
+	if botUserID == "" {
+		return nil, "❌ 봇 사용자 정보를 확인할 수 없습니다."
+	}
+
+	permissions, err := h.getBotChannelPermissions(s, botUserID, channel.ID)
+	if err != nil {
+		log.Printf("[CHANNEL] 권한 계산 실패 (BotUserID: %s, ChannelID: %s, Error: %v)", botUserID, channel.ID, err)
+		return nil, "❌ 봇이 선택한 채널의 권한을 확인할 수 없습니다."
+	}
+
+	if permissions&requiredChannelPermissions != requiredChannelPermissions {
+		return nil, "❌ 봇에게 채널 보기, 메시지 전송, 임베드 링크, 메시지 기록 읽기 권한이 필요합니다."
+	}
+
+	return channel, ""
+}
+
+func (h *Handler) getBotChannelPermissions(s *discordgo.Session, botUserID, channelID string) (int64, error) {
+	if s == nil {
+		return 0, nil
+	}
+
+	if s.State != nil {
+		if permissions, err := s.State.UserChannelPermissions(botUserID, channelID); err == nil {
+			return permissions, nil
+		}
+	}
+
+	return s.UserChannelPermissions(botUserID, channelID)
 }
 
 func formatRCONResponse(response string) string {

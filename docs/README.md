@@ -67,12 +67,20 @@
 cp .env.example .env
 ```
 
-`.env` 파일을 열고 다음 필수 항목을 입력합니다:
+`.env` 파일을 열고 다음 항목을 입력합니다:
 - `DISCORD_TOKEN`: Discord 봇 토큰
 - `MCBOT_TRUSTED_GUILD_ID`: 봇의 privileged 기능을 허용할 Discord 서버 snowflake ID (숫자 문자열)
-- `EMBED_CHANNEL_ID`: 상시 임베드 메시지를 표시할 채널 ID
+- `EMBED_CHANNEL_ID`: 상시 임베드 메시지의 초기 기본 채널 ID (선택, 런타임 설정이 없을 때 사용하는 fallback)
 
 `EMBED_CHANNEL_ID`는 반드시 `MCBOT_TRUSTED_GUILD_ID`와 같은 서버에 속한 채널이어야 합니다. 다른 서버 채널을 지정하면 버튼은 표시될 수 있어도 실행은 거부됩니다.
+
+상시 임베드 채널은 런타임에도 바꿀 수 있습니다. `/마크봇 채널` 명령으로 바꾸면 설정은 `./data/mcbot/runtime-config.json`에 저장되고, 이 값이 `.env`의 `EMBED_CHANNEL_ID`보다 우선합니다. `./data/mcbot`는 기존 `./data` 트리 안에 있는 공유 경로입니다.
+
+런타임 설정은 EMBED_CHANNEL_ID보다 우선합니다.
+
+런타임 설정이 한 번 저장되면 새 값으로 바꾸거나 지우기 전까지 계속 우선합니다. 런타임 파일이 손상되면 경고를 남기고 안전하게 `.env` 기본값으로 되돌아갑니다.
+
+채널을 바꿔도 이전 채널의 상시 임베드 메시지는 자동으로 삭제되지 않습니다.
 
 mc-server 관련 설정은 `.env.example`에서 필요한 항목만 주석을 해제해 선택적으로 오버라이드합니다.
 
@@ -103,6 +111,8 @@ make up
 
 - 상시 임베드 메시지에 표시되는 버튼으로 서버 시작/종료를 제어합니다.
 - 임베드 메시지가 삭제된 경우 자동으로 복구되므로 따로 조치할 필요가 없습니다.
+- 신뢰한 서버에서 `/마크봇 채널 <채널>` 명령으로 상시 임베드 메시지 채널을 바꿀 수 있습니다.
+- 채널을 바꾼 뒤에는 새 채널이 활성 채널이 되며, 이전 채널 메시지는 자동으로 지우지 않습니다.
 
 ---
 
@@ -188,7 +198,7 @@ docker compose up -d mcbot
 | 변수명 | 필수 | 기본값                       | 설명 |
 |--------|------|---------------------------|------|
 | `DISCORD_TOKEN` | ✅ | -                         | Discord 봇 토큰 |
-| `EMBED_CHANNEL_ID` | ✅ | -                         | 상시 임베드 메시지를 표시할 채널 ID |
+| `EMBED_CHANNEL_ID` | ❌ | -                         | 상시 임베드 메시지의 초기 기본 채널 ID (선택, 런타임 설정이 없을 때 사용하는 fallback) |
 | `MC_CONTAINER_NAME` | ❌ | `mc-server`               | MC 서버 컨테이너 이름 |
 | `MCBOT_ROLE_NAME` | ❌ | `마크봇`                     | 봇 사용 권한 역할 이름 |
 | `MCBOT_TRUSTED_GUILD_ID` | ✅ | -                         | privileged 기능을 허용할 Discord 서버(길드) ID |
