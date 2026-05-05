@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/snowy/mcbot/internal/config"
 	"github.com/snowy/mcbot/internal/mcserver"
@@ -28,6 +29,8 @@ const (
 	channelPersistenceChannel channelPersistenceMode = iota
 	channelPersistenceClear
 	channelPersistenceDisabled
+
+	channelRollbackTimeout = 5 * time.Second
 )
 
 type ChannelConfigurator struct {
@@ -92,7 +95,14 @@ func (c *ChannelConfigurator) configureChannel(ctx context.Context, channelID st
 	}
 
 	if err := c.persistRuntimeSetting(ctx, persistenceMode, trimmedChannelID); err != nil {
-		rollbackErr := c.rollback(ctx, previousEffectiveChannelID, previousSetting, hadPreviousSetting, presence)
+		// The command context may expire after the manager has already switched channels.
+		// Rollback must detach from cancellation so the in-memory/embed state and
+		// runtime store can be restored, but stay bounded to avoid hanging while
+		// the configurator mutex is held.
+		rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), channelRollbackTimeout)
+		defer rollbackCancel()
+
+		rollbackErr := c.rollback(rollbackCtx, previousEffectiveChannelID, previousSetting, hadPreviousSetting, presence)
 		if rollbackErr != nil {
 			return errors.Join(err, rollbackErr)
 		}
