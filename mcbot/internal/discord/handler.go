@@ -23,6 +23,10 @@ type StatusEmbedUpdater interface {
 	Update(ctx context.Context) error
 }
 
+type CurrentStatusMessageChecker interface {
+	IsCurrentStatusMessage(channelID, messageID string) bool
+}
+
 type ChannelConfigurationService interface {
 	ConfigureChannel(ctx context.Context, channelID string, presence mcserver.PresenceState) error
 }
@@ -229,6 +233,13 @@ func (h *Handler) handleToggleComponent(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 
+	if !h.isCurrentStatusToggle(i) {
+		log.Printf("이전 상태 메시지 토글 무시 (ChannelID: %s, MessageID: %s, UserID: %s)",
+			h.getInteractionMessageChannelID(i), h.getInteractionMessageID(i), h.getUserID(i))
+		h.respondEphemeral(s, i, "이전 제어 메시지입니다. 최신 상태 메시지를 사용해주세요.")
+		return
+	}
+
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredMessageUpdate,
 	})
@@ -250,6 +261,31 @@ func (h *Handler) handleToggleComponent(s *discordgo.Session, i *discordgo.Inter
 	default:
 		log.Printf("버튼 클릭 무시: 현재 상태 %v", presence.ServerState)
 	}
+}
+
+func (h *Handler) isCurrentStatusToggle(i *discordgo.InteractionCreate) bool {
+	checker, ok := h.statusEmbed.(CurrentStatusMessageChecker)
+	if !ok {
+		return true
+	}
+	if i == nil || i.Message == nil {
+		return false
+	}
+	return checker.IsCurrentStatusMessage(i.Message.ChannelID, i.Message.ID)
+}
+
+func (h *Handler) getInteractionMessageID(i *discordgo.InteractionCreate) string {
+	if i == nil || i.Message == nil {
+		return ""
+	}
+	return i.Message.ID
+}
+
+func (h *Handler) getInteractionMessageChannelID(i *discordgo.InteractionCreate) string {
+	if i == nil || i.Message == nil {
+		return ""
+	}
+	return i.Message.ChannelID
 }
 
 func (h *Handler) handleStopConfirmationRequest(s *discordgo.Session, i *discordgo.InteractionCreate) {

@@ -68,8 +68,11 @@ func (t *testServerController) Presence(_ context.Context) mcserver.PresenceStat
 }
 
 type testStatusEmbedUpdater struct {
-	mu          sync.Mutex
-	updateCalls []contextInfo
+	mu               sync.Mutex
+	updateCalls      []contextInfo
+	checkCurrent     bool
+	currentChannelID string
+	currentMessageID string
 }
 
 type contextInfo struct {
@@ -106,6 +109,15 @@ func (t *testStatusEmbedUpdater) getUpdateCalls() []contextInfo {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return append([]contextInfo{}, t.updateCalls...)
+}
+
+func (t *testStatusEmbedUpdater) IsCurrentStatusMessage(channelID, messageID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.checkCurrent {
+		return true
+	}
+	return channelID == t.currentChannelID && messageID == t.currentMessageID
 }
 
 type testRCONExecutor struct {
@@ -445,6 +457,11 @@ func newComponentInteraction(customID, guildID string, roles []string) *discordg
 				},
 			},
 			Data: discordgo.MessageComponentInteractionData{CustomID: customID},
+			Message: &discordgo.Message{
+				ID:        "current-message-id",
+				ChannelID: "current-channel",
+				GuildID:   guildID,
+			},
 		},
 	}
 }
@@ -1278,6 +1295,111 @@ func TestHandleInteraction_ToggleTrustedGuildDefersMessageUpdate(t *testing.T) {
 	response := decodeInteractionResponse(t, requests[0].Body)
 	if response.Type != discordgo.InteractionResponseDeferredMessageUpdate {
 		t.Fatalf("expected deferred message update, got %v", response.Type)
+	}
+}
+
+func TestHandleInteraction_ToggleStaleStatusMessageRespondsEphemeralAndDoesNotReadPresence(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+
+	presenceStarted := make(chan struct{})
+	controller := &testServerController{
+		presenceStarted: presenceStarted,
+		presenceVal:     mcserver.PresenceState{ServerState: state.StateStopped},
+	}
+	updater := &testStatusEmbedUpdater{
+		checkCurrent:     true,
+		currentChannelID: "target-channel",
+		currentMessageID: "current-message-id",
+	}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:      "마크봇",
+		TrustedGuildID:     testGuildID,
+		EmbedUpdateTimeout: time.Second,
+	}, controller, updater, &testRCONExecutor{})
+	interaction := newComponentInteraction(ComponentIDToggle, testGuildID, []string{"role-id"})
+	interaction.Message = &discordgo.Message{ID: "old-message-id", ChannelID: "source-channel", GuildID: testGuildID}
+
+	handler.HandleInteraction(session, interaction)
+
+	select {
+	case <-presenceStarted:
+		t.Fatal("presence was read for a stale status message toggle")
+	default:
+	}
+
+	requests := api.recordedRequests()
+	if len(requests) != 1 {
+		t.Fatalf("expected one stale-message response, got %d requests", len(requests))
+	}
+
+	response := decodeInteractionResponse(t, requests[0].Body)
+	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
+		t.Fatalf("expected immediate ephemeral response, got %v", response.Type)
+	}
+	if response.Data == nil || response.Data.Flags&discordgo.MessageFlagsEphemeral == 0 {
+		t.Fatalf("expected ephemeral response data, got %+v", response.Data)
+	}
+	if !strings.Contains(response.Data.Content, "이전 제어 메시지") {
+		t.Fatalf("unexpected stale-message response content: %q", response.Data.Content)
+	}
+	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
+}
+
+func TestHandleInteraction_ToggleCurrentStatusMessageStillDefersAndCreatesStopConfirmation(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+
+	updater := &testStatusEmbedUpdater{
+		checkCurrent:     true,
+		currentChannelID: "target-channel",
+		currentMessageID: "current-message-id",
+	}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:      "마크봇",
+		TrustedGuildID:     testGuildID,
+		EmbedUpdateTimeout: time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, updater, &testRCONExecutor{})
+	interaction := newComponentInteraction(ComponentIDToggle, testGuildID, []string{"role-id"})
+	interaction.Message = &discordgo.Message{ID: "current-message-id", ChannelID: "target-channel", GuildID: testGuildID}
+
+	handler.HandleInteraction(session, interaction)
+
+	var requests []recordedDiscordRequest
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		requests = api.recordedRequests()
+		if len(requests) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(requests) < 2 {
+		t.Fatalf("expected deferred response and stop confirmation followup, got %d requests", len(requests))
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredMessageUpdate {
+		t.Fatalf("expected deferred message update, got %v", deferred.Type)
+	}
+
+	var followupPayload map[string]json.RawMessage
+	if err := json.Unmarshal(requests[1].Body, &followupPayload); err != nil {
+		t.Fatalf("failed to decode followup payload: %v", err)
+	}
+
+	var followupContent string
+	if err := json.Unmarshal(followupPayload["content"], &followupContent); err != nil {
+		t.Fatalf("failed to decode followup content: %v", err)
+	}
+	if !strings.Contains(followupContent, "정말 서버를 닫을까요?") {
+		t.Fatalf("unexpected followup content: %q", followupContent)
+	}
+
+	if _, ok := handler.stopConfirmationStore.Get(interaction.ID); !ok {
+		t.Fatal("expected current status toggle to create stop confirmation")
 	}
 }
 

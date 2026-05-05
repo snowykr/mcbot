@@ -556,6 +556,134 @@ func TestStatusEmbedManager_SwitchChannel_DisablesPreviousMessage(t *testing.T) 
 	}
 }
 
+func TestStatusEmbedManager_InitPreservesMessageIDWhenInitialUpdateFails(t *testing.T) {
+	msg := &discordgo.Message{
+		ID:     "recovered-message-id",
+		Author: &discordgo.User{ID: "bot-id"},
+		Embeds: []*discordgo.MessageEmbed{{Footer: &discordgo.MessageEmbedFooter{Text: EmbedMarkerFooter}}},
+	}
+
+	mockSession := &mockDiscordSession{
+		messagesByChannel: map[string][]*discordgo.Message{
+			"test-channel": {msg},
+		},
+		editResponses: []error{
+			errors.New("HTTP 500 Internal Server Error"),
+			nil,
+		},
+	}
+
+	mockCtrl := &mockController{presence: mcserver.PresenceState{ServerState: state.StateRunning}}
+	manager := newTestStatusEmbedManager(mockSession, mockCtrl)
+	manager.messageID = ""
+
+	if err := manager.Init(context.Background()); err != nil {
+		t.Fatalf("Expected Init to tolerate initial update failure, got %v", err)
+	}
+
+	if manager.messageID != "recovered-message-id" {
+		t.Fatalf("Expected Init to preserve discovered message ID, got %q", manager.messageID)
+	}
+
+	if err := manager.Update(context.Background()); err != nil {
+		t.Fatalf("Expected later Update to retry preserved message ID, got %v", err)
+	}
+
+	if mockSession.editCalls != 2 {
+		t.Fatalf("Expected initial failed edit plus retry update, got %d edit calls", mockSession.editCalls)
+	}
+
+	if mockSession.allEdits[1].ID != "recovered-message-id" {
+		t.Fatalf("Expected retry update to use preserved message ID, got %q", mockSession.allEdits[1].ID)
+	}
+}
+
+func TestStatusEmbedManager_InitPreservesCreatedMessageIDWhenInitialUpdateFails(t *testing.T) {
+	mockSession := &mockDiscordSession{
+		messagesByChannel: map[string][]*discordgo.Message{},
+		sendMessageID:     "created-message-id",
+		editResponses: []error{
+			errors.New("HTTP 500 Internal Server Error"),
+			nil,
+		},
+	}
+
+	mockCtrl := &mockController{presence: mcserver.PresenceState{ServerState: state.StateRunning}}
+	manager := newTestStatusEmbedManager(mockSession, mockCtrl)
+	manager.messageID = ""
+
+	if err := manager.Init(context.Background()); err != nil {
+		t.Fatalf("Expected Init to tolerate initial update failure, got %v", err)
+	}
+
+	if manager.messageID != "created-message-id" {
+		t.Fatalf("Expected Init to preserve created message ID, got %q", manager.messageID)
+	}
+
+	if mockSession.sendCalls != 1 {
+		t.Fatalf("Expected Init to create one message, got %d sends", mockSession.sendCalls)
+	}
+
+	if err := manager.Update(context.Background()); err != nil {
+		t.Fatalf("Expected later Update to retry preserved message ID, got %v", err)
+	}
+
+	if mockSession.editCalls != 2 {
+		t.Fatalf("Expected initial failed edit plus retry update, got %d edit calls", mockSession.editCalls)
+	}
+
+	if mockSession.allEdits[1].ID != "created-message-id" {
+		t.Fatalf("Expected retry update to use preserved message ID, got %q", mockSession.allEdits[1].ID)
+	}
+}
+
+func TestStatusEmbedManager_SwitchChannel_CommitsWhenPreviousArchiveFails(t *testing.T) {
+	mockSession := &mockDiscordSession{
+		messagesByChannel: map[string][]*discordgo.Message{},
+		sendMessageID:     "target-message-id",
+		editResponses: []error{
+			nil,
+			errors.New("HTTP 403 Forbidden"),
+		},
+	}
+
+	mockCtrl := &mockController{presence: mcserver.PresenceState{ServerState: state.StateRunning}}
+	manager := newTestStatusEmbedManager(mockSession, mockCtrl)
+	manager.channelID = "source-channel"
+	manager.messageID = "source-message-id"
+
+	err := manager.SwitchChannel(context.Background(), "target-channel", mcserver.PresenceState{ServerState: state.StateRunning})
+	if err != nil {
+		t.Fatalf("Expected switch to commit despite previous archive failure, got %v", err)
+	}
+
+	if manager.channelID != "target-channel" {
+		t.Fatalf("Expected manager channelID to be target-channel, got %q", manager.channelID)
+	}
+	if manager.messageID != "target-message-id" {
+		t.Fatalf("Expected manager messageID to be target-message-id, got %q", manager.messageID)
+	}
+
+	if mockSession.editCalls != 2 {
+		t.Fatalf("Expected target update and best-effort previous archive, got %d edit calls", mockSession.editCalls)
+	}
+	if mockSession.allEdits[0].Channel != "target-channel" || mockSession.allEdits[0].ID != "target-message-id" {
+		t.Fatalf("first edit = channel %q message %q, want target-channel/target-message-id", mockSession.allEdits[0].Channel, mockSession.allEdits[0].ID)
+	}
+	if mockSession.allEdits[1].Channel != "source-channel" || mockSession.allEdits[1].ID != "source-message-id" {
+		t.Fatalf("second edit = channel %q message %q, want source-channel/source-message-id", mockSession.allEdits[1].Channel, mockSession.allEdits[1].ID)
+	}
+	if !manager.IsCurrentStatusMessage("target-channel", "target-message-id") {
+		t.Fatal("Expected committed target message to be the current status message")
+	}
+	if manager.IsCurrentStatusMessage("source-channel", "source-message-id") {
+		t.Fatal("Expected previous source message to be stale after committed switch")
+	}
+	if manager.IsCurrentStatusMessage("target-channel", "source-message-id") {
+		t.Fatal("Expected mismatched channel/message pair to be stale")
+	}
+}
+
 func TestStatusEmbedManager_SwitchChannel_DoesNotCommitOnFailure(t *testing.T) {
 	mockSession := &mockDiscordSession{
 		messagesByChannel: map[string][]*discordgo.Message{},

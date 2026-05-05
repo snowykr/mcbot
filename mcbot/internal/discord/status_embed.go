@@ -2,7 +2,6 @@ package discord
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -87,6 +86,8 @@ func (m *StatusEmbedManager) Init(ctx context.Context) error {
 		messageID = newMessageID
 		log.Printf("새 상시 임베드 메시지 생성: %s", messageID)
 	}
+
+	m.messageID = messageID
 
 	updatedMessageID, err := m.applyPresenceLocked(m.channelID, messageID, presence, true)
 	if err != nil {
@@ -201,6 +202,19 @@ func (m *StatusEmbedManager) UpdateWithPresence(presence mcserver.PresenceState)
 	return nil
 }
 
+func (m *StatusEmbedManager) IsCurrentStatusMessage(channelID, messageID string) bool {
+	channelID = strings.TrimSpace(channelID)
+	messageID = strings.TrimSpace(messageID)
+	if channelID == "" || messageID == "" {
+		return false
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return channelID == m.channelID && messageID == m.messageID
+}
+
 func (m *StatusEmbedManager) applyPresenceLocked(channelID, messageID string, presence mcserver.PresenceState, allowRecovery bool) (string, error) {
 	const maxUnknownMessageRetries = 2
 
@@ -290,14 +304,7 @@ func (m *StatusEmbedManager) SwitchChannel(ctx context.Context, channelID string
 	}
 
 	if err := m.archiveReplacedMessageLocked(previousChannelID, previousMessageID, trimmedChannelID, updatedMessageID); err != nil {
-		rollbackErr := m.archiveMessageLocked(trimmedChannelID, updatedMessageID, "채널 전환이 완료되지 않아 이 상태 메시지를 비활성화했습니다.")
-		if rollbackErr != nil {
-			return errors.Join(
-				fmt.Errorf("기존 상태 메시지 비활성화 실패: %w", err),
-				fmt.Errorf("새 상태 메시지 롤백 실패: %w", rollbackErr),
-			)
-		}
-		return fmt.Errorf("기존 상태 메시지 비활성화 실패: %w", err)
+		log.Printf("기존 상태 메시지 비활성화 실패(채널 전환은 계속 진행): %v", err)
 	}
 
 	m.channelID = trimmedChannelID
