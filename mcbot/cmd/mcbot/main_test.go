@@ -207,23 +207,58 @@ func overrideBootstrapRuntimeStore(t *testing.T, path string) {
 	})
 }
 
+var captureLogsMu sync.Mutex
+
 func captureLogs(t *testing.T, fn func()) string {
 	t.Helper()
+
+	captureLogsMu.Lock()
+	defer captureLogsMu.Unlock()
 
 	var buf bytes.Buffer
 	oldFlags := log.Flags()
 	oldPrefix := log.Prefix()
+	oldWriter := log.Writer()
 	log.SetFlags(0)
 	log.SetPrefix("")
 	log.SetOutput(&buf)
-	t.Cleanup(func() {
-		log.SetOutput(os.Stderr)
-		log.SetFlags(oldFlags)
-		log.SetPrefix(oldPrefix)
-	})
+	defer log.SetOutput(oldWriter)
+	defer log.SetFlags(oldFlags)
+	defer log.SetPrefix(oldPrefix)
 
 	fn()
 	return buf.String()
+}
+
+func TestCaptureLogs_RestoresPreviousWriter(t *testing.T) {
+	var previous bytes.Buffer
+
+	originalWriter := log.Writer()
+	originalFlags := log.Flags()
+	originalPrefix := log.Prefix()
+	log.SetOutput(&previous)
+	t.Cleanup(func() {
+		log.SetOutput(originalWriter)
+		log.SetFlags(originalFlags)
+		log.SetPrefix(originalPrefix)
+	})
+
+	ok := t.Run("capture", func(t *testing.T) {
+		logs := captureLogs(t, func() {
+			log.Print("captured")
+		})
+		if !strings.Contains(logs, "captured") {
+			t.Fatalf("expected captured log, got %q", logs)
+		}
+	})
+	if !ok {
+		return
+	}
+
+	log.Print("after capture")
+	if !strings.Contains(previous.String(), "after capture") {
+		t.Fatalf("expected logger output to be restored to previous writer, got %q", previous.String())
+	}
 }
 
 type testRuntimeEmbedChannelStore struct {

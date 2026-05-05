@@ -233,18 +233,20 @@ func (h *Handler) handleToggleComponent(s *discordgo.Session, i *discordgo.Inter
 		return
 	}
 
-	if !h.isCurrentStatusToggle(i) {
-		log.Printf("이전 상태 메시지 토글 무시 (ChannelID: %s, MessageID: %s, UserID: %s)",
-			h.getInteractionMessageChannelID(i), h.getInteractionMessageID(i), h.getUserID(i))
-		h.respondEphemeral(s, i, "이전 제어 메시지입니다. 최신 상태 메시지를 사용해주세요.")
-		return
-	}
-
 	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredMessageUpdate,
 	})
 	if err != nil {
 		log.Printf("인터랙션 응답 실패: %v", err)
+		return
+	}
+
+	// The initial Discord interaction response is consumed above. Any validation branch below
+	// must use a followup/edit response instead of InteractionRespond.
+	if !h.isCurrentStatusToggle(i) {
+		log.Printf("이전 상태 메시지 토글 무시 (ChannelID: %s, MessageID: %s, UserID: %s)",
+			h.getInteractionMessageChannelID(i), h.getInteractionMessageID(i), h.getUserID(i))
+		h.respondEphemeralFollowup(s, i, "이전 제어 메시지입니다. 최신 상태 메시지를 사용해주세요.")
 		return
 	}
 

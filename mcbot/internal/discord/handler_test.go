@@ -73,6 +73,8 @@ type testStatusEmbedUpdater struct {
 	checkCurrent     bool
 	currentChannelID string
 	currentMessageID string
+	checkStarted     chan struct{}
+	checkBlock       chan struct{}
 }
 
 type contextInfo struct {
@@ -114,6 +116,16 @@ func (t *testStatusEmbedUpdater) getUpdateCalls() []contextInfo {
 func (t *testStatusEmbedUpdater) IsCurrentStatusMessage(channelID, messageID string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.checkStarted != nil {
+		select {
+		case <-t.checkStarted:
+		default:
+			close(t.checkStarted)
+		}
+	}
+	if t.checkBlock != nil {
+		<-t.checkBlock
+	}
 	if !t.checkCurrent {
 		return true
 	}
@@ -1329,21 +1341,116 @@ func TestHandleInteraction_ToggleStaleStatusMessageRespondsEphemeralAndDoesNotRe
 	}
 
 	requests := api.recordedRequests()
-	if len(requests) != 1 {
-		t.Fatalf("expected one stale-message response, got %d requests", len(requests))
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and stale-message followup, got %d requests", len(requests))
+	}
+	if !strings.HasSuffix(requests[0].Path, "/callback") {
+		t.Fatalf("expected initial response callback request, got path %q", requests[0].Path)
+	}
+	if !strings.Contains(requests[1].Path, "/webhooks/") {
+		t.Fatalf("expected stale-message response to use followup webhook, got path %q", requests[1].Path)
 	}
 
-	response := decodeInteractionResponse(t, requests[0].Body)
-	if response.Type != discordgo.InteractionResponseChannelMessageWithSource {
-		t.Fatalf("expected immediate ephemeral response, got %v", response.Type)
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredMessageUpdate {
+		t.Fatalf("expected deferred message update, got %v", deferred.Type)
 	}
-	if response.Data == nil || response.Data.Flags&discordgo.MessageFlagsEphemeral == 0 {
-		t.Fatalf("expected ephemeral response data, got %+v", response.Data)
+
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if followup.Flags&discordgo.MessageFlagsEphemeral == 0 {
+		t.Fatalf("expected ephemeral followup, got %+v", followup)
 	}
-	if !strings.Contains(response.Data.Content, "이전 제어 메시지") {
-		t.Fatalf("unexpected stale-message response content: %q", response.Data.Content)
+	if !strings.Contains(followup.Content, "이전 제어 메시지") {
+		t.Fatalf("unexpected stale-message followup content: %q", followup.Content)
 	}
-	assertAllowedMentionsParseEmpty(t, requests[0].Body, "data")
+	assertAllowedMentionsParseEmpty(t, requests[1].Body)
+}
+
+func TestHandleInteraction_ToggleDefersBeforeCurrentStatusCheck(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+
+	presenceStarted := make(chan struct{})
+	checkStarted := make(chan struct{})
+	checkBlock := make(chan struct{})
+	controller := &testServerController{
+		presenceStarted: presenceStarted,
+		presenceVal:     mcserver.PresenceState{ServerState: state.StateStopped},
+	}
+	updater := &testStatusEmbedUpdater{
+		checkCurrent:     true,
+		currentChannelID: "target-channel",
+		currentMessageID: "current-message-id",
+		checkStarted:     checkStarted,
+		checkBlock:       checkBlock,
+	}
+	handler := NewHandler(&config.Config{
+		McbotRoleName:      "마크봇",
+		TrustedGuildID:     testGuildID,
+		EmbedUpdateTimeout: time.Second,
+	}, controller, updater, &testRCONExecutor{})
+	interaction := newComponentInteraction(ComponentIDToggle, testGuildID, []string{"role-id"})
+	interaction.Message = &discordgo.Message{ID: "old-message-id", ChannelID: "source-channel", GuildID: testGuildID}
+
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		handler.HandleInteraction(session, interaction)
+	}()
+
+	select {
+	case <-checkStarted:
+	case <-time.After(time.Second):
+		t.Fatal("current status check was not called")
+	}
+
+	var requests []recordedDiscordRequest
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		requests = api.recordedRequests()
+		if len(requests) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(requests) != 1 {
+		close(checkBlock)
+		<-handlerDone
+		t.Fatalf("expected deferred response before current status check completes, got %d requests", len(requests))
+	}
+	if !strings.HasSuffix(requests[0].Path, "/callback") {
+		close(checkBlock)
+		<-handlerDone
+		t.Fatalf("expected initial response callback request, got path %q", requests[0].Path)
+	}
+
+	deferred := decodeInteractionResponse(t, requests[0].Body)
+	if deferred.Type != discordgo.InteractionResponseDeferredMessageUpdate {
+		close(checkBlock)
+		<-handlerDone
+		t.Fatalf("expected deferred message update, got %v", deferred.Type)
+	}
+
+	select {
+	case <-presenceStarted:
+		close(checkBlock)
+		<-handlerDone
+		t.Fatal("presence was read before current status check completed")
+	default:
+	}
+
+	close(checkBlock)
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not finish after unblocking current status check")
+	}
+
+	select {
+	case <-presenceStarted:
+		t.Fatal("presence was read for a stale status message toggle")
+	default:
+	}
 }
 
 func TestHandleInteraction_ToggleCurrentStatusMessageStillDefersAndCreatesStopConfirmation(t *testing.T) {
