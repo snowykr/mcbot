@@ -11,7 +11,22 @@ import (
 	"strings"
 )
 
-var ErrCorruptRuntimeEmbedChannelStore = errors.New("corrupt runtime embed channel store")
+var (
+	ErrCorruptRuntimeEmbedChannelStore = errors.New("corrupt runtime embed channel store")
+	ErrStaleRuntimeEmbedChannelStore   = errors.New("stale runtime embed channel store")
+)
+
+type RuntimeEmbedChannelMode string
+
+const (
+	RuntimeEmbedChannelModeChannel  RuntimeEmbedChannelMode = "channel"
+	RuntimeEmbedChannelModeDisabled RuntimeEmbedChannelMode = "disabled"
+)
+
+type RuntimeEmbedChannelSetting struct {
+	Mode      RuntimeEmbedChannelMode
+	ChannelID string
+}
 
 type RuntimeEmbedChannelStore struct {
 	path string
@@ -21,43 +36,95 @@ func NewRuntimeEmbedChannelStore(path string) *RuntimeEmbedChannelStore {
 	return &RuntimeEmbedChannelStore{path: path}
 }
 
-func (s *RuntimeEmbedChannelStore) Load(ctx context.Context) (channelID string, found bool, err error) {
+func (s *RuntimeEmbedChannelStore) Load(ctx context.Context, trustedGuildID string) (setting RuntimeEmbedChannelSetting, found bool, err error) {
 	if err := ctx.Err(); err != nil {
-		return "", false, err
+		return RuntimeEmbedChannelSetting{}, false, err
 	}
 
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", false, nil
+			return RuntimeEmbedChannelSetting{}, false, nil
 		}
-		return "", false, fmt.Errorf("read runtime embed channel store: %w", err)
+		return RuntimeEmbedChannelSetting{}, false, fmt.Errorf("read runtime embed channel store: %w", err)
 	}
 
 	var record runtimeEmbedChannelRecord
 	if err := json.Unmarshal(data, &record); err != nil {
-		return "", false, fmt.Errorf("%w: decode runtime embed channel store: %v", ErrCorruptRuntimeEmbedChannelStore, err)
+		return RuntimeEmbedChannelSetting{}, false, fmt.Errorf("%w: decode runtime embed channel store: %v", ErrCorruptRuntimeEmbedChannelStore, err)
 	}
-	if err := validateRuntimeEmbedChannelID(record.EmbedChannelID); err != nil {
-		return "", false, fmt.Errorf("%w: invalid runtime embed channel store: %v", ErrCorruptRuntimeEmbedChannelStore, err)
+	if strings.TrimSpace(record.TrustedGuildID) == "" {
+		return RuntimeEmbedChannelSetting{}, false, fmt.Errorf("%w: runtime embed channel store is not scoped to a trusted guild", ErrStaleRuntimeEmbedChannelStore)
+	}
+	if err := validateRuntimeSnowflakeID("trusted_guild_id", record.TrustedGuildID); err != nil {
+		return RuntimeEmbedChannelSetting{}, false, fmt.Errorf("%w: invalid runtime embed channel store: %v", ErrCorruptRuntimeEmbedChannelStore, err)
+	}
+	if err := validateRuntimeSnowflakeID("current trusted_guild_id", trustedGuildID); err != nil {
+		return RuntimeEmbedChannelSetting{}, false, fmt.Errorf("invalid current trusted guild: %w", err)
+	}
+	if record.TrustedGuildID != trustedGuildID {
+		return RuntimeEmbedChannelSetting{}, false, fmt.Errorf("%w: stored trusted_guild_id %s does not match current trusted_guild_id %s", ErrStaleRuntimeEmbedChannelStore, record.TrustedGuildID, trustedGuildID)
 	}
 
-	return record.EmbedChannelID, true, nil
+	mode := RuntimeEmbedChannelMode(strings.TrimSpace(record.Mode))
+	if mode == "" {
+		mode = RuntimeEmbedChannelModeChannel
+	}
+
+	switch mode {
+	case RuntimeEmbedChannelModeChannel:
+		if err := validateRuntimeSnowflakeID("embed_channel_id", record.EmbedChannelID); err != nil {
+			return RuntimeEmbedChannelSetting{}, false, fmt.Errorf("%w: invalid runtime embed channel store: %v", ErrCorruptRuntimeEmbedChannelStore, err)
+		}
+		return RuntimeEmbedChannelSetting{Mode: RuntimeEmbedChannelModeChannel, ChannelID: record.EmbedChannelID}, true, nil
+	case RuntimeEmbedChannelModeDisabled:
+		if strings.TrimSpace(record.EmbedChannelID) != "" {
+			return RuntimeEmbedChannelSetting{}, false, fmt.Errorf("%w: disabled runtime embed channel store must not include embed_channel_id", ErrCorruptRuntimeEmbedChannelStore)
+		}
+		return RuntimeEmbedChannelSetting{Mode: RuntimeEmbedChannelModeDisabled}, true, nil
+	default:
+		return RuntimeEmbedChannelSetting{}, false, fmt.Errorf("%w: unsupported runtime embed channel mode %q", ErrCorruptRuntimeEmbedChannelStore, record.Mode)
+	}
 }
 
-func (s *RuntimeEmbedChannelStore) Save(ctx context.Context, channelID string) error {
+func (s *RuntimeEmbedChannelStore) Save(ctx context.Context, trustedGuildID, channelID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := validateRuntimeEmbedChannelID(channelID); err != nil {
+	if err := validateRuntimeSnowflakeID("trusted_guild_id", trustedGuildID); err != nil {
+		return err
+	}
+	if err := validateRuntimeSnowflakeID("embed_channel_id", channelID); err != nil {
 		return err
 	}
 
+	return s.writeRecord(runtimeEmbedChannelRecord{
+		TrustedGuildID: trustedGuildID,
+		Mode:           string(RuntimeEmbedChannelModeChannel),
+		EmbedChannelID: channelID,
+	})
+}
+
+func (s *RuntimeEmbedChannelStore) SaveDisabled(ctx context.Context, trustedGuildID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateRuntimeSnowflakeID("trusted_guild_id", trustedGuildID); err != nil {
+		return err
+	}
+
+	return s.writeRecord(runtimeEmbedChannelRecord{
+		TrustedGuildID: trustedGuildID,
+		Mode:           string(RuntimeEmbedChannelModeDisabled),
+	})
+}
+
+func (s *RuntimeEmbedChannelStore) writeRecord(record runtimeEmbedChannelRecord) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return fmt.Errorf("create runtime embed channel store directory: %w", err)
 	}
 
-	data, err := json.Marshal(runtimeEmbedChannelRecord{EmbedChannelID: channelID})
+	data, err := json.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("encode runtime embed channel store: %w", err)
 	}
@@ -106,30 +173,36 @@ func (s *RuntimeEmbedChannelStore) Clear(ctx context.Context) error {
 }
 
 type runtimeEmbedChannelRecord struct {
-	EmbedChannelID string `json:"embed_channel_id"`
+	TrustedGuildID string `json:"trusted_guild_id"`
+	Mode           string `json:"mode,omitempty"`
+	EmbedChannelID string `json:"embed_channel_id,omitempty"`
 }
 
-func validateRuntimeEmbedChannelID(value string) error {
+func validateRuntimeSnowflakeID(field, value string) error {
 	trimmedValue := strings.TrimSpace(value)
 	if trimmedValue == "" {
-		return fmt.Errorf("embed_channel_id is required")
+		return fmt.Errorf("%s is required", field)
 	}
 	if value != trimmedValue {
-		return fmt.Errorf("embed_channel_id must not have leading or trailing whitespace")
+		return fmt.Errorf("%s must not have leading or trailing whitespace", field)
 	}
 	parsedValue, err := strconv.ParseUint(value, 10, 64)
 	if err != nil {
-		return fmt.Errorf("embed_channel_id must be a Discord snowflake ID (digits only)")
+		return fmt.Errorf("%s must be a Discord snowflake ID (digits only)", field)
 	}
 	if strconv.FormatUint(parsedValue, 10) != value {
-		return fmt.Errorf("embed_channel_id must be a canonical Discord snowflake ID (no leading zeros)")
+		return fmt.Errorf("%s must be a canonical Discord snowflake ID (no leading zeros)", field)
 	}
 	if parsedValue == 0 {
-		return fmt.Errorf("embed_channel_id must be a non-zero Discord snowflake ID")
+		return fmt.Errorf("%s must be a non-zero Discord snowflake ID", field)
 	}
 	return nil
 }
 
 func IsCorruptRuntimeEmbedChannelStoreError(err error) bool {
 	return errors.Is(err, ErrCorruptRuntimeEmbedChannelStore)
+}
+
+func IsStaleRuntimeEmbedChannelStoreError(err error) bool {
+	return errors.Is(err, ErrStaleRuntimeEmbedChannelStore)
 }

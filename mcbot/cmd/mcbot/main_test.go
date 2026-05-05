@@ -52,11 +52,11 @@ func TestBootstrapEmbedChannelPrecedence(t *testing.T) {
 	t.Run("runtime override wins over env", func(t *testing.T) {
 		runtimeID := "123456789012345678"
 		envID := "223456789012345678"
-		if err := config.NewRuntimeEmbedChannelStore(runtimeStorePath).Save(context.Background(), runtimeID); err != nil {
+		if err := config.NewRuntimeEmbedChannelStore(runtimeStorePath).Save(context.Background(), testGuildID, runtimeID); err != nil {
 			t.Fatalf("Save() error = %v", err)
 		}
 
-		cfg := &config.Config{EmbedChannelID: envID}
+		cfg := &config.Config{TrustedGuildID: testGuildID, EmbedChannelID: envID}
 		logs := captureLogs(t, func() {
 			if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != runtimeID {
 				t.Fatalf("resolved embed channel = %q, want %q", got, runtimeID)
@@ -70,11 +70,30 @@ func TestBootstrapEmbedChannelPrecedence(t *testing.T) {
 		}
 	})
 
+	t.Run("runtime disabled wins over env", func(t *testing.T) {
+		if err := config.NewRuntimeEmbedChannelStore(runtimeStorePath).SaveDisabled(context.Background(), testGuildID); err != nil {
+			t.Fatalf("SaveDisabled() error = %v", err)
+		}
+
+		cfg := &config.Config{TrustedGuildID: testGuildID, EmbedChannelID: "223456789012345678"}
+		logs := captureLogs(t, func() {
+			if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != "" {
+				t.Fatalf("resolved embed channel = %q, want empty disabled channel", got)
+			}
+		})
+		if !strings.Contains(logs, "source=runtime disabled") {
+			t.Fatalf("expected runtime disabled log, got %q", logs)
+		}
+		if strings.Contains(logs, "source=env fallback") {
+			t.Fatalf("unexpected env fallback log: %q", logs)
+		}
+	})
+
 	t.Run("missing runtime file falls back to env", func(t *testing.T) {
 		if err := os.Remove(runtimeStorePath); err != nil && !os.IsNotExist(err) {
 			t.Fatalf("Remove() error = %v", err)
 		}
-		cfg := &config.Config{EmbedChannelID: "323456789012345678"}
+		cfg := &config.Config{TrustedGuildID: testGuildID, EmbedChannelID: "323456789012345678"}
 		logs := captureLogs(t, func() {
 			if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != cfg.EmbedChannelID {
 				t.Fatalf("resolved embed channel = %q, want %q", got, cfg.EmbedChannelID)
@@ -89,7 +108,7 @@ func TestBootstrapEmbedChannelPrecedence(t *testing.T) {
 		if err := os.Remove(runtimeStorePath); err != nil && !os.IsNotExist(err) {
 			t.Fatalf("Remove() error = %v", err)
 		}
-		cfg := &config.Config{}
+		cfg := &config.Config{TrustedGuildID: testGuildID}
 		logs := captureLogs(t, func() {
 			if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != "" {
 				t.Fatalf("resolved embed channel = %q, want empty", got)
@@ -110,7 +129,7 @@ func TestBootstrapIgnoresMalformedRuntimeOverride(t *testing.T) {
 		contents string
 	}{
 		{name: "invalid JSON", contents: "{not-json"},
-		{name: "invalid snowflake", contents: `{"embed_channel_id":"012345678901234567"}`},
+		{name: "invalid snowflake", contents: `{"trusted_guild_id":"123456789012345679","embed_channel_id":"012345678901234567"}`},
 	}
 
 	for _, tt := range tests {
@@ -119,7 +138,7 @@ func TestBootstrapIgnoresMalformedRuntimeOverride(t *testing.T) {
 				t.Fatalf("WriteFile() error = %v", err)
 			}
 
-			cfg := &config.Config{EmbedChannelID: "423456789012345678"}
+			cfg := &config.Config{TrustedGuildID: testGuildID, EmbedChannelID: "423456789012345678"}
 			logs := captureLogs(t, func() {
 				if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != cfg.EmbedChannelID {
 					t.Fatalf("resolved embed channel = %q, want %q", got, cfg.EmbedChannelID)
@@ -135,26 +154,81 @@ func TestBootstrapIgnoresMalformedRuntimeOverride(t *testing.T) {
 	}
 }
 
-func TestBootstrapStartsWithStaleSavedChannel(t *testing.T) {
+func TestBootstrapClearsStaleSavedChannelFromDifferentTrustedGuild(t *testing.T) {
 	runtimeStorePath := filepath.Join(t.TempDir(), "runtime-config.json")
 	overrideBootstrapRuntimeStore(t, runtimeStorePath)
 
 	runtimeID := "523456789012345678"
-	if err := config.NewRuntimeEmbedChannelStore(runtimeStorePath).Save(context.Background(), runtimeID); err != nil {
+	oldGuildID := "923456789012345678"
+	if err := config.NewRuntimeEmbedChannelStore(runtimeStorePath).Save(context.Background(), oldGuildID, runtimeID); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 
-	cfg := &config.Config{EmbedChannelID: "623456789012345678"}
+	cfg := &config.Config{TrustedGuildID: testGuildID, EmbedChannelID: "623456789012345678"}
 	logs := captureLogs(t, func() {
-		if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != runtimeID {
-			t.Fatalf("resolved embed channel = %q, want %q", got, runtimeID)
+		if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != cfg.EmbedChannelID {
+			t.Fatalf("resolved embed channel = %q, want env fallback %q", got, cfg.EmbedChannelID)
 		}
 	})
-	if !strings.Contains(logs, "source=runtime override") {
-		t.Fatalf("expected runtime override log, got %q", logs)
+	if !strings.Contains(logs, "stale runtime embed channel override cleared") {
+		t.Fatalf("expected stale override clear log, got %q", logs)
 	}
-	if strings.Contains(logs, "source=env fallback") {
-		t.Fatalf("unexpected env fallback log: %q", logs)
+	if !strings.Contains(logs, "source=env fallback") {
+		t.Fatalf("expected env fallback log, got %q", logs)
+	}
+	if _, err := os.Stat(runtimeStorePath); !os.IsNotExist(err) {
+		t.Fatalf("runtime store still exists after stale clear, stat err = %v", err)
+	}
+}
+
+func TestBootstrapClearsStaleDisabledSettingFromDifferentTrustedGuild(t *testing.T) {
+	runtimeStorePath := filepath.Join(t.TempDir(), "runtime-config.json")
+	overrideBootstrapRuntimeStore(t, runtimeStorePath)
+
+	oldGuildID := "923456789012345678"
+	if err := config.NewRuntimeEmbedChannelStore(runtimeStorePath).SaveDisabled(context.Background(), oldGuildID); err != nil {
+		t.Fatalf("SaveDisabled() error = %v", err)
+	}
+
+	cfg := &config.Config{TrustedGuildID: testGuildID, EmbedChannelID: "623456789012345678"}
+	logs := captureLogs(t, func() {
+		if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != cfg.EmbedChannelID {
+			t.Fatalf("resolved embed channel = %q, want env fallback %q", got, cfg.EmbedChannelID)
+		}
+	})
+	if !strings.Contains(logs, "stale runtime embed channel override cleared") {
+		t.Fatalf("expected stale override clear log, got %q", logs)
+	}
+	if !strings.Contains(logs, "source=env fallback") {
+		t.Fatalf("expected env fallback log, got %q", logs)
+	}
+	if _, err := os.Stat(runtimeStorePath); !os.IsNotExist(err) {
+		t.Fatalf("runtime store still exists after stale clear, stat err = %v", err)
+	}
+}
+
+func TestBootstrapClearsLegacyUnscopedSavedChannel(t *testing.T) {
+	runtimeStorePath := filepath.Join(t.TempDir(), "runtime-config.json")
+	overrideBootstrapRuntimeStore(t, runtimeStorePath)
+
+	if err := os.WriteFile(runtimeStorePath, []byte(`{"embed_channel_id":"523456789012345678"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg := &config.Config{TrustedGuildID: testGuildID}
+	logs := captureLogs(t, func() {
+		if got := resolveStartupEmbedChannelID(context.Background(), cfg, newRuntimeEmbedChannelStore()); got != "" {
+			t.Fatalf("resolved embed channel = %q, want empty", got)
+		}
+	})
+	if !strings.Contains(logs, "stale runtime embed channel override cleared") {
+		t.Fatalf("expected stale override clear log, got %q", logs)
+	}
+	if !strings.Contains(logs, "source=unconfigured") {
+		t.Fatalf("expected unconfigured log, got %q", logs)
+	}
+	if _, err := os.Stat(runtimeStorePath); !os.IsNotExist(err) {
+		t.Fatalf("runtime store still exists after stale clear, stat err = %v", err)
 	}
 }
 
@@ -177,7 +251,7 @@ func TestNewDiscordHandler_WiresRuntimeConfiguratorWithResolvedChannel(t *testin
 
 	controller := &testMainController{presenceValue: mcserver.PresenceState{ServerState: state.StateRunning}}
 	statusEmbed := &testMainStatusEmbed{}
-	handler := newDiscordHandler(cfg, controller, statusEmbed, nil, runtimeStore)
+	handler := newDiscordHandler(cfg, controller, statusEmbed, nil, runtimeStore, "env-default-channel")
 
 	session := newMainInteractionSession(t)
 	seedMainChannelCommandState(t, session, testGuildID, "target-channel", "target-channel", discordgo.ChannelTypeGuildText, "role-id", "마크봇", discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionEmbedLinks|discordgo.PermissionReadMessageHistory, true)
@@ -262,19 +336,29 @@ func TestCaptureLogs_RestoresPreviousWriter(t *testing.T) {
 }
 
 type testRuntimeEmbedChannelStore struct {
-	loadChannelID string
-	loadFound     bool
-	loadErr       error
-	saveCalls     []string
-	saveErrs      []error
-	clearCalls    int
+	loadChannelID     string
+	loadSetting       config.RuntimeEmbedChannelSetting
+	loadUseSetting    bool
+	loadFound         bool
+	loadErr           error
+	saveCalls         []string
+	saveDisabledCalls int
+	saveErrs          []error
+	clearCalls        int
 }
 
-func (s *testRuntimeEmbedChannelStore) Load(context.Context) (string, bool, error) {
-	return s.loadChannelID, s.loadFound, s.loadErr
+func (s *testRuntimeEmbedChannelStore) Load(_ context.Context, _ string) (config.RuntimeEmbedChannelSetting, bool, error) {
+	if s.loadUseSetting {
+		return s.loadSetting, s.loadFound, s.loadErr
+	}
+	setting := config.RuntimeEmbedChannelSetting{}
+	if s.loadFound {
+		setting = config.RuntimeEmbedChannelSetting{Mode: config.RuntimeEmbedChannelModeChannel, ChannelID: s.loadChannelID}
+	}
+	return setting, s.loadFound, s.loadErr
 }
 
-func (s *testRuntimeEmbedChannelStore) Save(_ context.Context, channelID string) error {
+func (s *testRuntimeEmbedChannelStore) Save(_ context.Context, _ string, channelID string) error {
 	s.saveCalls = append(s.saveCalls, channelID)
 	if len(s.saveErrs) == 0 {
 		return nil
@@ -282,6 +366,11 @@ func (s *testRuntimeEmbedChannelStore) Save(_ context.Context, channelID string)
 	err := s.saveErrs[0]
 	s.saveErrs = s.saveErrs[1:]
 	return err
+}
+
+func (s *testRuntimeEmbedChannelStore) SaveDisabled(context.Context, string) error {
+	s.saveDisabledCalls++
+	return nil
 }
 
 func (s *testRuntimeEmbedChannelStore) Clear(context.Context) error {
@@ -720,13 +809,20 @@ func assertCommandPayload(t *testing.T, body []byte) {
 	}
 
 	channel := findOptionByName(t, root.Options, "채널")
-	if channel.Type != discordgo.ApplicationCommandOptionSubCommand {
-		t.Fatalf("expected 채널 subcommand type, got %v", channel.Type)
+	if channel.Type != discordgo.ApplicationCommandOptionSubCommandGroup {
+		t.Fatalf("expected 채널 subcommand group type, got %v", channel.Type)
 	}
-	if len(channel.Options) != 1 {
-		t.Fatalf("expected 1 channel option, got %d", len(channel.Options))
+	if len(channel.Options) != 3 {
+		t.Fatalf("expected 3 channel subcommands, got %d", len(channel.Options))
 	}
-	channelOption := channel.Options[0]
+	setChannel := findOptionByName(t, channel.Options, "설정")
+	if setChannel.Type != discordgo.ApplicationCommandOptionSubCommand {
+		t.Fatalf("expected 설정 subcommand type, got %v", setChannel.Type)
+	}
+	if len(setChannel.Options) != 1 {
+		t.Fatalf("expected 1 설정 option, got %d", len(setChannel.Options))
+	}
+	channelOption := setChannel.Options[0]
 	if channelOption.Name != "channel" {
 		t.Fatalf("expected channel option name %q, got %q", "channel", channelOption.Name)
 	}
@@ -738,6 +834,25 @@ func assertCommandPayload(t *testing.T, body []byte) {
 	}
 	if len(channelOption.ChannelTypes) != 2 || channelOption.ChannelTypes[0] != discordgo.ChannelTypeGuildText || channelOption.ChannelTypes[1] != discordgo.ChannelTypeGuildNews {
 		t.Fatalf("unexpected channel types: %#v", channelOption.ChannelTypes)
+	}
+
+	defaultChannel := findOptionByName(t, channel.Options, "기본값")
+	if defaultChannel.Type != discordgo.ApplicationCommandOptionSubCommand {
+		t.Fatalf("expected 기본값 subcommand type, got %v", defaultChannel.Type)
+	}
+	if len(defaultChannel.Options) != 0 {
+		t.Fatalf("expected 기본값 to have no options, got %d", len(defaultChannel.Options))
+	}
+
+	disableChannel := findOptionByName(t, channel.Options, "끄기")
+	if disableChannel.Type != discordgo.ApplicationCommandOptionSubCommand {
+		t.Fatalf("expected 끄기 subcommand type, got %v", disableChannel.Type)
+	}
+	if len(disableChannel.Options) != 0 {
+		t.Fatalf("expected 끄기 to have no options, got %d", len(disableChannel.Options))
+	}
+	if !strings.Contains(disableChannel.Description, "저장") || strings.Contains(disableChannel.Description, "지우") {
+		t.Fatalf("unexpected 끄기 description: %q", disableChannel.Description)
 	}
 }
 

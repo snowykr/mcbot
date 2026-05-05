@@ -556,6 +556,72 @@ func TestStatusEmbedManager_SwitchChannel_DisablesPreviousMessage(t *testing.T) 
 	}
 }
 
+func TestStatusEmbedManager_SwitchChannel_EmptyDisablesEmbedAndArchivesPreviousMessage(t *testing.T) {
+	mockSession := &mockDiscordSession{messagesByChannel: map[string][]*discordgo.Message{}}
+
+	mockCtrl := &mockController{presence: mcserver.PresenceState{ServerState: state.StateRunning}}
+	manager := newTestStatusEmbedManager(mockSession, mockCtrl)
+	manager.messageID = "source-message-id"
+	manager.channelID = "source-channel"
+
+	err := manager.SwitchChannel(context.Background(), "", mcserver.PresenceState{ServerState: state.StateRunning})
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if mockSession.sendCalls != 0 {
+		t.Fatalf("Expected 0 send calls, got %d", mockSession.sendCalls)
+	}
+	if mockSession.editCalls != 1 {
+		t.Fatalf("Expected 1 edit call to archive previous message, got %d", mockSession.editCalls)
+	}
+	if mockSession.lastEdit == nil || mockSession.lastEdit.Channel != "source-channel" || mockSession.lastEdit.ID != "source-message-id" {
+		t.Fatalf("last edit = %#v, want source-channel/source-message-id", mockSession.lastEdit)
+	}
+	if mockSession.lastEdit.Embeds == nil || len(*mockSession.lastEdit.Embeds) == 0 {
+		t.Fatal("Expected archived previous message to include an embed")
+	}
+	if got := (*mockSession.lastEdit.Embeds)[0].Description; !strings.Contains(got, "비활성화") {
+		t.Fatalf("Expected archive embed to explain deactivation, got %q", got)
+	}
+	if manager.channelID != "" {
+		t.Fatalf("Expected manager channelID to be empty, got %q", manager.channelID)
+	}
+	if manager.messageID != "" {
+		t.Fatalf("Expected manager messageID to be empty, got %q", manager.messageID)
+	}
+}
+
+func TestStatusEmbedManager_SwitchChannel_EmptyDisablesEmbedWhenArchiveFails(t *testing.T) {
+	mockSession := &mockDiscordSession{
+		messagesByChannel: map[string][]*discordgo.Message{},
+		editResponses:     []error{errors.New("archive failed")},
+	}
+
+	mockCtrl := &mockController{presence: mcserver.PresenceState{ServerState: state.StateRunning}}
+	manager := newTestStatusEmbedManager(mockSession, mockCtrl)
+	manager.messageID = "source-message-id"
+	manager.channelID = "source-channel"
+
+	err := manager.SwitchChannel(context.Background(), "", mcserver.PresenceState{ServerState: state.StateRunning})
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if mockSession.editCalls != 1 {
+		t.Fatalf("Expected one best-effort archive attempt, got %d", mockSession.editCalls)
+	}
+	if mockSession.sendCalls != 0 {
+		t.Fatalf("Expected 0 send calls, got %d", mockSession.sendCalls)
+	}
+	if manager.channelID != "" {
+		t.Fatalf("Expected manager channelID to be empty, got %q", manager.channelID)
+	}
+	if manager.messageID != "" {
+		t.Fatalf("Expected manager messageID to be empty, got %q", manager.messageID)
+	}
+}
+
 func TestStatusEmbedManager_InitPreservesMessageIDWhenInitialUpdateFails(t *testing.T) {
 	msg := &discordgo.Message{
 		ID:     "recovered-message-id",

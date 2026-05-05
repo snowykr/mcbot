@@ -146,21 +146,36 @@ func (t *testRCONExecutor) Execute(ctx context.Context, command string) (string,
 }
 
 type testChannelConfigurator struct {
-	mu            sync.Mutex
-	called        bool
-	callCount     int
-	lastChannelID string
-	lastPresence  mcserver.PresenceState
-	err           error
-	started       chan struct{}
-	block         <-chan struct{}
-	once          sync.Once
+	mu               sync.Mutex
+	called           bool
+	callCount        int
+	lastAction       string
+	lastChannelID    string
+	defaultChannelID string
+	lastPresence     mcserver.PresenceState
+	err              error
+	started          chan struct{}
+	block            <-chan struct{}
+	once             sync.Once
 }
 
 func (t *testChannelConfigurator) ConfigureChannel(_ context.Context, channelID string, presence mcserver.PresenceState) error {
+	return t.recordCall("설정", channelID, presence)
+}
+
+func (t *testChannelConfigurator) ConfigureDefaultChannel(_ context.Context, presence mcserver.PresenceState) (string, error) {
+	return t.defaultChannelID, t.recordCall("기본값", t.defaultChannelID, presence)
+}
+
+func (t *testChannelConfigurator) DisableChannel(_ context.Context, presence mcserver.PresenceState) error {
+	return t.recordCall("끄기", "", presence)
+}
+
+func (t *testChannelConfigurator) recordCall(action, channelID string, presence mcserver.PresenceState) error {
 	t.mu.Lock()
 	t.called = true
 	t.callCount++
+	t.lastAction = action
 	t.lastChannelID = channelID
 	t.lastPresence = presence
 	t.mu.Unlock()
@@ -182,25 +197,48 @@ func (t *testChannelConfigurator) snapshot() (called bool, callCount int, lastCh
 	return t.called, t.callCount, t.lastChannelID, t.lastPresence
 }
 
-type testRuntimeEmbedChannelStore struct {
-	mu            sync.Mutex
-	loadChannelID string
-	loadFound     bool
-	loadErr       error
-	saveCalls     []string
-	clearCalls    int
+func (t *testChannelConfigurator) actionSnapshot() (called bool, callCount int, lastAction, lastChannelID string, lastPresence mcserver.PresenceState) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.called, t.callCount, t.lastAction, t.lastChannelID, t.lastPresence
 }
 
-func (s *testRuntimeEmbedChannelStore) Load(context.Context) (string, bool, error) {
+type testRuntimeEmbedChannelStore struct {
+	mu                sync.Mutex
+	loadChannelID     string
+	loadSetting       config.RuntimeEmbedChannelSetting
+	loadUseSetting    bool
+	loadFound         bool
+	loadErr           error
+	saveCalls         []string
+	saveDisabledCalls int
+	clearCalls        int
+}
+
+func (s *testRuntimeEmbedChannelStore) Load(_ context.Context, _ string) (config.RuntimeEmbedChannelSetting, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.loadChannelID, s.loadFound, s.loadErr
+	if s.loadUseSetting {
+		return s.loadSetting, s.loadFound, s.loadErr
+	}
+	setting := config.RuntimeEmbedChannelSetting{}
+	if s.loadFound {
+		setting = config.RuntimeEmbedChannelSetting{Mode: config.RuntimeEmbedChannelModeChannel, ChannelID: s.loadChannelID}
+	}
+	return setting, s.loadFound, s.loadErr
 }
 
-func (s *testRuntimeEmbedChannelStore) Save(_ context.Context, channelID string) error {
+func (s *testRuntimeEmbedChannelStore) Save(_ context.Context, _ string, channelID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.saveCalls = append(s.saveCalls, channelID)
+	return nil
+}
+
+func (s *testRuntimeEmbedChannelStore) SaveDisabled(context.Context, string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saveDisabledCalls++
 	return nil
 }
 
@@ -449,6 +487,33 @@ func newChannelInteraction(channelID string, roles []string) *discordgo.Interact
 			Name:  "channel",
 			Type:  discordgo.ApplicationCommandOptionChannel,
 			Value: channelID,
+		}},
+	}}, roles)
+}
+
+func newChannelGroupSetInteraction(channelID string, roles []string) *discordgo.InteractionCreate {
+	return newApplicationCommandInteraction("마크봇", []*discordgo.ApplicationCommandInteractionDataOption{{
+		Name: "채널",
+		Type: discordgo.ApplicationCommandOptionSubCommandGroup,
+		Options: []*discordgo.ApplicationCommandInteractionDataOption{{
+			Name: "설정",
+			Type: discordgo.ApplicationCommandOptionSubCommand,
+			Options: []*discordgo.ApplicationCommandInteractionDataOption{{
+				Name:  "channel",
+				Type:  discordgo.ApplicationCommandOptionChannel,
+				Value: channelID,
+			}},
+		}},
+	}}, roles)
+}
+
+func newChannelGroupActionInteraction(action string, roles []string) *discordgo.InteractionCreate {
+	return newApplicationCommandInteraction("마크봇", []*discordgo.ApplicationCommandInteractionDataOption{{
+		Name: "채널",
+		Type: discordgo.ApplicationCommandOptionSubCommandGroup,
+		Options: []*discordgo.ApplicationCommandInteractionDataOption{{
+			Name: action,
+			Type: discordgo.ApplicationCommandOptionSubCommand,
 		}},
 	}}, roles)
 }
@@ -1031,7 +1096,7 @@ func TestHandleInteraction_ChannelCommand_RepairsUnconfiguredMode(t *testing.T) 
 
 	store := &testRuntimeEmbedChannelStore{}
 	manager := &testChannelSwitcher{}
-	configurator := NewChannelConfigurator(store, manager, "")
+	configurator := NewChannelConfigurator(store, manager, testGuildID, "", "")
 
 	handler := NewHandler(&config.Config{
 		McbotRoleName:          "마크봇",
@@ -1081,6 +1146,163 @@ func TestHandleInteraction_ChannelCommand_RepairsUnconfiguredMode(t *testing.T) 
 	if configurator.currentChannelID != "target-channel" {
 		t.Fatalf("configurator currentChannelID = %q, want target-channel", configurator.currentChannelID)
 	}
+}
+
+func TestHandleInteraction_ChannelCommand_DefaultClearsOverrideAndUsesEnvDefault(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+
+	store := &testRuntimeEmbedChannelStore{
+		loadChannelID: "override-channel",
+		loadFound:     true,
+	}
+	manager := &testChannelSwitcher{}
+	configurator := NewChannelConfigurator(store, manager, testGuildID, "override-channel", "default-channel")
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		EmbedUpdateTimeout:     time.Second,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelGroupActionInteraction("기본값", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "<#default-channel>") || !strings.Contains(followup.Content, "환경 기본값") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+
+	store.mu.Lock()
+	if len(store.saveCalls) != 0 {
+		store.mu.Unlock()
+		t.Fatalf("store save calls = %v, want none", store.saveCalls)
+	}
+	if store.clearCalls != 1 {
+		store.mu.Unlock()
+		t.Fatalf("store clear calls = %d, want 1", store.clearCalls)
+	}
+	store.mu.Unlock()
+
+	manager.mu.Lock()
+	if len(manager.switchCalls) != 1 || manager.switchCalls[0] != "default-channel" {
+		manager.mu.Unlock()
+		t.Fatalf("manager switch calls = %v, want [default-channel]", manager.switchCalls)
+	}
+	manager.mu.Unlock()
+}
+
+func TestHandleInteraction_ChannelCommand_DefaultWithEmptyEnvDisablesEmbed(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+
+	store := &testRuntimeEmbedChannelStore{
+		loadChannelID: "override-channel",
+		loadFound:     true,
+	}
+	manager := &testChannelSwitcher{}
+	configurator := NewChannelConfigurator(store, manager, testGuildID, "override-channel", "")
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		EmbedUpdateTimeout:     time.Second,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelGroupActionInteraction("기본값", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "환경 기본값이 없어") || !strings.Contains(followup.Content, "비활성화") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+
+	store.mu.Lock()
+	if len(store.saveCalls) != 0 {
+		store.mu.Unlock()
+		t.Fatalf("store save calls = %v, want none", store.saveCalls)
+	}
+	if store.clearCalls != 1 {
+		store.mu.Unlock()
+		t.Fatalf("store clear calls = %d, want 1", store.clearCalls)
+	}
+	store.mu.Unlock()
+
+	manager.mu.Lock()
+	if len(manager.switchCalls) != 1 || manager.switchCalls[0] != "" {
+		manager.mu.Unlock()
+		t.Fatalf("manager switch calls = %v, want empty channel switch", manager.switchCalls)
+	}
+	manager.mu.Unlock()
+}
+
+func TestHandleInteraction_ChannelCommand_DisablePersistsDisabledModeAndDisablesEmbed(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	addGuildRole(t, session, testGuildID, "role-id", "마크봇")
+
+	store := &testRuntimeEmbedChannelStore{
+		loadChannelID: "override-channel",
+		loadFound:     true,
+	}
+	manager := &testChannelSwitcher{}
+	configurator := NewChannelConfigurator(store, manager, testGuildID, "override-channel", "default-channel")
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		EmbedUpdateTimeout:     time.Second,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelGroupActionInteraction("끄기", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+	followup := decodeWebhookParams(t, requests[1].Body)
+	if !strings.Contains(followup.Content, "비활성화") || !strings.Contains(followup.Content, "저장") || strings.Contains(followup.Content, "삭제") {
+		t.Fatalf("unexpected followup content: %q", followup.Content)
+	}
+
+	store.mu.Lock()
+	if len(store.saveCalls) != 0 {
+		store.mu.Unlock()
+		t.Fatalf("store save calls = %v, want none", store.saveCalls)
+	}
+	if store.saveDisabledCalls != 1 {
+		store.mu.Unlock()
+		t.Fatalf("store save disabled calls = %d, want 1", store.saveDisabledCalls)
+	}
+	if store.clearCalls != 0 {
+		store.mu.Unlock()
+		t.Fatalf("store clear calls = %d, want 0", store.clearCalls)
+	}
+	store.mu.Unlock()
+
+	manager.mu.Lock()
+	if len(manager.switchCalls) != 1 || manager.switchCalls[0] != "" {
+		manager.mu.Unlock()
+		t.Fatalf("manager switch calls = %v, want empty channel switch", manager.switchCalls)
+	}
+	manager.mu.Unlock()
 }
 
 func TestHandleInteraction_ChannelCommand_ConfiguratorFailureRespondsEphemeral(t *testing.T) {
@@ -1158,6 +1380,35 @@ func TestHandleInteraction_ChannelCommand_SuccessFollowupMentionsTargetChannel(t
 	called, callCount, lastChannelID, _ := configurator.snapshot()
 	if !called || callCount != 1 || lastChannelID != "target-channel" {
 		t.Fatalf("configurator call state = called:%v count:%d channel:%q, want one call to target-channel", called, callCount, lastChannelID)
+	}
+}
+
+func TestHandleInteraction_ChannelCommand_GroupSetAllowsExecution(t *testing.T) {
+	session, api := newDiscordAPITestSession(t)
+	seedChannelCommandState(t, session, testGuildID, "target-channel", "target-channel", discordgo.ChannelTypeGuildText, "role-id", "마크봇",
+		discordgo.PermissionViewChannel|discordgo.PermissionSendMessages|discordgo.PermissionEmbedLinks|discordgo.PermissionReadMessageHistory, true)
+	configurator := &testChannelConfigurator{}
+
+	handler := NewHandler(&config.Config{
+		McbotRoleName:          "마크봇",
+		TrustedGuildID:         testGuildID,
+		EmbedUpdateTimeout:     time.Second,
+		ServerOperationTimeout: time.Second,
+	}, &testServerController{
+		presenceVal: mcserver.PresenceState{ServerState: state.StateRunning},
+	}, &testStatusEmbedUpdater{}, &testRCONExecutor{}, WithChannelConfigurator(configurator))
+	interaction := newChannelGroupSetInteraction("target-channel", []string{"role-id"})
+
+	handler.HandleInteraction(session, interaction)
+
+	requests := api.recordedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("expected deferred response and followup, got %d requests", len(requests))
+	}
+
+	called, callCount, lastAction, lastChannelID, _ := configurator.actionSnapshot()
+	if !called || callCount != 1 || lastAction != "설정" || lastChannelID != "target-channel" {
+		t.Fatalf("configurator call state = called:%v count:%d action:%q channel:%q, want one 설정 call to target-channel", called, callCount, lastAction, lastChannelID)
 	}
 }
 

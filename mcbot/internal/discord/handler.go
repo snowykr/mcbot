@@ -29,6 +29,8 @@ type CurrentStatusMessageChecker interface {
 
 type ChannelConfigurationService interface {
 	ConfigureChannel(ctx context.Context, channelID string, presence mcserver.PresenceState) error
+	ConfigureDefaultChannel(ctx context.Context, presence mcserver.PresenceState) (channelID string, err error)
+	DisableChannel(ctx context.Context, presence mcserver.PresenceState) error
 }
 
 type RCONExecutor interface {
@@ -183,7 +185,7 @@ func (h *Handler) handleApplicationCommand(s *discordgo.Session, i *discordgo.In
 			return
 		}
 		if subCommand.Name == "채널" {
-			h.handleChannelCommand(s, i, subCommand.Options)
+			h.handleChannelCommand(s, i, subCommand)
 			return
 		}
 	}
@@ -802,7 +804,7 @@ func (h *Handler) handleRconCommand(s *discordgo.Session, i *discordgo.Interacti
 	h.respondEphemeralFollowup(s, i, content)
 }
 
-func (h *Handler) handleChannelCommand(s *discordgo.Session, i *discordgo.InteractionCreate, options []*discordgo.ApplicationCommandInteractionDataOption) {
+func (h *Handler) handleChannelCommand(s *discordgo.Session, i *discordgo.InteractionCreate, command *discordgo.ApplicationCommandInteractionDataOption) {
 	userID := h.getUserID(i)
 	username := h.getUsername(i)
 
@@ -828,12 +830,6 @@ func (h *Handler) handleChannelCommand(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	channel, validationMessage := h.resolveChannelCommandTarget(s, options)
-	if validationMessage != "" {
-		h.respondEphemeralFollowup(s, i, validationMessage)
-		return
-	}
-
 	if h.channelConfigurator == nil {
 		h.respondEphemeralFollowup(s, i, "❌ 채널 설정 기능이 준비되지 않았습니다.")
 		return
@@ -846,14 +842,64 @@ func (h *Handler) handleChannelCommand(s *discordgo.Session, i *discordgo.Intera
 	configureCtx, configureCancel := context.WithTimeout(context.Background(), h.cfg.ServerOperationTimeout)
 	defer configureCancel()
 
-	if err := h.channelConfigurator.ConfigureChannel(configureCtx, channel.ID, presence); err != nil {
-		log.Printf("[CHANNEL] 설정 실패 (User: %s, ID: %s, ChannelID: %s, Error: %v)", username, userID, channel.ID, err)
-		h.respondEphemeralFollowup(s, i, "❌ 채널 설정 실패: "+EscapeDiscordText(err.Error()))
-		return
-	}
+	actionName, actionOptions := resolveChannelCommandAction(command)
+	switch actionName {
+	case "설정":
+		channel, validationMessage := h.resolveChannelCommandTarget(s, actionOptions)
+		if validationMessage != "" {
+			h.respondEphemeralFollowup(s, i, validationMessage)
+			return
+		}
 
-	log.Printf("[CHANNEL] 설정 성공 (User: %s, ID: %s, ChannelID: %s)", username, userID, channel.ID)
-	h.respondEphemeralFollowup(s, i, "✅ 상태 임베드 채널을 <#"+channel.ID+">로 설정했습니다.")
+		if err := h.channelConfigurator.ConfigureChannel(configureCtx, channel.ID, presence); err != nil {
+			log.Printf("[CHANNEL] 설정 실패 (User: %s, ID: %s, ChannelID: %s, Error: %v)", username, userID, channel.ID, err)
+			h.respondEphemeralFollowup(s, i, "❌ 채널 설정 실패: "+EscapeDiscordText(err.Error()))
+			return
+		}
+
+		log.Printf("[CHANNEL] 설정 성공 (User: %s, ID: %s, ChannelID: %s)", username, userID, channel.ID)
+		h.respondEphemeralFollowup(s, i, "✅ 상태 임베드 채널을 <#"+channel.ID+">로 설정했습니다.")
+	case "기본값":
+		channelID, err := h.channelConfigurator.ConfigureDefaultChannel(configureCtx, presence)
+		if err != nil {
+			log.Printf("[CHANNEL] 기본값 복원 실패 (User: %s, ID: %s, Error: %v)", username, userID, err)
+			h.respondEphemeralFollowup(s, i, "❌ 채널 기본값 복원 실패: "+EscapeDiscordText(err.Error()))
+			return
+		}
+
+		log.Printf("[CHANNEL] 기본값 복원 성공 (User: %s, ID: %s, ChannelID: %s)", username, userID, channelID)
+		if channelID == "" {
+			h.respondEphemeralFollowup(s, i, "✅ 저장된 채널 설정을 삭제했습니다. 환경 기본값이 없어 상태 임베드를 비활성화했습니다.")
+			return
+		}
+		h.respondEphemeralFollowup(s, i, "✅ 저장된 채널 설정을 삭제하고 상태 임베드 채널을 환경 기본값 <#"+channelID+">로 되돌렸습니다.")
+	case "끄기":
+		if err := h.channelConfigurator.DisableChannel(configureCtx, presence); err != nil {
+			log.Printf("[CHANNEL] 비활성화 실패 (User: %s, ID: %s, Error: %v)", username, userID, err)
+			h.respondEphemeralFollowup(s, i, "❌ 채널 비활성화 실패: "+EscapeDiscordText(err.Error()))
+			return
+		}
+
+		log.Printf("[CHANNEL] 비활성화 성공 (User: %s, ID: %s)", username, userID)
+		h.respondEphemeralFollowup(s, i, "✅ 상태 임베드 비활성화 설정을 저장했습니다. 다시 켜려면 `/마크봇 채널 설정` 또는 `/마크봇 채널 기본값`을 사용하세요.")
+	default:
+		log.Printf("[CHANNEL] 알 수 없는 채널 하위 명령 (User: %s, ID: %s, Action: %s)", username, userID, actionName)
+		h.respondEphemeralFollowup(s, i, "❌ 알 수 없는 채널 명령입니다.")
+	}
+}
+
+func resolveChannelCommandAction(command *discordgo.ApplicationCommandInteractionDataOption) (string, []*discordgo.ApplicationCommandInteractionDataOption) {
+	if command == nil {
+		return "", nil
+	}
+	if command.Type != discordgo.ApplicationCommandOptionSubCommandGroup {
+		return "설정", command.Options
+	}
+	if len(command.Options) == 0 {
+		return "", nil
+	}
+	action := command.Options[0]
+	return action.Name, action.Options
 }
 
 func (h *Handler) resolveChannelCommandTarget(s *discordgo.Session, options []*discordgo.ApplicationCommandInteractionDataOption) (*discordgo.Channel, string) {

@@ -272,7 +272,7 @@ func (m *StatusEmbedManager) SwitchChannel(ctx context.Context, channelID string
 	trimmedChannelID := strings.TrimSpace(channelID)
 	if trimmedChannelID == "" {
 		if err := m.archiveMessageLocked(previousChannelID, previousMessageID, "상태 임베드 채널 설정이 해제되었습니다."); err != nil {
-			return fmt.Errorf("기존 상태 메시지 비활성화 실패: %w", err)
+			log.Printf("기존 상태 메시지 비활성화 실패(채널 비활성화는 계속 진행): %v", err)
 		}
 		m.channelID = ""
 		m.messageID = ""
