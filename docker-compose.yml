@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: mcbot
     restart: unless-stopped
+    command: ["bot", "run"]
     env_file:
       - .env
     environment:

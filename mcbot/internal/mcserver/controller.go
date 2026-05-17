@@ -11,6 +11,7 @@ import (
 	"github.com/snowy/mcbot/internal/config"
 	"github.com/snowy/mcbot/internal/dockerctl"
 	"github.com/snowy/mcbot/internal/logutil"
+	"github.com/snowy/mcbot/internal/serverops"
 	"github.com/snowy/mcbot/internal/state"
 )
 
@@ -37,6 +38,11 @@ type StatusResult struct {
 }
 
 type StateChangeCallback func(newState state.ServerState)
+
+type ExternalStopIntentStore interface {
+	ClearStaleStopIntent(ctx context.Context, container string, now, lifecycleStartedAt time.Time) (bool, error)
+	ConsumeUnexpiredStopIntent(ctx context.Context, container string, now time.Time) (bool, error)
+}
 
 // ShutdownIntentGracePeriod is the maximum time to wait for the log watcher
 // to process shutdown intent after container stop is detected.
@@ -90,6 +96,8 @@ type Controller struct {
 	stateChangeEventCh   chan state.ServerState
 	stateChangeDropCount atomic.Uint64
 	shutdownComplete     atomic.Bool
+	runningLifecycleNanos atomic.Int64
+	externalStopIntent   ExternalStopIntentStore
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
@@ -114,13 +122,18 @@ func NewControllerWithLogger(cfg *config.Config, stateManager *state.Manager, lo
 	}
 
 	return &Controller{
-		cfg:             cfg,
-		stateManager:    stateManager,
-		readyPatterns:   patterns,
-		logMux:          logMux,
-		playerTracker:   playerTracker,
-		lifecycleLogger: logger,
+		cfg:                cfg,
+		stateManager:       stateManager,
+		readyPatterns:      patterns,
+		logMux:             logMux,
+		playerTracker:      playerTracker,
+		lifecycleLogger:    logger,
+		externalStopIntent: serverops.NewFileIntentStore(serverops.BotDataDir()),
 	}, nil
+}
+
+func (c *Controller) SetExternalStopIntentStore(store ExternalStopIntentStore) {
+	c.externalStopIntent = store
 }
 
 func (c *Controller) SetOnStateChange(callback StateChangeCallback) {
@@ -252,9 +265,9 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 				Success: false,
 				ErrorMessage: fmt.Sprintf(
 					"컨테이너 '%s'를 찾을 수 없습니다.\n\n"+
-						"[권장] Make를 사용하여 컨테이너를 생성해주세요:\n"+
-						"  make ensure-mc\n\n"+
-						"[대안] Docker Compose를 직접 사용하는 경우:\n"+
+						"[권장] canonical CLI로 서버를 시작해 컨테이너를 생성/시작해주세요:\n"+
+						"  mcbot server start\n\n"+
+						"[저수준 점검용] Docker Compose를 직접 사용하는 경우 canonical CLI/TOML bridge를 우회합니다:\n"+
 						"  • Docker Compose v2: docker compose create mc-server\n"+
 						"                      또는 docker compose up --no-start mc-server\n"+
 						"  • Docker Compose v1: docker-compose create mc-server\n"+
@@ -293,6 +306,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 			}
 			return
 		}
+		c.setRunningLifecycleStartedAt(startTime)
 
 		c.playerTracker.Clear()
 
@@ -341,7 +355,7 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 						}
 
 						readyDuration := time.Since(startTime)
-						c.applyStartupSuccess(readyDuration, loadSeconds)
+						c.applyStartupSuccess(readyDuration, loadSeconds, startTime)
 
 						logCancel()
 
@@ -502,6 +516,7 @@ func (c *Controller) SyncState(ctx context.Context) error {
 	currentState := c.stateManager.GetState()
 
 	if containerState.Exists && containerState.Running {
+		c.setRunningLifecycleStartedAt(containerState.StartedAt)
 		needsStartupSync := currentState == state.StateStopped ||
 			currentState == state.StateError ||
 			currentState == state.StateCrashed
@@ -594,7 +609,7 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 					}
 
 					readyDuration := time.Since(containerStartedAt)
-					c.applyStartupSuccess(readyDuration, loadSeconds)
+					c.applyStartupSuccess(readyDuration, loadSeconds, containerStartedAt)
 					logutil.Infof("[SYNC_WATCHER] 서버 준비 완료 (로딩: %.2fs, 총 소요: %v)", loadSeconds, readyDuration)
 					return
 				}
@@ -751,11 +766,43 @@ func (c *Controller) reconcileState(input reconcileInput) reconcileResult {
 	return reconcileResult{action: reconcileNoAction}
 }
 
-func (c *Controller) applyStartupSuccess(readyDuration time.Duration, loadSeconds float64) {
+func (c *Controller) applyStartupSuccess(readyDuration time.Duration, loadSeconds float64, lifecycleStartedAt time.Time) {
+	c.setRunningLifecycleStartedAt(lifecycleStartedAt)
+	c.clearStaleExternalStopIntent(context.Background(), lifecycleStartedAt)
 	c.stateManager.ClearFailureCandidate()
 	c.stateManager.SetRunning(readyDuration)
 	c.notifyStateChange(state.StateRunning)
 	c.lifecycleLogger.OnServerStarted(readyDuration, loadSeconds)
+}
+
+func (c *Controller) setRunningLifecycleStartedAt(startedAt time.Time) {
+	if startedAt.IsZero() {
+		c.runningLifecycleNanos.Store(0)
+		return
+	}
+	c.runningLifecycleNanos.Store(startedAt.UnixNano())
+}
+
+func (c *Controller) runningLifecycleStartedAt() time.Time {
+	nanos := c.runningLifecycleNanos.Load()
+	if nanos == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
+}
+
+func (c *Controller) clearStaleExternalStopIntent(ctx context.Context, lifecycleStartedAt time.Time) {
+	if c.externalStopIntent == nil || lifecycleStartedAt.IsZero() {
+		return
+	}
+	cleared, err := c.externalStopIntent.ClearStaleStopIntent(ctx, c.cfg.MCContainerName, time.Now(), lifecycleStartedAt)
+	if err != nil {
+		logutil.Debugf("[RUNTIME] stale external stop intent clear unavailable: %v", err)
+		return
+	}
+	if cleared {
+		logutil.Infof("[RUNTIME] 이전 외부 CLI 종료 의도를 무효화했습니다")
+	}
 }
 
 func (c *Controller) applyStartupFailure(reason string, err error) {
@@ -821,6 +868,7 @@ func (c *Controller) applyReconcileResult(result reconcileResult, reason string,
 		logutil.Infof("[RECONCILE] Transitioned to Stopped")
 
 	case reconcileTransitionToRunning:
+		c.clearStaleExternalStopIntent(context.Background(), c.runningLifecycleStartedAt())
 		c.stateManager.ClearFailureCandidate()
 		c.stateManager.SetRunning(result.readyDuration)
 		c.notifyStateChange(state.StateRunning)
@@ -976,6 +1024,24 @@ func (c *Controller) handleNormalShutdown(currentState state.ServerState, contai
 	c.shutdownIntentFromInside.Store(false)
 }
 
+func (c *Controller) hasShutdownIntent(ctx context.Context) bool {
+	if c.shutdownIntentFromInside.Load() {
+		return true
+	}
+	if c.externalStopIntent == nil {
+		return false
+	}
+	matched, err := c.externalStopIntent.ConsumeUnexpiredStopIntent(ctx, c.cfg.MCContainerName, time.Now())
+	if err != nil {
+		logutil.Debugf("[CONTAINER_WATCHER] external stop intent unavailable: %v", err)
+		return false
+	}
+	if matched {
+		logutil.Infof("[CONTAINER_WATCHER] 외부 CLI 종료 의도 감지")
+	}
+	return matched
+}
+
 func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-chan struct{}) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -1035,7 +1101,7 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 			}
 
 			if !containerState.Running {
-				if c.shutdownIntentFromInside.Load() {
+				if c.hasShutdownIntent(ctx) {
 					logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료 감지 (즉시) - 정상 종료로 처리")
 					c.handleNormalShutdown(currentState, containerState.Exists)
 					return
@@ -1057,7 +1123,7 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 
 				// ctx가 취소되었어도 상태 전이를 수행 (정책: 상태 일관성 보장)
 				// shutdownIntent 여부로 정상/비정상 종료 판별
-				if c.shutdownIntentFromInside.Load() {
+				if c.hasShutdownIntent(ctx) {
 					logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료 감지 (대기 후) - 정상 종료로 처리")
 					c.handleNormalShutdown(currentState, containerState.Exists)
 					return

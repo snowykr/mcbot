@@ -1,15 +1,53 @@
 MC_SERVICE=mc-server
 GO_DIR=mcbot
+MCBOT_CLI=cd $(GO_DIR) && go run ./cmd/mcbot
 
-.PHONY: up up-all up-mc ensure-mc down nuke go-deps go-build
+.PHONY: start stop status config-show config-get config-set config-init config-validate env-show env-get env-set env-unset env-init env-validate up up-all up-mc ensure-mc down nuke go-deps go-build logs
+
+start:
+	$(MCBOT_CLI) server start
+
+stop:
+	$(MCBOT_CLI) server stop
+
+status:
+	$(MCBOT_CLI) server status
+
+config-show:
+	$(MCBOT_CLI) config show
+
+config-get:
+	$(MCBOT_CLI) config get $(ARGS)
+
+config-set:
+	$(MCBOT_CLI) config set $(ARGS)
+
+config-init:
+	$(MCBOT_CLI) config init $(ARGS)
+
+config-validate:
+	$(MCBOT_CLI) config validate
+
+env-show:
+	$(MCBOT_CLI) env show
+
+env-get:
+	$(MCBOT_CLI) env get $(ARGS)
+
+env-set:
+	$(MCBOT_CLI) env set $(ARGS)
+
+env-unset:
+	$(MCBOT_CLI) env unset $(ARGS)
+
+env-init:
+	$(MCBOT_CLI) env init $(ARGS)
+
+env-validate:
+	$(MCBOT_CLI) env validate
 
 ensure-mc:
-	@if ! docker compose ps -a --format '{{.Service}}' | grep -q '^$(MC_SERVICE)$$'; then \
-		echo 'mc-server 컨테이너를 생성합니다...'; \
-		docker compose create $(MC_SERVICE); \
-	else \
-		echo 'mc-server 컨테이너가 이미 존재합니다.'; \
-	fi
+	$(MCBOT_CLI) server start
 
 go-deps:
 	cd $(GO_DIR) && go mod tidy
@@ -17,14 +55,15 @@ go-deps:
 go-build:
 	cd $(GO_DIR) && go build -o mcbot ./cmd/mcbot
 
-up: ensure-mc
+up:
 	docker compose up --build -d mcbot
 
-up-all: ensure-mc
-	docker compose up --build -d
+up-all:
+	docker compose up --build -d mcbot
+	$(MCBOT_CLI) server start
 
-up-mc: ensure-mc
-	docker compose up --build -d mc-server
+up-mc:
+	$(MCBOT_CLI) server start
 
 down:
 	docker compose down
