@@ -290,7 +290,69 @@ func parseLine(raw string) line {
 	if key == "" {
 		return line{raw: raw}
 	}
-	return line{raw: raw, key: key, value: strings.TrimSpace(value), entry: true}
+	return line{raw: raw, key: key, value: parseComposeEnvValue(value), entry: true}
+}
+
+func parseComposeEnvValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if value[0] == '"' || value[0] == '\'' {
+		if unquoted, ok := parseQuotedComposeEnvValue(value, value[0]); ok {
+			return unquoted
+		}
+		return value
+	}
+	return stripUnquotedComposeComment(value)
+}
+
+func parseQuotedComposeEnvValue(value string, quote byte) (string, bool) {
+	var b strings.Builder
+	for i := 1; i < len(value); i++ {
+		current := value[i]
+		if quote == '"' && current == '\\' && i+1 < len(value) {
+			next := value[i+1]
+			switch next {
+			case 'n':
+				b.WriteByte('\n')
+			case 'r':
+				b.WriteByte('\r')
+			case 't':
+				b.WriteByte('\t')
+			case '"', '\\':
+				b.WriteByte(next)
+			default:
+				b.WriteByte('\\')
+				b.WriteByte(next)
+			}
+			i++
+			continue
+		}
+		if quote == '\'' && current == '\\' && i+1 < len(value) && value[i+1] == '\'' {
+			b.WriteByte('\'')
+			i++
+			continue
+		}
+		if current == quote {
+			return b.String(), true
+		}
+		b.WriteByte(current)
+	}
+	return "", false
+}
+
+func stripUnquotedComposeComment(value string) string {
+	for i := 0; i < len(value); i++ {
+		if value[i] == '#' && i > 0 && isComposeWhitespace(value[i-1]) {
+			return strings.TrimSpace(value[:i])
+		}
+	}
+	return strings.TrimSpace(value)
+}
+
+func isComposeWhitespace(value byte) bool {
+	return value == ' ' || value == '\t'
 }
 
 func renderLines(lines []line) string {

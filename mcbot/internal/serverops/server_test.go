@@ -283,6 +283,23 @@ func TestServerCommandsPreferEnvFileContainerNameOverProcessEnv(t *testing.T) {
 	}
 }
 
+func TestServerCommandsUseComposeStyleEnvFileContainerName(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "shell-mc")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=file-mc # local default\n", "")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}}}
+
+	result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+
+	if result.Container != "file-mc" {
+		t.Fatalf("result.Container = %q, want file-mc", result.Container)
+	}
+	assertStringSlice(t, "inspect names", docker.inspects, []string{"file-mc"})
+}
+
 func TestServerCommandsUseDefaultContainerNameWhenUnset(t *testing.T) {
 	t.Setenv("MC_CONTAINER_NAME", "")
 	dir := t.TempDir()
@@ -696,6 +713,37 @@ func TestServerStopPrefersEnvFileStopTimeoutOverProcessEnv(t *testing.T) {
 	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\nSTOP_TIMEOUT_SECONDS=5\n", "")
 	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
 	now := time.Date(2026, 5, 22, 4, 5, 0, 0, time.UTC)
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{
+		{Exists: true, Running: true, Status: "running"},
+		{Exists: true, Running: false, Status: "exited"},
+	}}
+
+	_, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if len(docker.stops) != 1 || docker.stops[0] != 5 {
+		t.Fatalf("docker stop timeouts = %v, want [5]", docker.stops)
+	}
+	intent, found, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load stop intent failed: %v", err)
+	}
+	if !found {
+		t.Fatal("stop intent not found after Stop")
+	}
+	wantExpiresAt := now.Add(5*time.Second + StopIntentBuffer)
+	if !intent.ExpiresAt.Equal(wantExpiresAt) {
+		t.Fatalf("intent.ExpiresAt = %v, want %v", intent.ExpiresAt, wantExpiresAt)
+	}
+}
+
+func TestServerStopUsesComposeStyleEnvFileStopTimeout(t *testing.T) {
+	t.Setenv("STOP_TIMEOUT_SECONDS", "7")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\nSTOP_TIMEOUT_SECONDS=\"5\" # local timeout\n", "")
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	now := time.Date(2026, 5, 22, 4, 10, 0, 0, time.UTC)
 	docker := &fakeDocker{states: []*dockerctl.ContainerState{
 		{Exists: true, Running: true, Status: "running"},
 		{Exists: true, Running: false, Status: "exited"},

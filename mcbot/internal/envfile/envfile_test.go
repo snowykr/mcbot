@@ -117,6 +117,52 @@ func TestRejectsMcServerOwnedKeys(t *testing.T) {
 	}
 }
 
+func TestLoadParsesComposeStyleCommentsAndQuotes(t *testing.T) {
+	path := writeEnv(t, strings.Join([]string{
+		`MC_CONTAINER_NAME=mc-server # default container`,
+		`STOP_TIMEOUT_SECONDS="120" # quoted timeout`,
+		`RCON_PASSWORD='pa # ss' # quoted hash is literal`,
+		`RCON_HOST=mc-server#not-a-comment`,
+		`RCON_CMDS_STARTUP="say hi\nsay bye"`,
+		`EXTRA_DOCKER_ARGS="--label=a\#b"`,
+		`MCBOT_ROLE_NAME=operators   # trim comment whitespace`,
+		"",
+	}, "\n"))
+
+	file, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	want := map[string]string{
+		"MC_CONTAINER_NAME":    "mc-server",
+		"STOP_TIMEOUT_SECONDS": "120",
+		"RCON_PASSWORD":        "pa # ss",
+		"RCON_HOST":            "mc-server#not-a-comment",
+		"RCON_CMDS_STARTUP":    "say hi\nsay bye",
+		"EXTRA_DOCKER_ARGS":    `--label=a\#b`,
+		"MCBOT_ROLE_NAME":      "operators",
+	}
+	for key, expected := range want {
+		if file.Values[key] != expected {
+			t.Fatalf("Load value %s = %q, want %q", key, file.Values[key], expected)
+		}
+	}
+}
+
+func TestValidateAcceptsComposeStyleQuotedNumericAndBooleanValues(t *testing.T) {
+	path := writeEnv(t, strings.Join([]string{
+		`DISCORD_TOKEN="token"`,
+		`MCBOT_TRUSTED_GUILD_ID="123456789012345678"`,
+		`STOP_TIMEOUT_SECONDS="120" # local stop budget`,
+		`MCBOT_DEBUG="true" # debug`,
+		"",
+	}, "\n"))
+
+	if err := ValidateFile(path); err != nil {
+		t.Fatalf("ValidateFile failed for Compose-style .env values: %v", err)
+	}
+}
+
 func TestValidateAllowsEmptyContainerNameAsDefault(t *testing.T) {
 	path := writeEnv(t, "DISCORD_TOKEN=token\nMCBOT_TRUSTED_GUILD_ID=123456789012345678\nMC_CONTAINER_NAME=\n")
 
