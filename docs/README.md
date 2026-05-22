@@ -281,7 +281,7 @@ docker compose up -d mcbot
 | 명령어 | 설명 |
 |--------|------|
 | `make up` | Discord bot 컨테이너만 빌드 및 실행합니다. Minecraft 서버 컨테이너는 나중에 bot/CLI가 시작할 수 있는 준비 상태로 둡니다. |
-| `make up-all` | Discord bot 컨테이너를 실행한 뒤 Minecraft 서버를 시작합니다. |
+| `make up-all` | `mcbot server start`로 `mc-server.toml` 설정을 반영해 Minecraft 서버를 먼저 시작한 뒤 Discord bot 컨테이너를 실행합니다. |
 | `make up-mc` | Minecraft 서버만 시작합니다. 내부적으로 `mcbot server start`를 사용해 `mc-server.toml` 설정을 Compose 생성 환경에 반영합니다. |
 | `make down` | 모든 컨테이너 중지 및 제거 |
 | `make logs` | 실시간 로그 확인 (Ctrl+C로 종료) |

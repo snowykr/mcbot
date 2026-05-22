@@ -24,7 +24,6 @@ func TestMakeOperationalTargetsAreDeduplicated(t *testing.T) {
 	for _, want := range []string{
 		"up:",
 		"up-all:",
-		"docker compose up --build -d mcbot $(MC_SERVICE)",
 		"up-mc:",
 		"server start",
 		"stop:",
@@ -43,6 +42,14 @@ func TestMakeOperationalTargetsAreDeduplicated(t *testing.T) {
 	} {
 		assertContains(t, makefile, want)
 	}
+	upAll := makeTargetBody(t, makefile, "up-all")
+	assertContains(t, upAll, "$(MCBOT_CLI) server start")
+	assertContains(t, upAll, "docker compose up --build -d mcbot")
+	for _, line := range strings.Split(upAll, "\n") {
+		if strings.Contains(line, "docker compose up") && (strings.Contains(line, "$(MC_SERVICE)") || strings.Contains(line, "mc-server")) {
+			t.Fatalf("up-all should route mc-server through CLI/TOML bridge, got direct Compose startup line %q in body:\n%s", line, upAll)
+		}
+	}
 
 	for _, forbidden := range []string{
 		"start:",
@@ -55,6 +62,33 @@ func TestMakeOperationalTargetsAreDeduplicated(t *testing.T) {
 			t.Fatalf("Makefile still contains raw operational server behavior %q", forbidden)
 		}
 	}
+}
+
+func makeTargetBody(t *testing.T, makefile, target string) string {
+	t.Helper()
+	start := strings.Index(makefile, target+":\n")
+	if start < 0 {
+		t.Fatalf("Makefile missing target %s", target)
+	}
+	bodyStart := start + len(target+":\n")
+	bodyEnd := len(makefile)
+	for i := bodyStart; i < len(makefile); {
+		nextNewline := strings.IndexByte(makefile[i:], '\n')
+		if nextNewline < 0 {
+			break
+		}
+		lineEnd := i + nextNewline
+		nextLineStart := lineEnd + 1
+		if nextLineStart >= len(makefile) {
+			break
+		}
+		if makefile[nextLineStart] != '\t' && makefile[nextLineStart] != '\n' {
+			bodyEnd = nextLineStart
+			break
+		}
+		i = nextLineStart
+	}
+	return makefile[bodyStart:bodyEnd]
 }
 
 func TestCommittedMcServerConfigMatchesCodeDefaults(t *testing.T) {

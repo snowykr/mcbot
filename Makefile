@@ -62,7 +62,8 @@ up:
 	docker compose up --build -d mcbot
 
 up-all:
-	docker compose up --build -d mcbot $(MC_SERVICE)
+	$(MCBOT_CLI) server start
+	docker compose up --build -d mcbot
 
 up-mc:
 	$(MCBOT_CLI) server start
