@@ -217,6 +217,28 @@ func IsSecretKey(key string) bool {
 	return strings.Contains(upper, "TOKEN") || strings.Contains(upper, "PASSWORD") || strings.Contains(upper, "SECRET")
 }
 
+func ParseBoolString(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes", "on":
+		return true, nil
+	case "false", "0", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("must be a boolean (true/false, 1/0, yes/no, on/off)")
+	}
+}
+
+func CanonicalBoolString(value string) (string, error) {
+	parsed, err := ParseBoolString(value)
+	if err != nil {
+		return "", err
+	}
+	if parsed {
+		return "true", nil
+	}
+	return "false", nil
+}
+
 func parseFile(path string, strict bool) (File, error) {
 	file := File{Values: map[string]string{}}
 	data, err := os.Open(path)
@@ -380,12 +402,10 @@ func validatePort(key, value string) error {
 }
 
 func validateBool(key, value string) error {
-	switch value {
-	case "true", "1", "yes", "on", "false", "0", "no", "off":
-		return nil
-	default:
-		return fmt.Errorf("%s must be a boolean (true/false, 1/0, yes/no, on/off)", key)
+	if _, err := ParseBoolString(value); err != nil {
+		return fmt.Errorf("%s %v", key, err)
 	}
+	return nil
 }
 
 func atomicWrite(path string, data []byte) error {

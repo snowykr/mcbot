@@ -1,0 +1,15 @@
+[server]
+version = "1.20.1"
+type = "FABRIC"
+difficulty = "easy"
+memory = "14G"
+init_memory = "14G"
+motd = "SNOWY'S SERVER"
+view_distance = 8
+simulation_distance = 8
+
+[container]
+restart_policy = "no"
+port_publish = "25565:25565"
+uid = 1000
+gid = 1000

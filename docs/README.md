@@ -6,6 +6,7 @@
 
 - CLI is the canonical operational source of truth.
 - `mcbot bot run` starts the Discord bot runtime.
+- Guided onboarding starts with `mcbot setup` or `make setup`; direct `config ...` and `env ...` commands stay available for surgical edits and automation.
 - `mcbot server start|stop|status` do not require Discord credentials.
 - server commands do not require Discord credentials.
 - server status is Docker-derived.
@@ -94,7 +95,7 @@ cp .env.example .env
 
 `mc-server.toml`은 mc-server 관련 설정의 기준 파일입니다. `.env.example`은 봇/배포/비밀값만 다룹니다.
 
-기본 UID/GID는 기존 배포의 `./data` 볼륨 소유권과 호환되도록 1001입니다. 1000 등 다른 값으로 바꾸는 환경이라면 기존 `/data` 볼륨의 소유권도 함께 맞춰야 합니다.
+기본 UID/GID는 일반적인 첫 Linux 사용자와 맞는 `1000:1000`입니다. `mcbot setup config`는 가능하면 기존 `./data` 디렉터리 소유자 또는 현재 실행 사용자의 UID/GID를 감지해 추천합니다. 기존 Oracle Cloud/레거시 볼륨처럼 이미 `1001:1001`로 파일이 만들어진 환경에서는 setup의 `Custom UID/GID`에서 `1001:1001`을 선택하거나, 먼저 기존 `/data` 볼륨의 소유권을 새 UID/GID에 맞춰 조정하세요.
 
 `mc-server.toml` 값을 바꾼 뒤 운영 반영은 기본적으로 canonical CLI 경로인 `mcbot server stop` 후 `mcbot server start`를 사용하세요. 아래 raw Compose 재생성 명령은 canonical CLI/TOML bridge를 우회하는 low-level/manual escape hatch입니다. CLI가 아닌 Compose 동작 자체를 직접 점검해야 할 때만 사용하세요:
 
@@ -103,7 +104,47 @@ docker compose stop mc-server
 docker compose rm -sf mc-server && docker compose create mc-server
 ```
 
-### 2. CLI로 실행하고 운영하기
+### 2. 추천 시작 경로: guided setup
+
+처음 설치한 뒤에는 `setup` 흐름으로 시작하는 것이 권장됩니다. 이 경로는 `.env`와 `mc-server.toml`을 순서대로 안내하고, 직접 `config ...` 나 `env ...` 명령을 써서 한 파일씩 바꾸는 경로는 그대로 남겨 둡니다.
+
+```bash
+cd mcbot && ./mcbot setup
+cd mcbot && ./mcbot setup env
+cd mcbot && ./mcbot setup config
+
+# Make는 얇은 래퍼만 제공합니다.
+make setup
+make setup-env
+make setup-config
+```
+
+`setup`은 안내형 워크플로우입니다. `--yes`는 현재값이나 기본값만으로 진행 가능한 단계에서만 빠르게 통과합니다. 새 `mc-server.toml`의 UID/GID는 기존 `./data` 소유자, 현재 non-root 사용자, `1000:1000` fallback 순서로 자동 선택합니다. 기존 유효한 config가 있으면 그 값을 유지합니다. `DISCORD_TOKEN` 같은 필수 값이 없으면 config 단계 전에 검증 실패로 멈춥니다. `--force`는 setup에서도 허용되지만, 실제 프롬프트 입력이 필요한 경로가 비대화식이면 여전히 실패합니다. `--no-input`은 자동화용으로만 쓰고, 프롬프트가 필요해지는 순간 exit code 2로 중단됩니다. `--json`과 `--show-secrets`는 setup에서 지원하지 않습니다.
+
+`mcbot setup`은 터미널에서 섹션 단위로 다음 항목을 안내합니다:
+
+1. **Discord bot**: Discord token, trusted guild, embed channel
+2. **Runtime features**: bot runtime/RCON 기본값과 고급 RCON 설정
+3. **Minecraft server**: 버전, 서버 타입, 난이도, 메모리, MOTD, 고급 렌더/시뮬레이션 거리
+4. **Container behavior**: Docker restart policy, 포트 매핑, 고급 `container.uid`/`container.gid` ownership 선택
+5. **Review & write**: `.env`와 `mc-server.toml` 요약, 최종 쓰기 확인, 검증 결과 및 다음 실행 명령
+
+`mcbot setup config`만 실행하면 config 전용 흐름인 **Minecraft server**, **Container behavior**, 선택형 **Container ownership**, **Review & write**를 보여줍니다.
+
+TTY 터미널에서는 setup 헤더와 섹션이 ANSI 색상으로 강조됩니다. 파이프/파일 출력이나 `NO_COLOR=1` 환경에서는 색상을 끄고 순수 텍스트만 출력합니다.
+
+#### Restart policy 선택 기준
+
+| 값 | 추천 상황 | Discord bot/CLI start·stop과의 관계 |
+|----|-----------|--------------------------------------|
+| `no` | 기본 추천. 서버 시작/중지와 재시작 판단을 Discord 버튼/CLI가 소유해야 할 때 | Docker가 자동으로 다시 켜지지 않으므로 사용자가 누른 stop 의도와 충돌하지 않습니다. |
+| `on-failure` | 컨테이너 프로세스가 비정상 종료될 때 Docker가 즉시 살리길 원하는 고급 운영 | Docker가 bot보다 먼저 재시작할 수 있어 crash/log 감지가 덜 정확할 수 있습니다. 현재 기본 흐름에서는 bot-managed 복구와 섞어 쓰기보다 명시적으로 선택하세요. |
+| `unless-stopped` | 대부분 24/7로 켜두되, 수동 stop은 Docker daemon 재시작 뒤에도 유지하고 싶을 때 | Discord/CLI stop 뒤 Docker 정책은 대체로 정지를 유지하지만, 장애 복구는 Docker가 소유합니다. |
+| `always` | Docker가 항상 서버를 살려두는 상시 운영 | daemon 재시작 뒤 사용자가 꺼둔 서버도 다시 켜질 수 있어 Discord 버튼으로 끄는 UX와 가장 충돌하기 쉽습니다. |
+
+향후 Docker-managed restart(`on-failure`, `unless-stopped`)를 더 정교하게 지원하려면 bot runtime이 컨테이너 `StartedAt` 변경을 감지하고, log follow를 새 lifecycle 기준으로 다시 붙이며, Docker가 수행한 자동 재시작 이벤트를 bot 상태에 반영해야 합니다. 현재 기본 UX는 이 reconciliation이 없다는 전제로 `no`를 권장합니다.
+
+### 3. CLI로 실행하고 운영하기
 
 운영의 기준은 CLI입니다. Make는 편의 래퍼입니다.
 
@@ -151,7 +192,7 @@ cd mcbot && ./mcbot env init
 
 `config init`과 `env init`은 기존 파일을 덮어쓸 수 있으므로, 비대화식 경로에서는 `--yes` 또는 `--force`를 명시해야 합니다. `--no-input`이 켜진 prompt-capable 경로는 exit code 2로 실패합니다. `config ... --file <path>`와 `env ... --file <path>`를 사용하면 기본 경로 대신 다른 파일을 대상으로 실행할 수 있습니다. `--quiet`는 성공 메시지 같은 비필수 출력을 숨깁니다.
 
-`make start`, `make stop`, `make status`, `make config-validate`, `make env-validate`는 같은 CLI를 감싼 편의 래퍼입니다.
+`make setup`, `make setup-env`, `make setup-config`, `make up`, `make up-all`, `make up-mc`, `make stop`, `make status`, `make config-validate`, `make env-validate`는 같은 CLI/Compose 운영 경로를 감싼 편의 래퍼입니다.
 
 ### 3. 디스코드에서 사용
 
@@ -221,9 +262,11 @@ docker compose up -d mcbot
 
 | 명령어 | 설명 |
 |--------|------|
-| `make start` | `mcbot server start` |
 | `make stop` | `mcbot server stop` |
 | `make status` | `mcbot server status` |
+| `make setup` | `mcbot setup` |
+| `make setup-env` | `mcbot setup env` |
+| `make setup-config` | `mcbot setup config` |
 | `make config-show` | `mcbot config show` |
 | `make config-get` | `mcbot config get $(ARGS)` |
 | `make config-set` | `mcbot config set $(ARGS)` |
@@ -236,11 +279,13 @@ docker compose up -d mcbot
 | `make env-init` | `mcbot env init $(ARGS)` |
 | `make env-validate` | `mcbot env validate` |
 
-### 인프라 편의 명령어
+### 서버 실행 명령어
 
 | 명령어 | 설명 |
 |--------|------|
-| `make up` | mcbot 컨테이너만 빌드 및 실행 |
+| `make up` | Discord bot 컨테이너만 빌드 및 실행합니다. Minecraft 서버 컨테이너는 나중에 bot/CLI가 시작할 수 있는 준비 상태로 둡니다. |
+| `make up-all` | Discord bot 컨테이너를 실행한 뒤 Minecraft 서버를 시작합니다. |
+| `make up-mc` | Minecraft 서버만 시작합니다. 내부적으로 `mcbot server start`를 사용해 `mc-server.toml` 설정을 Compose 생성 환경에 반영합니다. |
 | `make down` | 모든 컨테이너 중지 및 제거 |
 | `make logs` | 실시간 로그 확인 (Ctrl+C로 종료) |
 
@@ -248,9 +293,6 @@ docker compose up -d mcbot
 
 | 명령어 | 설명 |
 |--------|------|
-| `make ensure-mc` | `mcbot server start` CLI 래퍼 |
-| `make up-all` | mcbot 컨테이너 실행 후 `mcbot server start` 호출 |
-| `make up-mc` | `mcbot server start` CLI 래퍼 |
 | `make nuke` | 모든 컨테이너, 볼륨, 네트워크 제거 (완전 초기화) |
 
 ### 개발 명령어
@@ -314,7 +356,7 @@ docker compose up -d mcbot
 
 ### Compose 서비스 이름과 컨테이너 이름
 
-`MC_CONTAINER_NAME`은 런타임 컨테이너의 이름만 바꿉니다. Compose의 서비스 키는 계속 `mc-server`이며, 이 이름을 기준으로 CLI와 Make 래퍼가 동작합니다. `docker compose create mc-server`와 `make ensure-mc`는 인프라 편의 명령일 뿐이고, 운영의 기준은 `mcbot server ...` 입니다.
+`MC_CONTAINER_NAME`은 런타임 컨테이너의 이름만 바꿉니다. Compose의 서비스 키는 계속 `mc-server`이며, 이 이름을 기준으로 CLI와 Make 래퍼가 동작합니다. Minecraft 서버만 켤 때는 `make up-mc`를 사용하고, 운영의 기준은 `mcbot server ...` 입니다.
 
 `RCON_HOST`의 기본값이 `mc-server`인 이유도 동일합니다. Compose 네트워크에서 서비스 DNS는 서비스 키로 고정되므로, 컨테이너 이름을 바꿔도 `mc-server`가 기본입니다.
 
@@ -412,7 +454,7 @@ RCON_CMDS_STARTUP=gamerule keepInventory true
 **컨테이너 미존재 (인프라 미준비)**:
 - 상태: `StateStopped`
 - `lastError`에 상세 메시지 기록
-- 사용자에게 canonical CLI 경로인 `mcbot server start` 안내
+- 사용자에게 canonical CLI 경로인 `mcbot server start` 또는 Make 래퍼 `make up-mc` 안내
 
 **실제 런타임 예외**:
 - 상태: `StateError`

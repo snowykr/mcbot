@@ -21,6 +21,24 @@ type Config struct {
 	Container ContainerConfig `json:"container" toml:"container"`
 }
 
+type InvalidFileError struct {
+	Err error
+}
+
+func (e *InvalidFileError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *InvalidFileError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 type ServerConfig struct {
 	Version            string `json:"version" toml:"version"`
 	Type               string `json:"type" toml:"type"`
@@ -54,8 +72,8 @@ func Defaults() Config {
 		Container: ContainerConfig{
 			RestartPolicy: "no",
 			PortPublish:   "25565:25565",
-			UID:           1001,
-			GID:           1001,
+			UID:           1000,
+			GID:           1000,
 		},
 	}
 }
@@ -86,13 +104,13 @@ func Load(path string) (Config, error) {
 	}
 	meta, err := toml.Decode(string(data), &cfg)
 	if err != nil {
-		return Config{}, fmt.Errorf("parse mc-server config: %w", err)
+		return Config{}, &InvalidFileError{Err: fmt.Errorf("parse mc-server config: %w", err)}
 	}
 	if err := validateDecodedKeys(meta); err != nil {
-		return Config{}, err
+		return Config{}, &InvalidFileError{Err: err}
 	}
 	if err := cfg.Validate(); err != nil {
-		return Config{}, err
+		return Config{}, &InvalidFileError{Err: err}
 	}
 	return cfg, nil
 }
@@ -147,6 +165,17 @@ func Set(path, key, value string) error {
 		return err
 	}
 	return Write(path, cfg)
+}
+
+// ApplyValue mutates cfg using the same key ownership and typed parsing rules as Set.
+func ApplyValue(cfg *Config, key, value string) error {
+	if cfg == nil {
+		return fmt.Errorf("mc-server config must not be nil")
+	}
+	if err := ValidateOwnedKey(key); err != nil {
+		return err
+	}
+	return cfg.set(key, value)
 }
 
 func Get(path, key string) (any, error) {

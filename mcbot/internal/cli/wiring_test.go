@@ -17,17 +17,24 @@ func TestRuntimeWiringUsesBotRunEntryPoint(t *testing.T) {
 	assertContains(t, compose, `command: ["bot", "run"]`)
 }
 
-func TestMakeOperationalTargetsDelegateToCLI(t *testing.T) {
+func TestMakeOperationalTargetsAreDeduplicated(t *testing.T) {
 	repo := repoRoot(t)
 	makefile := readRepoFile(t, repo, "Makefile")
 
 	for _, want := range []string{
-		"start:",
+		"up:",
+		"up-all:",
+		"up-mc:",
 		"server start",
 		"stop:",
 		"server stop",
 		"status:",
 		"server status",
+		"setup:",
+		"setup env",
+		"setup config",
+		"setup-env:",
+		"setup-config:",
 		"config-validate:",
 		"config validate",
 		"env-validate:",
@@ -37,6 +44,8 @@ func TestMakeOperationalTargetsDelegateToCLI(t *testing.T) {
 	}
 
 	for _, forbidden := range []string{
+		"start:",
+		"ensure" + "-mc:",
 		"docker compose create $(MC_SERVICE)",
 		"docker compose up --build -d mc-server",
 		"\tdocker compose up --build -d\n",
@@ -47,13 +56,63 @@ func TestMakeOperationalTargetsDelegateToCLI(t *testing.T) {
 	}
 }
 
+func TestDocsDescribeSetupWorkflow(t *testing.T) {
+	repo := repoRoot(t)
+	readme := readRepoFile(t, repo, "docs", "README.md")
+	testingDoc := readRepoFile(t, repo, "docs", "TESTING.md")
+	makefile := readRepoFile(t, repo, "Makefile")
+
+	for _, want := range []string{
+		"Guided onboarding starts with `mcbot setup` or `make setup`",
+		"mcbot setup",
+		"mcbot setup env",
+		"mcbot setup config",
+		"make setup",
+		"make setup-env",
+		"make setup-config",
+		"make up-all",
+		"make up-mc",
+		"direct `config ...` and `env ...` commands stay available",
+		"--yes",
+		"--force",
+		"--no-input",
+		"--json",
+		"--show-secrets",
+	} {
+		assertContains(t, readme, want)
+	}
+
+	for _, want := range []string{
+		"guided setup 문서와 래퍼 회귀",
+		"mcbot setup",
+		"mcbot --yes setup",
+		"mcbot --no-input setup",
+		"mcbot --force setup",
+		"setup에서는 둘 다 거부",
+	} {
+		assertContains(t, testingDoc, want)
+	}
+
+	for _, want := range []string{
+		"setup:",
+		"setup-env:",
+		"setup-config:",
+		"$(MCBOT_CLI) setup",
+		"$(MCBOT_CLI) setup env",
+		"$(MCBOT_CLI) setup config",
+	} {
+		assertContains(t, makefile, want)
+	}
+}
+
 func TestControllerMissingContainerGuidancePrefersCanonicalCLI(t *testing.T) {
 	repo := repoRoot(t)
 	controller := readRepoFile(t, repo, "mcbot", "internal", "mcserver", "controller.go")
 
 	assertContains(t, controller, "mcbot server start")
-	if strings.Contains(controller, "make ensure-mc") {
-		t.Fatal("controller missing-container guidance still recommends make ensure-mc")
+	deprecatedMakeTarget := "make " + "ensure-mc"
+	if strings.Contains(controller, deprecatedMakeTarget) {
+		t.Fatalf("controller missing-container guidance still recommends %s", deprecatedMakeTarget)
 	}
 }
 

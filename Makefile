@@ -2,16 +2,22 @@ MC_SERVICE=mc-server
 GO_DIR=mcbot
 MCBOT_CLI=cd $(GO_DIR) && go run ./cmd/mcbot
 
-.PHONY: start stop status config-show config-get config-set config-init config-validate env-show env-get env-set env-unset env-init env-validate up up-all up-mc ensure-mc down nuke go-deps go-build logs
-
-start:
-	$(MCBOT_CLI) server start
+.PHONY: stop status setup setup-env setup-config config-show config-get config-set config-init config-validate env-show env-get env-set env-unset env-init env-validate up up-all up-mc down nuke go-deps go-build logs
 
 stop:
 	$(MCBOT_CLI) server stop
 
 status:
 	$(MCBOT_CLI) server status
+
+setup:
+	$(MCBOT_CLI) setup
+
+setup-env:
+	$(MCBOT_CLI) setup env
+
+setup-config:
+	$(MCBOT_CLI) setup config
 
 config-show:
 	$(MCBOT_CLI) config show
@@ -45,9 +51,6 @@ env-init:
 
 env-validate:
 	$(MCBOT_CLI) env validate
-
-ensure-mc:
-	$(MCBOT_CLI) server start
 
 go-deps:
 	cd $(GO_DIR) && go mod tidy

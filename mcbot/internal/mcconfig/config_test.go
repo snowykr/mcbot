@@ -58,8 +58,8 @@ func TestGetShowValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
-	if value != 1001 {
-		t.Fatalf("container.uid = %v, want 1001", value)
+	if value != 1000 {
+		t.Fatalf("container.uid = %v, want 1000", value)
 	}
 	if err := ValidateFile(path); err != nil {
 		t.Fatalf("ValidateFile failed: %v", err)
@@ -121,8 +121,8 @@ func TestValidateLeavesFileUnchangedOnFailure(t *testing.T) {
 		"[container]",
 		`restart_policy = "no"`,
 		`port_publish = "25565:25565"`,
-		"uid = 1001",
-		"gid = 1001",
+		"uid = 1000",
+		"gid = 1000",
 	}, "\n") + "\n"
 	writeFile(t, path, contents)
 
