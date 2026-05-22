@@ -1,6 +1,6 @@
 [server]
 version = "1.20.1"
-type = "FABRIC"
+type = "FORGE"
 difficulty = "easy"
 memory = "14G"
 init_memory = "14G"

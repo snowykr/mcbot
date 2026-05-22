@@ -97,6 +97,7 @@ type Controller struct {
 	stateChangeDropCount  atomic.Uint64
 	shutdownComplete      atomic.Bool
 	runningLifecycleNanos atomic.Int64
+	externalStopIntentMu  sync.RWMutex
 	externalStopIntent    ExternalStopIntentStore
 }
 
@@ -133,7 +134,15 @@ func NewControllerWithLogger(cfg *config.Config, stateManager *state.Manager, lo
 }
 
 func (c *Controller) SetExternalStopIntentStore(store ExternalStopIntentStore) {
+	c.externalStopIntentMu.Lock()
+	defer c.externalStopIntentMu.Unlock()
 	c.externalStopIntent = store
+}
+
+func (c *Controller) getExternalStopIntentStore() ExternalStopIntentStore {
+	c.externalStopIntentMu.RLock()
+	defer c.externalStopIntentMu.RUnlock()
+	return c.externalStopIntent
 }
 
 func (c *Controller) SetOnStateChange(callback StateChangeCallback) {
@@ -792,10 +801,11 @@ func (c *Controller) runningLifecycleStartedAt() time.Time {
 }
 
 func (c *Controller) clearStaleExternalStopIntent(ctx context.Context, lifecycleStartedAt time.Time) {
-	if c.externalStopIntent == nil || lifecycleStartedAt.IsZero() {
+	store := c.getExternalStopIntentStore()
+	if store == nil || lifecycleStartedAt.IsZero() {
 		return
 	}
-	cleared, err := c.externalStopIntent.ClearStaleStopIntent(ctx, c.cfg.MCContainerName, time.Now(), lifecycleStartedAt)
+	cleared, err := store.ClearStaleStopIntent(ctx, c.cfg.MCContainerName, time.Now(), lifecycleStartedAt)
 	if err != nil {
 		logutil.Debugf("[RUNTIME] stale external stop intent clear unavailable: %v", err)
 		return
@@ -1028,10 +1038,11 @@ func (c *Controller) hasShutdownIntent(ctx context.Context) bool {
 	if c.shutdownIntentFromInside.Load() {
 		return true
 	}
-	if c.externalStopIntent == nil {
+	store := c.getExternalStopIntentStore()
+	if store == nil {
 		return false
 	}
-	matched, err := c.externalStopIntent.ConsumeUnexpiredStopIntent(ctx, c.cfg.MCContainerName, time.Now())
+	matched, err := store.ConsumeUnexpiredStopIntent(ctx, c.cfg.MCContainerName, time.Now())
 	if err != nil {
 		logutil.Debugf("[CONTAINER_WATCHER] external stop intent unavailable: %v", err)
 		return false

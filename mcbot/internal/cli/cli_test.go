@@ -253,13 +253,13 @@ func TestSetupNoInputContract(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
 	stdout, stderr, exitCode := runCLI(t, "--yes", "setup")
-	if exitCode != ExitValidation {
-		t.Fatalf("--yes setup exit code = %d, want %d", exitCode, ExitValidation)
+	if exitCode != ExitOperational {
+		t.Fatalf("--yes setup exit code = %d, want %d", exitCode, ExitOperational)
 	}
 	if stdout != "" {
 		t.Fatalf("--yes setup stdout = %q, want empty", stdout)
 	}
-	assertContains(t, stderr, "DISCORD_TOKEN is required")
+	assertContains(t, stderr, "repository root not found")
 	assertFileDoesNotExist(t, filepath.Join(tempDir, "mc-server.toml"))
 
 	stdinPath := filepath.Join(tempDir, "stdin.txt")
@@ -1586,6 +1586,38 @@ func TestConfigAndEnvDefaultsResolveRepoRootFromGoSubdir(t *testing.T) {
 	if got, want := stdout, "root-mc\n"; got != want {
 		t.Fatalf("env stdout = %q, want %q", got, want)
 	}
+}
+
+func TestConfigAndEnvDefaultsFailOutsideRepoRoot(t *testing.T) {
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd failed: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("Chdir failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	stdout, stderr, exitCode := runCLI(t, "config", "init")
+	if exitCode != ExitOperational {
+		t.Fatalf("config init exit code = %d, want %d", exitCode, ExitOperational)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	assertContains(t, stderr, "repository root not found")
+	assertFileDoesNotExist(t, filepath.Join(tempDir, "mc-server.toml"))
+
+	stdout, stderr, exitCode = runCLI(t, "env", "init")
+	if exitCode != ExitOperational {
+		t.Fatalf("env init exit code = %d, want %d", exitCode, ExitOperational)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	assertContains(t, stderr, "repository root not found")
+	assertFileDoesNotExist(t, filepath.Join(tempDir, ".env"))
 }
 
 func TestInitExistingFilesRequireForce(t *testing.T) {

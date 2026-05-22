@@ -23,11 +23,19 @@ type fakeDocker struct {
 	startErr     error
 	stopErr      error
 	inspectCalls int
+	inspectErrs  []error
 }
 
 func (d *fakeDocker) InspectContainer(_ context.Context, containerName string) (*dockerctl.ContainerState, error) {
 	d.inspectCalls++
 	d.inspects = append(d.inspects, containerName)
+	if len(d.inspectErrs) > 0 {
+		err := d.inspectErrs[0]
+		d.inspectErrs = d.inspectErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	if d.inspectErr != nil {
 		return nil, d.inspectErr
 	}
@@ -460,6 +468,24 @@ func TestServerStopClearsIntentWhenStopFailsAndContainerStillRuns(t *testing.T) 
 	}
 	if _, found, err := store.Load(context.Background()); err != nil || found {
 		t.Fatalf("stop intent found=%v err=%v, want cleared intent", found, err)
+	}
+}
+
+func TestServerStopClearsIntentWhenStopFailsAndInspectAfterStopFails(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "", "")
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	docker := &fakeDocker{
+		stopErr:     errors.New("stop failed"),
+		inspectErrs: []error{nil, errors.New("inspect failed")},
+		states:      []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}},
+	}
+
+	if _, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store}); err == nil {
+		t.Fatal("Stop succeeded, want error")
+	}
+	if _, found, err := store.Load(context.Background()); err != nil || found {
+		t.Fatalf("stop intent found=%v err=%v, want cleared intent after indeterminate stop failure", found, err)
 	}
 }
 

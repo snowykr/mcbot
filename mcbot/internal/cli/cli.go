@@ -665,17 +665,22 @@ func dispatchSetup(opts Options, args []string, stdin io.Reader, stdout, stderr 
 	prompter := NewStdlibPrompter(stdin, stdout)
 	out := NewOutput(stdout, stderr, opts)
 	if subcommand == "env" {
+		envPath, err := defaultEnvPath()
+		if err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return ExitCodeForError(err)
+		}
 		if !opts.Yes {
 			if err := out.SetupHeader("MCBot Setup", "Discord + Minecraft server wizard"); err != nil {
 				fmt.Fprintf(stderr, "%v\n", InternalError("%v", err))
 				return ExitInternal
 			}
 		}
-		if err := confirmSetupOverwrite(opts, prompter, "setup env", defaultEnvPath()); err != nil {
+		if err := confirmSetupOverwrite(opts, prompter, "setup env", envPath); err != nil {
 			fmt.Fprintf(stderr, "%v\n", err)
 			return ExitCodeForError(err)
 		}
-		if err := runSetupEnv(opts, prompter, out, defaultEnvPath()); err != nil {
+		if err := runSetupEnv(opts, prompter, out, envPath); err != nil {
 			fmt.Fprintf(stderr, "%v\n", err)
 			return ExitCodeForError(err)
 		}
@@ -683,17 +688,22 @@ func dispatchSetup(opts Options, args []string, stdin io.Reader, stdout, stderr 
 	}
 
 	if subcommand == "config" {
+		configPath, err := defaultConfigPath()
+		if err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return ExitCodeForError(err)
+		}
 		if !opts.Yes {
 			if err := out.SetupHeader("MCBot Setup", "Discord + Minecraft server wizard"); err != nil {
 				fmt.Fprintf(stderr, "%v\n", InternalError("%v", err))
 				return ExitInternal
 			}
 		}
-		if err := confirmSetupOverwrite(opts, prompter, "setup config", defaultConfigPath()); err != nil {
+		if err := confirmSetupOverwrite(opts, prompter, "setup config", configPath); err != nil {
 			fmt.Fprintf(stderr, "%v\n", err)
 			return ExitCodeForError(err)
 		}
-		cfg, err := collectSetupConfig(opts, prompter, out, defaultConfigPath(), setupConfigDisplay{
+		cfg, err := collectSetupConfig(opts, prompter, out, configPath, setupConfigDisplay{
 			header:            false,
 			sectionOffset:     0,
 			totalSections:     3,
@@ -708,7 +718,7 @@ func dispatchSetup(opts Options, args []string, stdin io.Reader, stdout, stderr 
 				fmt.Fprintf(stderr, "%v\n", InternalError("%v", err))
 				return ExitInternal
 			}
-			if err := out.SetupReview("", nil, defaultConfigPath(), cfg); err != nil {
+			if err := out.SetupReview("", nil, configPath, cfg); err != nil {
 				fmt.Fprintf(stderr, "%v\n", InternalError("%v", err))
 				return ExitInternal
 			}
@@ -722,11 +732,11 @@ func dispatchSetup(opts Options, args []string, stdin io.Reader, stdout, stderr 
 				return ExitUsage
 			}
 		}
-		if err := writeSetupConfig(out, defaultConfigPath(), cfg); err != nil {
+		if err := writeSetupConfig(out, configPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "%v\n", err)
 			return ExitCodeForError(err)
 		}
-		if err := out.SetupComplete("", defaultConfigPath()); err != nil {
+		if err := out.SetupComplete("", configPath); err != nil {
 			fmt.Fprintf(stderr, "%v\n", InternalError("%v", err))
 			return ExitInternal
 		}
@@ -762,8 +772,14 @@ func stdinAllowsPrompt(stdin io.Reader) bool {
 }
 
 func runSetupCombined(opts Options, prompter Prompter, out Output) error {
-	envPath := defaultEnvPath()
-	configPath := defaultConfigPath()
+	envPath, err := defaultEnvPath()
+	if err != nil {
+		return err
+	}
+	configPath, err := defaultConfigPath()
+	if err != nil {
+		return err
+	}
 	if !opts.Yes {
 		if err := out.SetupIntro(envPath, configPath); err != nil {
 			return InternalError("%v", err)
@@ -892,7 +908,11 @@ var setupConfigQuestions = []setupConfigQuestion{
 }
 
 func runSetupConfig(opts Options, prompter Prompter, stdout, stderr io.Writer) int {
-	path := defaultConfigPath()
+	path, err := defaultConfigPath()
+	if err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return ExitCodeForError(err)
+	}
 	out := NewOutput(stdout, stderr, opts)
 	cfg, err := collectSetupConfig(opts, prompter, out, path, setupConfigDisplay{
 		header:            !opts.Yes,
@@ -1217,6 +1237,11 @@ func setupCommandPath(subcommand string) string {
 func dispatchConfig(opts Options, subcommand string, args []string, stdout, stderr io.Writer) int {
 	localOpts, path, positionals, err := parseConfigFlags(opts, args)
 	if err != nil {
+		var cliErr *CLIError
+		if errors.As(err, &cliErr) {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return ExitCodeForError(err)
+		}
 		return usageError(stderr, "%v", err)
 	}
 	if localOpts.JSON && !SupportsJSON([]string{"config", subcommand}) {
@@ -1333,6 +1358,11 @@ func dispatchConfig(opts Options, subcommand string, args []string, stdout, stde
 func dispatchEnv(opts Options, subcommand string, args []string, stdout, stderr io.Writer) int {
 	localOpts, path, positionals, err := parseEnvFlags(opts, args)
 	if err != nil {
+		var cliErr *CLIError
+		if errors.As(err, &cliErr) {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return ExitCodeForError(err)
+		}
 		return usageError(stderr, "%v", err)
 	}
 	if localOpts.JSON && !SupportsJSON([]string{"env", subcommand}) {
@@ -1464,7 +1494,7 @@ func dispatchEnv(opts Options, subcommand string, args []string, stdout, stderr 
 }
 
 func parseEnvFlags(opts Options, args []string) (Options, string, []string, error) {
-	path := defaultEnvPath()
+	path := ""
 	positionals := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -1489,11 +1519,18 @@ func parseEnvFlags(opts Options, args []string) (Options, string, []string, erro
 			positionals = append(positionals, args[i])
 		}
 	}
+	if path == "" {
+		defaultPath, err := defaultEnvPath()
+		if err != nil {
+			return opts, "", nil, err
+		}
+		path = defaultPath
+	}
 	return opts, path, positionals, nil
 }
 
 func parseConfigFlags(opts Options, args []string) (Options, string, []string, error) {
-	path := defaultConfigPath()
+	path := ""
 	positionals := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -1515,6 +1552,13 @@ func parseConfigFlags(opts Options, args []string) (Options, string, []string, e
 			}
 			positionals = append(positionals, args[i])
 		}
+	}
+	if path == "" {
+		defaultPath, err := defaultConfigPath()
+		if err != nil {
+			return opts, "", nil, err
+		}
+		path = defaultPath
 	}
 	return opts, path, positionals, nil
 }
@@ -1546,26 +1590,34 @@ func requireExistingFile(path, label string) error {
 	return nil
 }
 
-func defaultConfigPath() string {
+func defaultConfigPath() (string, error) {
 	if configPathOverride != "" {
-		return configPathOverride
+		return configPathOverride, nil
 	}
-	return discoverDefaultPaths().ConfigFile
+	paths, err := discoverDefaultPaths()
+	if err != nil {
+		return "", err
+	}
+	return paths.ConfigFile, nil
 }
 
-func defaultEnvPath() string {
+func defaultEnvPath() (string, error) {
 	if envPathOverride != "" {
-		return envPathOverride
+		return envPathOverride, nil
 	}
-	return discoverDefaultPaths().EnvFile
+	paths, err := discoverDefaultPaths()
+	if err != nil {
+		return "", err
+	}
+	return paths.EnvFile, nil
 }
 
-func discoverDefaultPaths() composectl.Paths {
+func discoverDefaultPaths() (composectl.Paths, error) {
 	paths, err := composectl.DiscoverRepoRoot("")
-	if err == nil {
-		return paths
+	if err != nil {
+		return composectl.Paths{}, OperationalError("%v", err)
 	}
-	return composectl.DefaultPaths(".")
+	return paths, nil
 }
 
 func dispatchServer(opts Options, subcommand string, stdout, stderr io.Writer) int {

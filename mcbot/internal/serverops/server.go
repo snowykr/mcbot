@@ -123,6 +123,11 @@ func Stop(ctx context.Context, opts Options) (Result, error) {
 	}
 	if err := opts.Docker.StopContainer(ctx, container, stopTimeout); err != nil {
 		after, inspectErr := opts.Docker.InspectContainer(ctx, container)
+		if intentRecorded && inspectErr != nil {
+			if clearErr := opts.IntentStore.Clear(ctx); clearErr != nil {
+				return Result{}, fmt.Errorf("stop container %s failed: %w; inspect after stop failed: %v; additionally clear stop intent failed: %v", container, err, inspectErr, clearErr)
+			}
+		}
 		if intentRecorded && inspectErr == nil && after.Exists && after.Running {
 			if clearErr := opts.IntentStore.Clear(ctx); clearErr != nil {
 				return Result{}, fmt.Errorf("stop container %s failed: %w; additionally clear stop intent failed: %v", container, err, clearErr)

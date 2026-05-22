@@ -24,6 +24,7 @@ func TestMakeOperationalTargetsAreDeduplicated(t *testing.T) {
 	for _, want := range []string{
 		"up:",
 		"up-all:",
+		"docker compose up --build -d mcbot $(MC_SERVICE)",
 		"up-mc:",
 		"server start",
 		"stop:",
@@ -54,6 +55,13 @@ func TestMakeOperationalTargetsAreDeduplicated(t *testing.T) {
 			t.Fatalf("Makefile still contains raw operational server behavior %q", forbidden)
 		}
 	}
+}
+
+func TestCommittedMcServerConfigMatchesCodeDefaults(t *testing.T) {
+	repo := repoRoot(t)
+	config := readRepoFile(t, repo, "mc-server.toml")
+
+	assertContains(t, config, `type = "FORGE"`)
 }
 
 func TestDocsDescribeSetupWorkflow(t *testing.T) {
