@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -152,6 +153,203 @@ func TestServerStatusUsesDockerInspection(t *testing.T) {
 	}
 	if result.Service != composectl.MCServerService || !result.Exists || !result.Running || result.Status != "running" {
 		t.Fatalf("unexpected status: %+v", result)
+	}
+}
+
+func TestServerCommandsUseProcessEnvContainerNameWhenEnvFileOmitsIt(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "shell-mc")
+	tests := []struct {
+		name          string
+		run           func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result
+		states        []*dockerctl.ContainerState
+		wantInspects  []string
+		wantStarts    []string
+		wantStopNames []string
+	}{
+		{
+			name: "status",
+			run: func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result {
+				t.Helper()
+				result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+				if err != nil {
+					t.Fatalf("Status failed: %v", err)
+				}
+				return result
+			},
+			states:       []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}},
+			wantInspects: []string{"shell-mc"},
+		},
+		{
+			name: "start already running",
+			run: func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result {
+				t.Helper()
+				result, err := Start(context.Background(), Options{Paths: paths, Docker: docker, Compose: &fakeCompose{}})
+				if err != nil {
+					t.Fatalf("Start failed: %v", err)
+				}
+				return result
+			},
+			states:       []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}},
+			wantInspects: []string{"shell-mc"},
+		},
+		{
+			name: "stop running",
+			run: func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result {
+				t.Helper()
+				result, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: NewFileIntentStore(filepath.Join(paths.RepoRoot, "data", "mcbot"))})
+				if err != nil {
+					t.Fatalf("Stop failed: %v", err)
+				}
+				return result
+			},
+			states:        []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}, {Exists: true, Running: false, Status: "exited"}},
+			wantInspects:  []string{"shell-mc", "shell-mc"},
+			wantStopNames: []string{"shell-mc"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			paths := writeServerOpsFiles(t, dir, "", "")
+			docker := &fakeDocker{states: tt.states}
+
+			result := tt.run(t, paths, docker)
+
+			if result.Container != "shell-mc" {
+				t.Fatalf("result.Container = %q, want shell-mc", result.Container)
+			}
+			assertStringSlice(t, "inspect names", docker.inspects, tt.wantInspects)
+			assertStringSlice(t, "start names", docker.starts, tt.wantStarts)
+			assertStringSlice(t, "stop names", docker.stopNames, tt.wantStopNames)
+		})
+	}
+}
+
+func TestServerCommandsPreferEnvFileContainerNameOverProcessEnv(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "shell-mc")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=file-mc\n", "")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}}}
+
+	result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+
+	if result.Container != "file-mc" {
+		t.Fatalf("result.Container = %q, want file-mc", result.Container)
+	}
+	if len(docker.inspects) != 1 || docker.inspects[0] != "file-mc" {
+		t.Fatalf("inspect names = %v, want [file-mc]", docker.inspects)
+	}
+}
+
+func TestServerCommandsUseDefaultContainerNameWhenUnset(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "", "")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}}}
+
+	result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+
+	if result.Container != composectl.MCServerService {
+		t.Fatalf("result.Container = %q, want %q", result.Container, composectl.MCServerService)
+	}
+	assertStringSlice(t, "inspect names", docker.inspects, []string{composectl.MCServerService})
+}
+
+func TestServerCommandsUseDefaultContainerNameWhenEnvFileSetsEmptyName(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "shell-mc")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=\n", "")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}}}
+
+	result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+
+	if result.Container != composectl.MCServerService {
+		t.Fatalf("result.Container = %q, want %q", result.Container, composectl.MCServerService)
+	}
+	assertStringSlice(t, "inspect names", docker.inspects, []string{composectl.MCServerService})
+}
+
+func TestServerCommandsFailWhenEnvFileCannotBeReadForContainerName(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "shell-mc")
+	tests := []struct {
+		name   string
+		run    func(paths composectl.Paths, docker *fakeDocker) error
+		states []*dockerctl.ContainerState
+	}{
+		{
+			name: "status",
+			run: func(paths composectl.Paths, docker *fakeDocker) error {
+				_, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+				return err
+			},
+			states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}},
+		},
+		{
+			name: "start",
+			run: func(paths composectl.Paths, docker *fakeDocker) error {
+				_, err := Start(context.Background(), Options{Paths: paths, Docker: docker, Compose: &fakeCompose{}})
+				return err
+			},
+			states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}},
+		},
+		{
+			name: "stop",
+			run: func(paths composectl.Paths, docker *fakeDocker) error {
+				_, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: NewFileIntentStore(filepath.Join(paths.RepoRoot, "data", "mcbot"))})
+				return err
+			},
+			states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}, {Exists: true, Running: false, Status: "exited"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=file-mc\n", "")
+			badEnvPath := filepath.Join(dir, "env-as-directory")
+			if err := os.Mkdir(badEnvPath, 0o700); err != nil {
+				t.Fatalf("mkdir bad env path failed: %v", err)
+			}
+			paths.EnvFile = badEnvPath
+			docker := &fakeDocker{states: tt.states}
+
+			err := tt.run(paths, docker)
+
+			if err == nil {
+				t.Fatal("command succeeded, want env file read error")
+			}
+			if !strings.Contains(err.Error(), "env file") {
+				t.Fatalf("error = %v, want env file read error", err)
+			}
+			if len(docker.inspects) != 0 {
+				t.Fatalf("inspect names = %v, want no Docker operation after env read error", docker.inspects)
+			}
+			if len(docker.starts) != 0 || len(docker.stopNames) != 0 {
+				t.Fatalf("docker mutated state despite env read error: starts=%v stops=%v", docker.starts, docker.stopNames)
+			}
+		})
+	}
+}
+
+func assertStringSlice(t *testing.T, label string, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s = %v, want %v", label, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s[%d] = %q, want %q (full %s = %v)", label, i, got[i], want[i], label, got)
+		}
 	}
 }
 

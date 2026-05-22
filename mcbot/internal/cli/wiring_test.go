@@ -127,7 +127,7 @@ func TestDocsDescribeCLIFirstWorkflow(t *testing.T) {
 		"mcbot server start",
 		"mcbot server stop",
 		"mcbot server status",
-		"server commands do not require Discord credentials",
+		"do not require Discord credentials",
 		"server status is Docker-derived",
 		"mc-server.toml",
 		"***MASKED***",

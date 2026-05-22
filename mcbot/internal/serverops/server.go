@@ -3,6 +3,7 @@ package serverops
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"time"
 
@@ -63,7 +64,10 @@ func Start(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, err
 	}
 	service := composectl.MCServerService
-	container := runtimeContainerName(opts.Paths)
+	container, err := runtimeContainerName(opts.Paths)
+	if err != nil {
+		return Result{}, err
+	}
 
 	state, err := opts.Docker.InspectContainer(ctx, container)
 	if err != nil {
@@ -97,7 +101,10 @@ func Stop(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, err
 	}
 	service := composectl.MCServerService
-	container := runtimeContainerName(opts.Paths)
+	container, err := runtimeContainerName(opts.Paths)
+	if err != nil {
+		return Result{}, err
+	}
 	state, err := opts.Docker.InspectContainer(ctx, container)
 	if err != nil {
 		return Result{}, fmt.Errorf("inspect container %s: %w", container, err)
@@ -133,7 +140,10 @@ func Status(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	container := runtimeContainerName(opts.Paths)
+	container, err := runtimeContainerName(opts.Paths)
+	if err != nil {
+		return Result{}, err
+	}
 	state, err := opts.Docker.InspectContainer(ctx, container)
 	if err != nil {
 		return Result{}, fmt.Errorf("inspect container %s: %w", container, err)
@@ -185,14 +195,21 @@ func statusResult(service, container string, state *dockerctl.ContainerState, me
 	return result
 }
 
-func runtimeContainerName(paths composectl.Paths) string {
+func runtimeContainerName(paths composectl.Paths) (string, error) {
 	env, err := envfile.Load(paths.EnvFile)
-	if err == nil {
-		if name := env.Values["MC_CONTAINER_NAME"]; name != "" {
-			return name
-		}
+	if err != nil {
+		return "", fmt.Errorf("load env file for container name: %w", err)
 	}
-	return composectl.MCServerService
+	if name, ok := env.Values["MC_CONTAINER_NAME"]; ok {
+		if name != "" {
+			return name, nil
+		}
+		return composectl.MCServerService, nil
+	}
+	if name := os.Getenv("MC_CONTAINER_NAME"); name != "" {
+		return name, nil
+	}
+	return composectl.MCServerService, nil
 }
 
 func ensureProvisionedForStart(ctx context.Context, opts Options, service string, state *dockerctl.ContainerState) (bool, error) {

@@ -8,7 +8,6 @@
 - `mcbot bot run` starts the Discord bot runtime.
 - Guided onboarding starts with `mcbot setup` or `make setup`; direct `config ...` and `env ...` commands stay available for surgical edits and automation.
 - `mcbot server start|stop|status` do not require Discord credentials.
-- server commands do not require Discord credentials.
 - server status is Docker-derived.
 - Secret values are masked by default, and `--show-secrets` only applies to `env show|get`.
 - `--no-input` makes prompt-capable paths fail with exit code 2.
@@ -183,8 +182,6 @@ cd mcbot && ./mcbot env init
 `mcbot server start|stop|status`는 Discord 비밀값이 없어도 동작합니다. `server status`는 Docker inspection만 읽습니다. 외부 CLI stop과 실행 중인 봇은 의도적으로 공존할 수 있고, CLI는 operator-intent 파일로 false crash recovery를 막습니다.
 
 `mcbot config set`과 `mcbot env set`도 같은 CLI 계약의 일부입니다.
-
-`mcbot server start|stop|status`는 Discord credentials를 요구하지 않습니다. does not require Discord credentials.
 
 전역 옵션은 항상 명령 앞에 둡니다. 형식은 `mcbot [global options] <command> [args]` 입니다.
 
