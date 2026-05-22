@@ -184,3 +184,36 @@ func assertNotContains(t *testing.T, got, want string) {
 		t.Fatalf("expected %q not to contain %q", got, want)
 	}
 }
+
+func TestSetCanReplaceExistingFileRepeatedlyPreservesLatestContents(t *testing.T) {
+	path := writeEnv(t, "DISCORD_TOKEN=token\nMCBOT_TRUSTED_GUILD_ID=123456789012345678\nMC_CONTAINER_NAME=first\n")
+
+	if err := Set(path, "MC_CONTAINER_NAME", "second"); err != nil {
+		t.Fatalf("Set MC_CONTAINER_NAME failed: %v", err)
+	}
+	if err := Set(path, "STOP_TIMEOUT_SECONDS", "9"); err != nil {
+		t.Fatalf("Set STOP_TIMEOUT_SECONDS failed: %v", err)
+	}
+
+	got := readEnv(t, path)
+	assertContains(t, got, "DISCORD_TOKEN=token")
+	assertContains(t, got, "MCBOT_TRUSTED_GUILD_ID=123456789012345678")
+	assertContains(t, got, "MC_CONTAINER_NAME=second")
+	assertContains(t, got, "STOP_TIMEOUT_SECONDS=9")
+	assertNotContains(t, got, "MC_CONTAINER_NAME=first")
+	if err := ValidateFile(path); err != nil {
+		t.Fatalf("ValidateFile failed: %v", err)
+	}
+	assertNoMatches(t, filepath.Join(filepath.Dir(path), ".env-*.tmp"))
+}
+
+func assertNoMatches(t *testing.T, pattern string) {
+	t.Helper()
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatalf("Glob(%q) failed: %v", pattern, err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("unexpected matches for %q: %v", pattern, matches)
+	}
+}

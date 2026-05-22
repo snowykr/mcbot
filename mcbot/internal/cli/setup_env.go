@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/snowy/mcbot/internal/atomicfile"
 	"github.com/snowy/mcbot/internal/envfile"
 	"github.com/snowy/mcbot/internal/mcconfig"
 )
@@ -287,7 +288,7 @@ func atomicReplaceSetupEnv(path string, data []byte, mode os.FileMode) error {
 	if err := tempFile.Close(); err != nil {
 		return fmt.Errorf("close env temp file: %w", err)
 	}
-	if err := os.Rename(tempPath, path); err != nil {
+	if err := atomicfile.Replace(tempPath, path); err != nil {
 		return fmt.Errorf("rename env temp file: %w", err)
 	}
 	if dirFile, err := os.Open(dir); err == nil {

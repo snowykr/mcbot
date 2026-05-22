@@ -225,3 +225,46 @@ func assertFileContent(t *testing.T, path, want string) {
 		t.Fatalf("%s =\n%s\nwant=\n%s", path, got, want)
 	}
 }
+
+func TestWriteCanReplaceExistingFileRepeatedlyPreservesLatestContents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mc-server.toml")
+	first := Defaults()
+	first.Server.MOTD = "FIRST"
+	second := Defaults()
+	second.Server.MOTD = "SECOND"
+	second.Container.UID = 1234
+
+	if err := Write(path, first); err != nil {
+		t.Fatalf("Write(first) failed: %v", err)
+	}
+	if err := Write(path, second); err != nil {
+		t.Fatalf("Write(second) failed: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if loaded.Server.MOTD != second.Server.MOTD || loaded.Container.UID != second.Container.UID {
+		t.Fatalf("loaded config = %+v, want %+v", loaded, second)
+	}
+	got := readFile(t, path)
+	if got != Render(second) {
+		t.Fatalf("config file =\n%s\nwant=\n%s", got, Render(second))
+	}
+	if strings.Contains(got, "FIRST") {
+		t.Fatalf("config file still contains stale MOTD: %q", got)
+	}
+	assertNoMatches(t, filepath.Join(filepath.Dir(path), ".mc-server-*.toml.tmp"))
+}
+
+func assertNoMatches(t *testing.T, pattern string) {
+	t.Helper()
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatalf("Glob(%q) failed: %v", pattern, err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("unexpected matches for %q: %v", pattern, matches)
+	}
+}

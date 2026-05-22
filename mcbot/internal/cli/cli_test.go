@@ -1967,3 +1967,44 @@ func (r *fakeServerRunner) Stop(_ context.Context) (serverops.Result, error) {
 func (r *fakeServerRunner) Status(_ context.Context) (serverops.Result, error) {
 	return r.status, r.err
 }
+
+func TestCommitSetupEnvStageCanReplaceExistingEnvRepeatedlyPreservesLatestContents(t *testing.T) {
+	envDir := t.TempDir()
+	path := filepath.Join(envDir, ".env")
+	if err := os.WriteFile(path, []byte("DISCORD_TOKEN=initial-token\nMCBOT_TRUSTED_GUILD_ID=123456789012345678\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile initial env failed: %v", err)
+	}
+	stageDir := t.TempDir()
+	stagedPath := filepath.Join(stageDir, ".env")
+
+	first := "DISCORD_TOKEN=first-token\nMCBOT_TRUSTED_GUILD_ID=123456789012345678\n"
+	if err := os.WriteFile(stagedPath, []byte(first), 0o600); err != nil {
+		t.Fatalf("WriteFile first staged env failed: %v", err)
+	}
+	if err := commitSetupEnvStage(stagedPath, path); err != nil {
+		t.Fatalf("commitSetupEnvStage(first) failed: %v", err)
+	}
+
+	second := "DISCORD_TOKEN=second-token\nMCBOT_TRUSTED_GUILD_ID=123456789012345678\nMC_CONTAINER_NAME=second-container\n"
+	if err := os.WriteFile(stagedPath, []byte(second), 0o600); err != nil {
+		t.Fatalf("WriteFile second staged env failed: %v", err)
+	}
+	if err := commitSetupEnvStage(stagedPath, path); err != nil {
+		t.Fatalf("commitSetupEnvStage(second) failed: %v", err)
+	}
+
+	got := readTestFile(t, path)
+	assertContains(t, got, "DISCORD_TOKEN=second-token")
+	assertContains(t, got, "MC_CONTAINER_NAME=second-container")
+	assertNotContains(t, got, "first-token")
+	if err := envfile.ValidateFile(path); err != nil {
+		t.Fatalf("ValidateFile failed: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(envDir, ".env-*.tmp"))
+	if err != nil {
+		t.Fatalf("Glob env temp files failed: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("env temp files remain after commits: %v", matches)
+	}
+}

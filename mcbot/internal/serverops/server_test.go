@@ -572,3 +572,90 @@ func writeServerOpsFiles(t *testing.T, dir, envContents, configContents string) 
 	}
 	return paths
 }
+
+func TestServerStopUsesProcessEnvStopTimeoutWhenEnvFileOmitsIt(t *testing.T) {
+	t.Setenv("STOP_TIMEOUT_SECONDS", "7")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\n", "")
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	now := time.Date(2026, 5, 22, 4, 0, 0, 0, time.UTC)
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{
+		{Exists: true, Running: true, Status: "running"},
+		{Exists: true, Running: false, Status: "exited"},
+	}}
+
+	result, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if result.Container != "snowy-mc" {
+		t.Fatalf("result.Container = %q, want snowy-mc", result.Container)
+	}
+	if len(docker.stops) != 1 || docker.stops[0] != 7 {
+		t.Fatalf("docker stop timeouts = %v, want [7]", docker.stops)
+	}
+	intent, found, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load stop intent failed: %v", err)
+	}
+	if !found {
+		t.Fatal("stop intent not found after Stop")
+	}
+	wantExpiresAt := now.Add(7*time.Second + StopIntentBuffer)
+	if !intent.ExpiresAt.Equal(wantExpiresAt) {
+		t.Fatalf("intent.ExpiresAt = %v, want %v", intent.ExpiresAt, wantExpiresAt)
+	}
+}
+
+func TestServerStopPrefersEnvFileStopTimeoutOverProcessEnv(t *testing.T) {
+	t.Setenv("STOP_TIMEOUT_SECONDS", "7")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\nSTOP_TIMEOUT_SECONDS=5\n", "")
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	now := time.Date(2026, 5, 22, 4, 5, 0, 0, time.UTC)
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{
+		{Exists: true, Running: true, Status: "running"},
+		{Exists: true, Running: false, Status: "exited"},
+	}}
+
+	_, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if len(docker.stops) != 1 || docker.stops[0] != 5 {
+		t.Fatalf("docker stop timeouts = %v, want [5]", docker.stops)
+	}
+	intent, found, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load stop intent failed: %v", err)
+	}
+	if !found {
+		t.Fatal("stop intent not found after Stop")
+	}
+	wantExpiresAt := now.Add(5*time.Second + StopIntentBuffer)
+	if !intent.ExpiresAt.Equal(wantExpiresAt) {
+		t.Fatalf("intent.ExpiresAt = %v, want %v", intent.ExpiresAt, wantExpiresAt)
+	}
+}
+
+func TestServerStopDefaultsInvalidProcessEnvStopTimeout(t *testing.T) {
+	for _, value := range []string{"abc", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("STOP_TIMEOUT_SECONDS", value)
+			dir := t.TempDir()
+			paths := writeServerOpsFiles(t, dir, "", "")
+			docker := &fakeDocker{states: []*dockerctl.ContainerState{
+				{Exists: true, Running: true, Status: "running"},
+				{Exists: true, Running: false, Status: "exited"},
+			}}
+
+			_, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))})
+			if err != nil {
+				t.Fatalf("Stop failed: %v", err)
+			}
+			if len(docker.stops) != 1 || docker.stops[0] != defaultStopTimeoutSeconds {
+				t.Fatalf("docker stop timeouts = %v, want [%d]", docker.stops, defaultStopTimeoutSeconds)
+			}
+		})
+	}
+}

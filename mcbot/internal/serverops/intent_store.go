@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/snowy/mcbot/internal/atomicfile"
 )
 
 const (
@@ -85,7 +87,7 @@ func (s FileIntentStore) WriteStopIntent(_ context.Context, intent StopIntent) e
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close operator intent temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, s.Path); err != nil {
+	if err := atomicfile.Replace(tmpPath, s.Path); err != nil {
 		return fmt.Errorf("replace operator intent file: %w", err)
 	}
 	if dir, err := os.Open(filepath.Dir(s.Path)); err == nil {

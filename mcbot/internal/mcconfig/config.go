@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/snowy/mcbot/internal/atomicfile"
 )
 
 const DefaultPath = "mc-server.toml"
@@ -393,7 +395,7 @@ func atomicWrite(path string, data []byte) error {
 	if err := tempFile.Close(); err != nil {
 		return fmt.Errorf("close mc-server config temp file: %w", err)
 	}
-	if err := os.Rename(tempPath, path); err != nil {
+	if err := atomicfile.Replace(tempPath, path); err != nil {
 		return fmt.Errorf("replace mc-server config: %w", err)
 	}
 	if dirFile, err := os.Open(dir); err == nil {

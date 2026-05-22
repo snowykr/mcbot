@@ -228,10 +228,15 @@ func ensureProvisionedForStart(ctx context.Context, opts Options, service string
 
 func stopTimeoutSeconds(paths composectl.Paths) int {
 	env, err := envfile.Load(paths.EnvFile)
-	if err != nil {
-		return defaultStopTimeoutSeconds
+	if err == nil {
+		if value, ok := env.Values["STOP_TIMEOUT_SECONDS"]; ok {
+			return parseStopTimeoutSeconds(value)
+		}
 	}
-	value := env.Values["STOP_TIMEOUT_SECONDS"]
+	return parseStopTimeoutSeconds(os.Getenv("STOP_TIMEOUT_SECONDS"))
+}
+
+func parseStopTimeoutSeconds(value string) int {
 	if value == "" {
 		return defaultStopTimeoutSeconds
 	}

@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/snowy/mcbot/internal/atomicfile"
 )
 
 const (
@@ -431,7 +433,7 @@ func atomicWrite(path string, data []byte) error {
 	if err := tempFile.Close(); err != nil {
 		return fmt.Errorf("close env temp file: %w", err)
 	}
-	if err := os.Rename(tempPath, path); err != nil {
+	if err := atomicfile.Replace(tempPath, path); err != nil {
 		return fmt.Errorf("replace env file: %w", err)
 	}
 	if dirFile, err := os.Open(dir); err == nil {
