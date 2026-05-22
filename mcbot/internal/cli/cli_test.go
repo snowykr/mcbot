@@ -1284,6 +1284,20 @@ func TestServerCommandJSONOutput(t *testing.T) {
 	}
 }
 
+func TestServerCommandPlaintextPrintsWarningsToStderr(t *testing.T) {
+	server := &fakeServerRunner{stop: serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited", Message: "server stopped", Warnings: []string{"stop intent not recorded: permission denied"}}}
+	defer SetServerRunnerForTest(server)()
+
+	stdout, stderr, exitCode := runCLI(t, "server", "stop")
+	if exitCode != ExitOK {
+		t.Fatalf("exit code = %d, want %d", exitCode, ExitOK)
+	}
+	if stdout != "server stopped\n" {
+		t.Fatalf("stdout = %q, want server stopped", stdout)
+	}
+	assertContains(t, stderr, "warning: stop intent not recorded: permission denied")
+}
+
 func TestServerCommandExitCode4OnDockerFailure(t *testing.T) {
 	server := &fakeServerRunner{err: errors.New("docker inspect failed")}
 	defer SetServerRunnerForTest(server)()

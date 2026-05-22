@@ -47,15 +47,16 @@ type Options struct {
 }
 
 type Result struct {
-	Service   string `json:"service"`
-	Exists    bool   `json:"exists"`
-	Running   bool   `json:"running"`
-	Status    string `json:"status"`
-	Message   string `json:"-"`
-	Created   bool   `json:"-"`
-	Started   bool   `json:"-"`
-	Stopped   bool   `json:"-"`
-	Container string `json:"-"`
+	Service   string   `json:"service"`
+	Exists    bool     `json:"exists"`
+	Running   bool     `json:"running"`
+	Status    string   `json:"status"`
+	Message   string   `json:"-"`
+	Created   bool     `json:"-"`
+	Started   bool     `json:"-"`
+	Stopped   bool     `json:"-"`
+	Container string   `json:"-"`
+	Warnings  []string `json:"warnings,omitempty"`
 }
 
 func Start(ctx context.Context, opts Options) (Result, error) {
@@ -114,12 +115,15 @@ func Stop(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	stopTimeout := stopTimeoutSeconds(opts.Paths)
+	intentRecorded := true
+	var intentWarning string
 	if err := opts.IntentStore.WriteStopIntent(ctx, NewStopIntent(service, container, opts.Now(), stopTimeout)); err != nil {
-		return Result{}, err
+		intentRecorded = false
+		intentWarning = fmt.Sprintf("stop intent not recorded: %v", err)
 	}
 	if err := opts.Docker.StopContainer(ctx, container, stopTimeout); err != nil {
 		after, inspectErr := opts.Docker.InspectContainer(ctx, container)
-		if inspectErr == nil && after.Exists && after.Running {
+		if intentRecorded && inspectErr == nil && after.Exists && after.Running {
 			if clearErr := opts.IntentStore.Clear(ctx); clearErr != nil {
 				return Result{}, fmt.Errorf("stop container %s failed: %w; additionally clear stop intent failed: %v", container, err, clearErr)
 			}
@@ -132,6 +136,9 @@ func Stop(ctx context.Context, opts Options) (Result, error) {
 	}
 	result := statusResult(service, container, after, "server stopped")
 	result.Stopped = true
+	if intentWarning != "" {
+		result.Warnings = append(result.Warnings, intentWarning)
+	}
 	return result, nil
 }
 

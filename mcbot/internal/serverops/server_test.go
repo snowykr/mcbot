@@ -52,6 +52,36 @@ func (d *fakeDocker) StopContainer(_ context.Context, containerName string, time
 	return d.stopErr
 }
 
+type failingIntentStore struct {
+	writeErr error
+	clears   int
+}
+
+func (s *failingIntentStore) WriteStopIntent(context.Context, StopIntent) error {
+	return s.writeErr
+}
+
+func (s *failingIntentStore) Clear(context.Context) error {
+	s.clears++
+	return nil
+}
+
+func (s *failingIntentStore) Load(context.Context) (StopIntent, bool, error) {
+	return StopIntent{}, false, nil
+}
+
+func (s *failingIntentStore) ClearStaleStopIntent(context.Context, string, time.Time, time.Time) (bool, error) {
+	return false, nil
+}
+
+func (s *failingIntentStore) HasUnexpiredStopIntent(context.Context, string, time.Time) (bool, error) {
+	return false, nil
+}
+
+func (s *failingIntentStore) ConsumeUnexpiredStopIntent(context.Context, string, time.Time) (bool, error) {
+	return false, nil
+}
+
 type fakeCompose struct {
 	calls int
 	env   map[string]string
@@ -386,6 +416,33 @@ func TestCliStopDoesNotTriggerFalseCrashRecovery(t *testing.T) {
 	}
 	if matched {
 		t.Fatal("CLI stop intent matched more than once after bot-side observation")
+	}
+}
+
+func TestServerStopContinuesWhenStopIntentCannotBeRecorded(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "", "")
+	store := &failingIntentStore{writeErr: errors.New("permission denied")}
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{
+		{Exists: true, Running: true, Status: "running"},
+		{Exists: true, Running: false, Status: "exited"},
+	}}
+
+	result, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store})
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if len(docker.stops) != 1 || docker.stops[0] != defaultStopTimeoutSeconds {
+		t.Fatalf("docker stop timeouts = %v, want [%d]", docker.stops, defaultStopTimeoutSeconds)
+	}
+	if !result.Stopped || result.Message != "server stopped" {
+		t.Fatalf("unexpected result after stop: %+v", result)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "stop intent not recorded") || !strings.Contains(result.Warnings[0], "permission denied") {
+		t.Fatalf("warnings = %v, want stop intent warning with cause", result.Warnings)
+	}
+	if store.clears != 0 {
+		t.Fatalf("intent clears = %d, want 0 because intent was never recorded", store.clears)
 	}
 }
 

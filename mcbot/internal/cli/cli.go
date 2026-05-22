@@ -1585,6 +1585,12 @@ func dispatchServer(opts Options, subcommand string, stdout, stderr io.Writer) i
 		}
 		return ExitOK
 	}
+	for _, warning := range result.Warnings {
+		if err := out.Diagnostic("warning: %s", warning); err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return ExitInternal
+		}
+	}
 	message := result.Message
 	if message == "" {
 		message = fmt.Sprintf("%s: %s", result.Service, result.Status)
