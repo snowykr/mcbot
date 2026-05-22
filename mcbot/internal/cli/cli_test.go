@@ -1660,6 +1660,34 @@ func TestInitExistingFilesRequireForce(t *testing.T) {
 	assertContains(t, readTestFile(t, envFile), "DISCORD_TOKEN=your_discord_bot_token_here")
 }
 
+func TestInitAcceptsForceAndYesAfterSubcommand(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "mc-server.toml")
+	if err := os.WriteFile(configFile, []byte("existing config\n"), 0o600); err != nil {
+		t.Fatalf("write config failed: %v", err)
+	}
+	defer SetConfigPathForTest(configFile)()
+
+	stdout, stderr, exitCode := runCLI(t, "config", "init", "--force")
+	if exitCode != ExitOK {
+		t.Fatalf("config init --force exit code = %d, want %d; stderr=%q", exitCode, ExitOK, stderr)
+	}
+	assertContains(t, stdout, "initialized")
+	assertContains(t, readTestFile(t, configFile), "[server]")
+
+	envFile := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envFile, []byte("DISCORD_TOKEN=keep-me\n"), 0o600); err != nil {
+		t.Fatalf("write env failed: %v", err)
+	}
+	defer SetEnvPathForTest(envFile)()
+
+	stdout, stderr, exitCode = runCLI(t, "env", "init", "--yes")
+	if exitCode != ExitOK {
+		t.Fatalf("env init --yes exit code = %d, want %d; stderr=%q", exitCode, ExitOK, stderr)
+	}
+	assertContains(t, stdout, "initialized")
+	assertContains(t, readTestFile(t, envFile), "DISCORD_TOKEN=your_discord_bot_token_here")
+}
+
 func TestStdoutStderrSplit(t *testing.T) {
 	t.Parallel()
 

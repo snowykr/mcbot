@@ -311,7 +311,7 @@ func displayValue(key, value string, policy RevealPolicy) string {
 
 func validateValue(key, value string) error {
 	switch key {
-	case "DISCORD_TOKEN", "MCBOT_ROLE_NAME", "MC_CONTAINER_NAME":
+	case "DISCORD_TOKEN", "MCBOT_ROLE_NAME":
 		return validateNonBlank(key, value)
 	case "MCBOT_TRUSTED_GUILD_ID":
 		return validateRequiredSnowflakeID(key, value)

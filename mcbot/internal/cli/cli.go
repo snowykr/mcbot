@@ -1472,6 +1472,10 @@ func parseEnvFlags(opts Options, args []string) (Options, string, []string, erro
 			opts.JSON = true
 		case "--show-secrets":
 			opts.ShowSecrets = true
+		case "--force":
+			opts.Force = true
+		case "--yes":
+			opts.Yes = true
 		case "--file":
 			i++
 			if i >= len(args) || args[i] == "" {
@@ -1495,6 +1499,10 @@ func parseConfigFlags(opts Options, args []string) (Options, string, []string, e
 		switch args[i] {
 		case "--json":
 			opts.JSON = true
+		case "--force":
+			opts.Force = true
+		case "--yes":
+			opts.Yes = true
 		case "--file":
 			i++
 			if i >= len(args) || args[i] == "" {

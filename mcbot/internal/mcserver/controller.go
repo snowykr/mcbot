@@ -93,11 +93,11 @@ type Controller struct {
 	// - When the Controller is GC'd, the channel becomes unreachable and is garbage collected.
 	// - This is NOT a memory leak: Go's GC handles unreferenced channels correctly.
 	// - After Shutdown(), notifyStateChange becomes a no-op (enforced by shutdownComplete flag).
-	stateChangeEventCh   chan state.ServerState
-	stateChangeDropCount atomic.Uint64
-	shutdownComplete     atomic.Bool
+	stateChangeEventCh    chan state.ServerState
+	stateChangeDropCount  atomic.Uint64
+	shutdownComplete      atomic.Bool
 	runningLifecycleNanos atomic.Int64
-	externalStopIntent   ExternalStopIntentStore
+	externalStopIntent    ExternalStopIntentStore
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
@@ -1102,7 +1102,7 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 
 			if !containerState.Running {
 				if c.hasShutdownIntent(ctx) {
-					logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료 감지 (즉시) - 정상 종료로 처리")
+					logutil.Infof("[CONTAINER_WATCHER] 종료 의도 감지 (즉시) - 정상 종료로 처리")
 					c.handleNormalShutdown(currentState, containerState.Exists)
 					return
 				}
@@ -1124,7 +1124,7 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 				// ctx가 취소되었어도 상태 전이를 수행 (정책: 상태 일관성 보장)
 				// shutdownIntent 여부로 정상/비정상 종료 판별
 				if c.hasShutdownIntent(ctx) {
-					logutil.Infof("[CONTAINER_WATCHER] 서버 내부 종료 감지 (대기 후) - 정상 종료로 처리")
+					logutil.Infof("[CONTAINER_WATCHER] 종료 의도 감지 (대기 후) - 정상 종료로 처리")
 					c.handleNormalShutdown(currentState, containerState.Exists)
 					return
 				}

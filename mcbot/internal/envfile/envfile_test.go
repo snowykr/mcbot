@@ -117,6 +117,14 @@ func TestRejectsMcServerOwnedKeys(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsEmptyContainerNameAsDefault(t *testing.T) {
+	path := writeEnv(t, "DISCORD_TOKEN=token\nMCBOT_TRUSTED_GUILD_ID=123456789012345678\nMC_CONTAINER_NAME=\n")
+
+	if err := ValidateFile(path); err != nil {
+		t.Fatalf("ValidateFile with empty MC_CONTAINER_NAME failed: %v", err)
+	}
+}
+
 func TestMCBotDebugIsOwnedAndBooleanValidated(t *testing.T) {
 	path := writeEnv(t, "DISCORD_TOKEN=token\nMCBOT_TRUSTED_GUILD_ID=123456789012345678\nMCBOT_DEBUG=true\n")
 
