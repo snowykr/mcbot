@@ -2,6 +2,16 @@
 
 디스코드 상시 임베드 메시지를 통해 마인크래프트 서버를 제어하는 봇입니다.
 
+## 운영 기준
+
+- CLI is the canonical operational source of truth.
+- `mcbot bot run` starts the Discord bot runtime.
+- Guided onboarding starts with `mcbot setup` or `make setup`; direct `config ...` and `env ...` commands stay available for surgical edits and automation.
+- `mcbot server start|stop|status` do not require Discord credentials.
+- server status is Docker-derived.
+- Secret values are masked by default, and `--show-secrets` only applies to `env show|get`.
+- `--no-input` makes prompt-capable paths fail with exit code 2.
+
 ## 기능
 
 ### 상시 임베드 메시지
@@ -82,30 +92,104 @@ cp .env.example .env
 
 채널을 바꿔도 이전 채널의 상시 임베드 메시지는 자동으로 삭제되지 않습니다.
 
-mc-server 관련 설정은 `.env.example`에서 필요한 항목만 주석을 해제해 선택적으로 오버라이드합니다.
+`mc-server.toml`은 mc-server 관련 설정의 기준 파일입니다. `.env.example`은 봇/배포/비밀값만 다룹니다.
 
-기본 UID/GID는 기존 배포의 `./data` 볼륨 소유권과 호환되도록 1001입니다. 1000 등 다른 값으로 바꾸는 환경이라면 기존 `/data` 볼륨의 소유권도 함께 맞춰야 합니다.
+기본 UID/GID는 일반적인 첫 Linux 사용자와 맞는 `1000:1000`입니다. `mcbot setup config`는 가능하면 기존 `./data` 디렉터리 소유자 또는 현재 실행 사용자의 UID/GID를 감지해 추천합니다. 기존 Oracle Cloud/레거시 볼륨처럼 이미 `1001:1001`로 파일이 만들어진 환경에서는 setup의 `Custom UID/GID`에서 `1001:1001`을 선택하거나, 먼저 기존 `/data` 볼륨의 소유권을 새 UID/GID에 맞춰 조정하세요.
 
-mc-server 관련 값을 바꾼 경우에는 기존 컨테이너를 재생성해야 반영됩니다. 실행 중이라면 먼저 중지한 다음 아래처럼 재생성하세요:
+`mc-server.toml` 값을 바꾼 뒤 운영 반영은 기본적으로 canonical CLI 경로인 `mcbot server stop` 후 `mcbot server start`를 사용하세요. 아래 raw Compose 재생성 명령은 canonical CLI/TOML bridge를 우회하는 low-level/manual escape hatch입니다. CLI가 아닌 Compose 동작 자체를 직접 점검해야 할 때만 사용하세요:
 
 ```bash
 docker compose stop mc-server
 docker compose rm -sf mc-server && docker compose create mc-server
 ```
 
-### 2. 봇 실행 (권장)
+### 2. 추천 시작 경로: guided setup
 
-가장 간단한 방법은 Make를 사용하는 것입니다:
+처음 설치한 뒤에는 `setup` 흐름으로 시작하는 것이 권장됩니다. 이 경로는 `.env`와 `mc-server.toml`을 순서대로 안내하고, 직접 `config ...` 나 `env ...` 명령을 써서 한 파일씩 바꾸는 경로는 그대로 남겨 둡니다.
 
 ```bash
-make up
+cd mcbot && ./mcbot setup
+cd mcbot && ./mcbot setup env
+cd mcbot && ./mcbot setup config
+
+# Make는 얇은 래퍼만 제공합니다.
+make setup
+make setup-env
+make setup-config
 ```
 
-이 명령은 다음을 자동으로 수행합니다:
-- mc-server 컨테이너가 없으면 생성 (실행하지는 않음)
-- mcbot 컨테이너를 빌드하고 실행
+`setup`은 안내형 워크플로우입니다. `--yes`는 현재값이나 기본값만으로 진행 가능한 단계에서만 빠르게 통과합니다. 새 `mc-server.toml`의 UID/GID는 기존 `./data` 소유자, 현재 non-root 사용자, `1000:1000` fallback 순서로 자동 선택합니다. 기존 유효한 config가 있으면 그 값을 유지합니다. `DISCORD_TOKEN` 같은 필수 값이 없으면 config 단계 전에 검증 실패로 멈춥니다. `--force`는 setup에서도 허용되지만, 실제 프롬프트 입력이 필요한 경로가 비대화식이면 여전히 실패합니다. `--no-input`은 자동화용으로만 쓰고, 프롬프트가 필요해지는 순간 exit code 2로 중단됩니다. `--json`과 `--show-secrets`는 setup에서 지원하지 않습니다.
 
-이후 **디스코드 상시 임베드 메시지의 버튼**으로 서버를 시작/종료할 수 있습니다.
+`mcbot setup`은 터미널에서 섹션 단위로 다음 항목을 안내합니다:
+
+1. **Discord bot**: Discord token, trusted guild, embed channel
+2. **Runtime features**: bot runtime/RCON 기본값과 고급 RCON 설정
+3. **Minecraft server**: 버전, 서버 타입, 난이도, 메모리, MOTD, 고급 렌더/시뮬레이션 거리
+4. **Container behavior**: Docker restart policy, 포트 매핑, 고급 `container.uid`/`container.gid` ownership 선택
+5. **Review & write**: `.env`와 `mc-server.toml` 요약, 최종 쓰기 확인, 검증 결과 및 다음 실행 명령
+
+`mcbot setup config`만 실행하면 config 전용 흐름인 **Minecraft server**, **Container behavior**, 선택형 **Container ownership**, **Review & write**를 보여줍니다.
+
+TTY 터미널에서는 setup 헤더와 섹션이 ANSI 색상으로 강조됩니다. 파이프/파일 출력이나 `NO_COLOR=1` 환경에서는 색상을 끄고 순수 텍스트만 출력합니다.
+
+#### Restart policy 선택 기준
+
+| 값 | 추천 상황 | Discord bot/CLI start·stop과의 관계 |
+|----|-----------|--------------------------------------|
+| `no` | 기본 추천. 서버 시작/중지와 재시작 판단을 Discord 버튼/CLI가 소유해야 할 때 | Docker가 자동으로 다시 켜지지 않으므로 사용자가 누른 stop 의도와 충돌하지 않습니다. |
+| `on-failure` | 컨테이너 프로세스가 비정상 종료될 때 Docker가 즉시 살리길 원하는 고급 운영 | Docker가 bot보다 먼저 재시작할 수 있어 crash/log 감지가 덜 정확할 수 있습니다. 현재 기본 흐름에서는 bot-managed 복구와 섞어 쓰기보다 명시적으로 선택하세요. |
+| `unless-stopped` | 대부분 24/7로 켜두되, 수동 stop은 Docker daemon 재시작 뒤에도 유지하고 싶을 때 | Discord/CLI stop 뒤 Docker 정책은 대체로 정지를 유지하지만, 장애 복구는 Docker가 소유합니다. |
+| `always` | Docker가 항상 서버를 살려두는 상시 운영 | daemon 재시작 뒤 사용자가 꺼둔 서버도 다시 켜질 수 있어 Discord 버튼으로 끄는 UX와 가장 충돌하기 쉽습니다. |
+
+향후 Docker-managed restart(`on-failure`, `unless-stopped`)를 더 정교하게 지원하려면 bot runtime이 컨테이너 `StartedAt` 변경을 감지하고, log follow를 새 lifecycle 기준으로 다시 붙이며, Docker가 수행한 자동 재시작 이벤트를 bot 상태에 반영해야 합니다. 현재 기본 UX는 이 reconciliation이 없다는 전제로 `no`를 권장합니다.
+
+### 3. CLI로 실행하고 운영하기
+
+운영의 기준은 CLI입니다. Make는 편의 래퍼입니다.
+
+```bash
+# 봇 실행
+cd mcbot && go run ./cmd/mcbot bot run
+
+# 도움말 / 버전
+cd mcbot && ./mcbot help
+cd mcbot && ./mcbot version
+
+# 이미 빌드한 경우
+cd mcbot && ./mcbot bot run
+
+# 서버 운영
+cd mcbot && ./mcbot server status
+cd mcbot && ./mcbot server start
+cd mcbot && ./mcbot server stop
+
+# 설정 확인
+cd mcbot && ./mcbot config validate
+cd mcbot && ./mcbot env validate
+
+# 파일 내용 확인/수정
+cd mcbot && ./mcbot config show
+cd mcbot && ./mcbot config get server.version
+cd mcbot && ./mcbot config set server.version 1.21.4
+cd mcbot && ./mcbot config init
+cd mcbot && ./mcbot env show
+cd mcbot && ./mcbot env get DISCORD_TOKEN
+cd mcbot && ./mcbot env set MCBOT_DEBUG true
+cd mcbot && ./mcbot env unset MCBOT_DEBUG
+cd mcbot && ./mcbot env init
+```
+
+`mcbot server start|stop|status`는 Discord 비밀값이 없어도 동작합니다. `server status`는 Docker inspection만 읽습니다. 외부 CLI stop과 실행 중인 봇은 의도적으로 공존할 수 있고, CLI는 operator-intent 파일로 false crash recovery를 막습니다.
+
+`mcbot config set`과 `mcbot env set`도 같은 CLI 계약의 일부입니다.
+
+전역 옵션은 항상 명령 앞에 둡니다. 형식은 `mcbot [global options] <command> [args]` 입니다.
+
+`config` 명령은 `mc-server.toml`만, `env` 명령은 `.env`만 다룹니다. `config show|get|validate`와 `env show|get|validate`는 `--json` 출력을 지원합니다. `env show|get`는 기본적으로 secret value를 `***MASKED***`로 가리고, 실제 값을 보려면 `--show-secrets`를 사용하세요.
+
+`config init`과 `env init`은 기존 파일을 덮어쓸 수 있으므로, 비대화식 경로에서는 `--yes` 또는 `--force`를 명시해야 합니다. `--no-input`이 켜진 prompt-capable 경로는 exit code 2로 실패합니다. `config ... --file <path>`와 `env ... --file <path>`를 사용하면 기본 경로 대신 다른 파일을 대상으로 실행할 수 있습니다. `--quiet`는 성공 메시지 같은 비필수 출력을 숨깁니다.
+
+`make setup`, `make setup-env`, `make setup-config`, `make up`, `make up-all`, `make up-mc`, `make stop`, `make status`, `make config-validate`, `make env-validate`는 같은 CLI/Compose 운영 경로를 감싼 편의 래퍼입니다.
 
 ### 3. 디스코드에서 사용
 
@@ -120,27 +204,27 @@ make up
 
 ## 고급 설정
 
-### 수동으로 컨테이너 생성 및 봇 실행
+### 수동으로 컨테이너 생성 및 봇 실행 (manual escape hatch)
 
-세부적인 제어가 필요한 경우, 단계별로 실행할 수 있습니다.
+세부적인 제어가 필요한 경우, 단계별로 실행할 수 있습니다. 이 절의 raw Docker Compose 흐름은 canonical CLI/TOML bridge를 우회하는 low-level/manual escape hatch이며, 일반 운영 경로는 `mcbot server start|stop|status`입니다.
 
 #### 1) 마인크래프트 서버 컨테이너 생성 (최초 1회)
 
 mc-server 컨테이너를 **생성만 하고 실행하지 않습니다**.
 
-**Make 사용:**
+**Canonical CLI:**
 ```bash
-make ensure-mc
+mcbot server start
 ```
 
-**Docker Compose v2:**
+**Docker Compose v2 (manual escape hatch):**
 ```bash
 docker compose create mc-server
 # 또는
 docker compose up --no-start mc-server
 ```
 
-**Docker Compose v1:**
+**Docker Compose v1 (manual escape hatch):**
 ```bash
 docker-compose create mc-server
 # 또는
@@ -169,13 +253,36 @@ docker compose up -d mcbot
 
 ## Make 명령어 레퍼런스
 
-프로젝트는 편의를 위해 다양한 Make 타겟을 제공합니다.
+프로젝트는 CLI를 감싼 편의 래퍼만 제공합니다. 운영의 기준은 항상 `mcbot ...` 입니다.
 
-### 기본 명령어
+### CLI 래퍼
 
 | 명령어 | 설명 |
 |--------|------|
-| `make up` | **(권장)** mc-server 컨테이너 생성 + mcbot 빌드 및 실행 |
+| `make stop` | `mcbot server stop` |
+| `make status` | `mcbot server status` |
+| `make setup` | `mcbot setup` |
+| `make setup-env` | `mcbot setup env` |
+| `make setup-config` | `mcbot setup config` |
+| `make config-show` | `mcbot config show` |
+| `make config-get` | `mcbot config get $(ARGS)` |
+| `make config-set` | `mcbot config set $(ARGS)` |
+| `make config-init` | `mcbot config init $(ARGS)` |
+| `make config-validate` | `mcbot config validate` |
+| `make env-show` | `mcbot env show` |
+| `make env-get` | `mcbot env get $(ARGS)` |
+| `make env-set` | `mcbot env set $(ARGS)` |
+| `make env-unset` | `mcbot env unset $(ARGS)` |
+| `make env-init` | `mcbot env init $(ARGS)` |
+| `make env-validate` | `mcbot env validate` |
+
+### 서버 실행 명령어
+
+| 명령어 | 설명 |
+|--------|------|
+| `make up` | Discord bot 컨테이너만 빌드 및 실행합니다. Minecraft 서버 컨테이너는 나중에 bot/CLI가 시작할 수 있는 준비 상태로 둡니다. |
+| `make up-all` | `mcbot server start`로 `mc-server.toml` 설정을 반영해 Minecraft 서버를 먼저 시작한 뒤 Discord bot 컨테이너를 실행합니다. |
+| `make up-mc` | Minecraft 서버만 시작합니다. 내부적으로 `mcbot server start`를 사용해 `mc-server.toml` 설정을 Compose 생성 환경에 반영합니다. |
 | `make down` | 모든 컨테이너 중지 및 제거 |
 | `make logs` | 실시간 로그 확인 (Ctrl+C로 종료) |
 
@@ -183,9 +290,6 @@ docker compose up -d mcbot
 
 | 명령어 | 설명 |
 |--------|------|
-| `make ensure-mc` | mc-server 컨테이너가 없으면 생성 (멱등성 보장) |
-| `make up-all` | mcbot과 mc-server를 모두 빌드하고 실행 |
-| `make up-mc` | mc-server만 빌드하고 실행 |
 | `make nuke` | 모든 컨테이너, 볼륨, 네트워크 제거 (완전 초기화) |
 
 ### 개발 명령어
@@ -197,47 +301,59 @@ docker compose up -d mcbot
 
 ## 환경 변수
 
-| 변수명 | 필수 | 기본값                       | 설명 |
-|--------|------|---------------------------|------|
-| `DISCORD_TOKEN` | ✅ | -                         | Discord 봇 토큰 |
-| `EMBED_CHANNEL_ID` | ❌ | -                         | 상시 임베드 메시지의 초기 기본 채널 ID (선택, 런타임 설정이 없을 때 사용하는 fallback) |
-| `MC_CONTAINER_NAME` | ❌ | `mc-server`               | MC 서버 컨테이너 이름 |
-| `MCBOT_ROLE_NAME` | ❌ | `마크봇`                     | 봇 사용 권한 역할 이름 |
-| `MCBOT_TRUSTED_GUILD_ID` | ✅ | -                         | privileged 기능을 허용할 Discord 서버(길드) ID |
-| `READY_TIMEOUT_SECONDS` | ❌ | `600`                     | 서버 시작 타임아웃 (초, 서버가 "준비 완료" 로그를 남길 때까지 대기하는 최대 시간) |
-| `STOP_TIMEOUT_SECONDS` | ❌ | `120`                     | 서버 종료 타임아웃 (초, Docker가 컨테이너를 그레이스풀하게 중지하기 위해 기다리는 시간) |
-| `SERVER_OPERATION_TIMEOUT_SECONDS` | ❌ | `720`                     | 서버 작업(시작/종료) 전체 타임아웃 (초, 버튼 클릭부터 최종 결과 처리까지의 상위 타임아웃) |
-| `EMBED_UPDATE_TIMEOUT_SECONDS` | ❌ | `10`                      | 임베드 메시지 업데이트 타임아웃 (초, Discord로 상태 임베드를 전송/수정할 때의 최대 대기 시간) |
-| `MC_SERVER_RESTART_POLICY` | ❌ | `no`                      | mc-server 재시작 정책 |
-| `MC_SERVER_PORT_PUBLISH` | ❌ | `25565:25565`             | mc-server 포트 매핑 (호스트:컨테이너) |
-| `UID` | ❌ | `1001`                    | 컨테이너 내부 사용자 UID |
-| `GID` | ❌ | `1001`                    | 컨테이너 내부 사용자 GID |
-| `VERSION` | ❌ | `1.20.1`                  | 마인크래프트 서버 버전 |
-| `TYPE` | ❌ | `FORGE`                   | 마인크래프트 서버 타입 |
-| `DIFFICULTY` | ❌ | `easy`                    | 서버 난이도 |
-| `MEMORY` | ❌ | `14G`                     | 서버 메모리 |
-| `INIT_MEMORY` | ❌ | `14G`                     | 서버 초기 메모리 |
-| `MOTD` | ❌ | `SNOWY'S SERVER`          | 서버 MOTD |
-| `VIEW_DISTANCE` | ❌ | `8`                       | 렌더 거리 |
-| `SIMULATION_DISTANCE` | ❌ | `8`                       | 시뮬레이션 거리 |
-| `ENABLE_RCON` | ❌ | `true`                    | RCON 활성화 여부 |
-| `MC_JOIN_LOG_PATTERN` | ❌ | `]: (.+) joined the game` | 플레이어 접속 로그 패턴 (정규식) |
-| `MC_LEAVE_LOG_PATTERN` | ❌ | `]: (.+) left the game`   | 플레이어 퇴장 로그 패턴 (정규식) |
+### `.env`
+
+| 변수명 | 필수 | 기본값 | 설명 |
+|--------|------|--------|------|
+| `DISCORD_TOKEN` | ✅ | - | Discord 봇 토큰 |
+| `MCBOT_TRUSTED_GUILD_ID` | ✅ | - | privileged 기능을 허용할 Discord 서버(길드) ID |
+| `MCBOT_ROLE_NAME` | ❌ | `마크봇` | 봇 사용 권한 역할 이름 |
+| `EMBED_CHANNEL_ID` | ❌ | - | 상시 임베드 메시지의 초기 기본 채널 ID |
+| `MC_CONTAINER_NAME` | ❌ | `mc-server` | MC 서버 컨테이너 이름 |
+| `READY_TIMEOUT_SECONDS` | ❌ | `600` | 서버 시작 타임아웃 |
+| `STOP_TIMEOUT_SECONDS` | ❌ | `120` | 서버 종료 타임아웃 |
+| `SERVER_OPERATION_TIMEOUT_SECONDS` | ❌ | `720` | 서버 작업 전체 타임아웃 |
+| `EMBED_UPDATE_TIMEOUT_SECONDS` | ❌ | `10` | 임베드 메시지 업데이트 타임아웃 |
 | `AUTO_RECOVER_ENABLED` | ❌ | `true` | 크래시 후 자동 복구 활성화 여부 |
-| `AUTO_RECOVER_INTERVAL_SECONDS` | ❌ | `30` | 자동 복구 시도 간격 (초) |
+| `AUTO_RECOVER_INTERVAL_SECONDS` | ❌ | `30` | 자동 복구 시도 간격 |
 | `MAX_AUTO_RECOVER_ATTEMPTS` | ❌ | `3` | 최대 자동 복구 시도 횟수 |
-| `CRASH_DETECTION_INTERVAL_SECONDS` | ❌ | `2` | 컨테이너 상태 감시 주기 (초) |
-| `MAX_INSPECT_FAILURE_ATTEMPTS` | ❌ | `3` | 컨테이너 상태 확인 연속 실패 허용 횟수 |
-| `MCBOT_DEBUG` | ❌ | `false` | 디버그 로그 활성화 (`true` 또는 `1`로 설정) |
-| `RCON_HOST` | ❌ | `mc-server` | RCON 서버 호스트 (컨테이너 이름 또는 IP) |
+| `CRASH_DETECTION_INTERVAL_SECONDS` | ❌ | `2` | 컨테이너 상태 감시 주기 |
+| `MAX_INSPECT_FAILURE_ATTEMPTS` | ❌ | `3` | 상태 확인 연속 실패 허용 횟수 |
+| `MCBOT_DEBUG` | ❌ | `false` | 디버그 로그 활성화 |
+| `MC_JOIN_LOG_PATTERN` | ❌ | `]: (.+) joined the game` | 플레이어 접속 로그 패턴 |
+| `MC_LEAVE_LOG_PATTERN` | ❌ | `]: (.+) left the game` | 플레이어 퇴장 로그 패턴 |
+| `RCON_HOST` | ❌ | `mc-server` | RCON 서버 호스트 |
 | `RCON_PORT` | ❌ | `25575` | RCON 서버 포트 |
-| `RCON_PASSWORD` | ❌ | - | RCON 비밀번호 (설정 시 Discord `/마크봇 rcon` 명령어 활성화) |
-| `RCON_TIMEOUT_SECONDS` | ❌ | `10` | RCON 명령 타임아웃 (초) |
+| `RCON_PASSWORD` | ❌ | - | RCON 비밀번호 |
+| `RCON_TIMEOUT_SECONDS` | ❌ | `10` | RCON 명령 타임아웃 |
+| `ENABLE_RCON` | ❌ | `true` | RCON 활성화 여부 |
 | `RCON_CMDS_STARTUP` | ❌ | - | RCON 시작 명령어 |
+
+### `mc-server.toml`
+
+| 키 | 설명 |
+|----|------|
+| `server.version` | 마인크래프트 서버 버전 |
+| `server.type` | 서버 타입 |
+| `server.difficulty` | 난이도 |
+| `server.memory` | 서버 메모리 |
+| `server.init_memory` | 초기 메모리 |
+| `server.motd` | 서버 MOTD |
+| `server.view_distance` | 렌더 거리 |
+| `server.simulation_distance` | 시뮬레이션 거리 |
+| `container.restart_policy` | mc-server 재시작 정책 |
+| `container.port_publish` | 포트 매핑 |
+| `container.uid` | 컨테이너 UID |
+| `container.gid` | 컨테이너 GID |
+
+`config` 명령은 `mc-server.toml`만 읽고, `env` 명령은 `.env`만 읽습니다. 서로의 키를 거꾸로 쓰면 거부됩니다.
+
+기본 마스킹 문자열은 `***MASKED***` 입니다. `--show-secrets` 없이는 secret value를 노출하지 않습니다.
+
 
 ### Compose 서비스 이름과 컨테이너 이름
 
-`MC_CONTAINER_NAME`은 런타임 컨테이너의 이름만 바꿉니다. Compose의 서비스 키는 계속 `mc-server`이며, 이 이름을 기준으로 Make 타겟과 예시 명령이 동작합니다. 그래서 `docker compose create mc-server`와 `make ensure-mc` 같은 명령은 그대로 사용해야 합니다.
+`MC_CONTAINER_NAME`은 런타임 컨테이너의 이름만 바꿉니다. Compose의 서비스 키는 계속 `mc-server`이며, 이 이름을 기준으로 CLI와 Make 래퍼가 동작합니다. Minecraft 서버만 켤 때는 `make up-mc`를 사용하고, 운영의 기준은 `mcbot server ...` 입니다.
 
 `RCON_HOST`의 기본값이 `mc-server`인 이유도 동일합니다. Compose 네트워크에서 서비스 DNS는 서비스 키로 고정되므로, 컨테이너 이름을 바꿔도 `mc-server`가 기본입니다.
 
@@ -335,7 +451,7 @@ RCON_CMDS_STARTUP=gamerule keepInventory true
 **컨테이너 미존재 (인프라 미준비)**:
 - 상태: `StateStopped`
 - `lastError`에 상세 메시지 기록
-- 사용자에게 `make ensure-mc` 안내
+- 사용자에게 canonical CLI 경로인 `mcbot server start` 또는 Make 래퍼 `make up-mc` 안내
 
 **실제 런타임 예외**:
 - 상태: `StateError`
@@ -422,7 +538,7 @@ make go-deps
 make go-build
 
 # 실행 (환경 변수 필요)
-DISCORD_TOKEN=your_token MCBOT_TRUSTED_GUILD_ID=123456789012345678 EMBED_CHANNEL_ID=123456789012345679 ./mcbot/mcbot
+DISCORD_TOKEN=your_token MCBOT_TRUSTED_GUILD_ID=123456789012345678 EMBED_CHANNEL_ID=123456789012345679 ./mcbot/mcbot bot run
 ```
 
 ### 직접 Go 명령어 사용
@@ -435,5 +551,5 @@ cd mcbot && go mod tidy
 cd mcbot && go build -o mcbot ./cmd/mcbot
 
 # 실행 (환경 변수 필요)
-cd mcbot && DISCORD_TOKEN=your_token MCBOT_TRUSTED_GUILD_ID=123456789012345678 EMBED_CHANNEL_ID=123456789012345679 ./mcbot
+cd mcbot && DISCORD_TOKEN=your_token MCBOT_TRUSTED_GUILD_ID=123456789012345678 EMBED_CHANNEL_ID=123456789012345679 ./mcbot bot run
 ```

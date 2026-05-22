@@ -22,4 +22,6 @@ WORKDIR /app
 
 COPY --from=builder /app/mcbot .
 
+# Explicit runtime contract: mcbot bot run
 ENTRYPOINT ["./mcbot"]
+CMD ["bot", "run"]

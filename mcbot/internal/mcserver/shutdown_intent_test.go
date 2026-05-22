@@ -233,3 +233,112 @@ func TestShutdownIntent_GracePeriodCtxCancel_StateTransitionGuaranteed(t *testin
 		t.Errorf("Expected StateCrashed (conservative policy), got %v", resultState)
 	}
 }
+
+func TestExternalStopIntentConsumedOnce(t *testing.T) {
+	cfg := &config.Config{MCContainerName: "test-mc"}
+	stateManager := state.NewManager()
+	controller, _ := NewController(cfg, stateManager)
+	defer controller.Shutdown()
+
+	store := &singleUseExternalStopIntent{matched: true}
+	controller.SetExternalStopIntentStore(store)
+
+	if !controller.hasShutdownIntent(context.Background()) {
+		t.Fatal("first external stop intent observation = false, want true")
+	}
+	if controller.hasShutdownIntent(context.Background()) {
+		t.Fatal("second external stop intent observation = true, want single-use false")
+	}
+	if store.calls != 2 {
+		t.Fatalf("external stop intent calls = %d, want 2", store.calls)
+	}
+}
+
+func TestStaleExternalStopIntentClearedOnStartupSuccess(t *testing.T) {
+	cfg := &config.Config{MCContainerName: "test-mc"}
+	stateManager := state.NewManager()
+	controller, _ := NewController(cfg, stateManager)
+	defer controller.Shutdown()
+
+	lifecycleStartedAt := time.Now()
+	store := &lifecycleAwareExternalStopIntent{matched: true, createdAt: lifecycleStartedAt.Add(-time.Second)}
+	controller.SetExternalStopIntentStore(store)
+
+	controller.applyStartupSuccess(3*time.Second, 1.5, lifecycleStartedAt)
+
+	if stateManager.GetState() != state.StateRunning {
+		t.Fatalf("state = %v, want running", stateManager.GetState())
+	}
+	if controller.hasShutdownIntent(context.Background()) {
+		t.Fatal("stale external stop intent still matched after startup success")
+	}
+	if store.clearCalls != 1 {
+		t.Fatalf("stale clear calls = %d, want 1", store.clearCalls)
+	}
+}
+
+func TestCurrentLifecycleExternalStopIntentPreservedOnStartupSuccess(t *testing.T) {
+	cfg := &config.Config{MCContainerName: "test-mc"}
+	stateManager := state.NewManager()
+	controller, _ := NewController(cfg, stateManager)
+	defer controller.Shutdown()
+
+	lifecycleStartedAt := time.Now()
+	store := &lifecycleAwareExternalStopIntent{matched: true, createdAt: lifecycleStartedAt.Add(time.Second)}
+	controller.SetExternalStopIntentStore(store)
+
+	controller.applyStartupSuccess(3*time.Second, 1.5, lifecycleStartedAt)
+
+	if stateManager.GetState() != state.StateRunning {
+		t.Fatalf("state = %v, want running", stateManager.GetState())
+	}
+	if !controller.hasShutdownIntent(context.Background()) {
+		t.Fatal("current lifecycle external stop intent was incorrectly cleared")
+	}
+	if store.clearCalls != 1 {
+		t.Fatalf("stale clear calls = %d, want 1", store.clearCalls)
+	}
+}
+
+type singleUseExternalStopIntent struct {
+	matched bool
+	calls   int
+}
+
+func (s *singleUseExternalStopIntent) ClearStaleStopIntent(_ context.Context, _ string, _ time.Time, _ time.Time) (bool, error) {
+	return false, nil
+}
+
+func (s *singleUseExternalStopIntent) ConsumeUnexpiredStopIntent(_ context.Context, _ string, _ time.Time) (bool, error) {
+	s.calls++
+	if !s.matched {
+		return false, nil
+	}
+	s.matched = false
+	return true, nil
+}
+
+type lifecycleAwareExternalStopIntent struct {
+	matched      bool
+	createdAt    time.Time
+	clearCalls   int
+	consumeCalls int
+}
+
+func (s *lifecycleAwareExternalStopIntent) ClearStaleStopIntent(_ context.Context, _ string, _ time.Time, lifecycleStartedAt time.Time) (bool, error) {
+	s.clearCalls++
+	if s.matched && s.createdAt.Before(lifecycleStartedAt) {
+		s.matched = false
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *lifecycleAwareExternalStopIntent) ConsumeUnexpiredStopIntent(_ context.Context, _ string, _ time.Time) (bool, error) {
+	s.consumeCalls++
+	if !s.matched {
+		return false, nil
+	}
+	s.matched = false
+	return true, nil
+}

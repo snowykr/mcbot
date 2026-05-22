@@ -22,3 +22,6 @@
 
 # Backups
 *.tar.gz
+# Setup/env staging leftovers containing local secrets
+.setup-env-*.tmp
+.env-*.tmp

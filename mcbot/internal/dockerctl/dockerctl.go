@@ -14,12 +14,13 @@ import (
 type ContainerState struct {
 	Exists    bool
 	Running   bool
+	Status    string
 	StartedAt time.Time
 }
 
 func InspectContainer(ctx context.Context, containerName string) (*ContainerState, error) {
 	cmd := exec.CommandContext(ctx, "docker", "inspect",
-		"-f", "{{.State.Running}}|{{.State.StartedAt}}",
+		"-f", "{{.State.Running}}|{{.State.Status}}|{{.State.StartedAt}}",
 		containerName)
 
 	output, err := cmd.Output()
@@ -33,16 +34,17 @@ func InspectContainer(ctx context.Context, containerName string) (*ContainerStat
 	}
 
 	parts := strings.Split(strings.TrimSpace(string(output)), "|")
-	if len(parts) != 2 {
+	if len(parts) != 3 {
 		return nil, fmt.Errorf("unexpected docker inspect output: %s", output)
 	}
 
 	running := parts[0] == "true"
-	startedAt, _ := time.Parse(time.RFC3339Nano, parts[1])
+	startedAt, _ := time.Parse(time.RFC3339Nano, parts[2])
 
 	return &ContainerState{
 		Exists:    true,
 		Running:   running,
+		Status:    parts[1],
 		StartedAt: startedAt,
 	}, nil
 }

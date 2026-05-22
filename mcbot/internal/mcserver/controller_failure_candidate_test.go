@@ -200,7 +200,7 @@ func TestApplyStartupSuccess_ClearsFailureCandidate(t *testing.T) {
 	}
 	defer ctrl.Shutdown()
 
-	ctrl.applyStartupSuccess(10*time.Second, 5.0)
+	ctrl.applyStartupSuccess(10*time.Second, 5.0, time.Now())
 
 	if stateManager.GetState() != state.StateRunning {
 		t.Errorf("Expected state to be Running, got %s", stateManager.GetState())
