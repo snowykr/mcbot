@@ -59,6 +59,7 @@ cd mcbot && ./mcbot setup config
 cd mcbot && ./mcbot --force config init --file /tmp/mc-server.toml
 cd mcbot && ./mcbot config show --file /tmp/mc-server.toml
 cd mcbot && ./mcbot config get --file /tmp/mc-server.toml server.version
+cd mcbot && ./mcbot config get --file /tmp/mc-server.toml backup.retention_count
 cd mcbot && ./mcbot config validate
 cd mcbot && ./mcbot --force env init --file /tmp/test.env
 cd mcbot && ./mcbot env show --file /tmp/test.env
@@ -68,7 +69,18 @@ cd mcbot && ./mcbot env validate
 
 `setup` 스모크 체크는 먼저 `mcbot setup`으로 시작 경로가 열리는지 보고, `mcbot --yes setup`으로 현재값과 기본값만으로 진행되는 비대화식 경로를 확인합니다. `mcbot --no-input setup`은 프롬프트가 필요한 순간 exit code 2로 실패해야 하고, `mcbot --force setup`은 플래그가 허용되더라도 비대화식 입력이 없으면 계속 실패해야 합니다.
 
-`--json`은 `server status`, `config show|get|validate`, `env show|get|validate`에서만 허용됩니다. `--show-secrets`는 `env show|get`에서만 허용되고, setup에서는 둘 다 거부되어야 합니다. `--yes`, `--force`, `--quiet`, `--no-input` 같은 전역 옵션은 항상 명령 앞(`mcbot [global options] <command>`)에 둡니다. `config init`과 `env init`은 기존 파일이 있을 때 `--yes` 또는 `--force` 없이 덮어쓰면 안 되고, `--no-input`이 걸린 prompt-capable 경로는 exit code 2로 실패해야 합니다. `--quiet`는 성공 메시지를 숨기되 에러는 계속 stderr로 남겨야 합니다.
+`--json`은 `server status`, `config show|get|validate`, `env show|get|validate`, `backup create|list|inspect|validate|verify|prune|restore`에서만 허용됩니다. `--show-secrets`는 `env show|get`에서만 허용되고, setup에서는 둘 다 거부되어야 합니다. `--yes`, `--force`, `--quiet`, `--no-input` 같은 전역 옵션은 항상 명령 앞(`mcbot [global options] <command>`)에 둡니다. `config init`과 `env init`은 기존 파일이 있을 때 `--yes` 또는 `--force` 없이 덮어쓰면 안 되고, `--no-input`이 걸린 prompt-capable 경로는 exit code 2로 실패해야 합니다. `--quiet`는 성공 메시지를 숨기되 에러는 계속 stderr로 남겨야 합니다.
+
+백업/복원 회귀는 다음 계약을 확인합니다. `backup.directory`는 repo root 기준 clean relative path여야 하고, `data/minecraft`, `data/mcbot`, `mcbot`, `.git`, `.omx` 내부나 `data` root 자체를 가리키면 안 됩니다. Compose는 `./data/minecraft:/data`, `./data/mcbot:/app/data/mcbot`, `./data/minecraft:/app/data/minecraft:ro`, `./backups:/app/backups`, `./mc-server.toml:/app/mc-server.toml:ro` 레이아웃을 유지해야 합니다. 봇 컨테이너 scheduler는 좁은 mount만 사용하므로 `backup.directory="backups"`일 때만 활성화되고, 비기본 저장소는 host CLI/Make 경로에서만 사용합니다. Host CLI의 기본 live backup은 `RCON_HOST=mc-server`일 때 `docker exec <MC_CONTAINER_NAME> rcon-cli` quiesce 경로를 사용해야 합니다. Make backup wrapper는 `$(MCBOT_CLI) $(GLOBAL_ARGS) backup ...` 형태로 global flags를 명령 앞에 둬야 합니다.
+
+```bash
+cd mcbot && go test ./internal/mcconfig/... -run 'TestBackupConfig'
+cd mcbot && go test ./internal/cli/... -run 'TestBackupLayoutAndDocs'
+cd mcbot && ./mcbot backup create
+cd mcbot && ./mcbot backup list
+cd mcbot && ./mcbot backup restore --interactive
+cd mcbot && ./mcbot --yes backup restore --backup-id 20260522T043000Z-k4p9az2x
+```
 
 ## 수동 QA 체크리스트
 

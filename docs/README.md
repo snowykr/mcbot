@@ -84,7 +84,7 @@ cp .env.example .env
 
 `EMBED_CHANNEL_ID`는 반드시 `MCBOT_TRUSTED_GUILD_ID`와 같은 서버에 속한 채널이어야 합니다. 다른 서버 채널을 지정하면 버튼은 표시될 수 있어도 실행은 거부됩니다.
 
-상시 임베드 채널은 런타임에도 바꿀 수 있습니다. `/마크봇 채널 설정 channel:<채널>` 명령으로 바꾸면 설정은 `./data/mcbot/runtime-config.json`에 저장되고, 이 값이 `.env`의 `EMBED_CHANNEL_ID`보다 우선합니다. `./data/mcbot`는 기존 `./data` 트리 안에 있는 공유 경로입니다.
+상시 임베드 채널은 런타임에도 바꿀 수 있습니다. `/마크봇 채널 설정 channel:<채널>` 명령으로 바꾸면 설정은 `./data/mcbot/runtime-config.json`에 저장되고, 이 값이 `.env`의 `EMBED_CHANNEL_ID`보다 우선합니다. `./data/mcbot`는 봇 전용 런타임 상태이며, Minecraft 월드 데이터는 백업 오염을 막기 위해 `./data/minecraft`에 분리됩니다.
 
 런타임 설정은 같은 `MCBOT_TRUSTED_GUILD_ID`에서 저장된 경우에만 `EMBED_CHANNEL_ID`보다 우선합니다. 신뢰 서버를 바꾸면 이전 서버에서 저장된 런타임 설정은 부팅 시 무시/삭제되고 `.env` 기본값으로 되돌아갑니다. 이전 버전의 guild scope가 없는 `runtime-config.json`도 안전을 위해 legacy 설정으로 보고 삭제됩니다.
 
@@ -94,7 +94,9 @@ cp .env.example .env
 
 `mc-server.toml`은 mc-server 관련 설정의 기준 파일입니다. `.env.example`은 봇/배포/비밀값만 다룹니다.
 
-기본 UID/GID는 일반적인 첫 Linux 사용자와 맞는 `1000:1000`입니다. `mcbot setup config`는 가능하면 기존 `./data` 디렉터리 소유자 또는 현재 실행 사용자의 UID/GID를 감지해 추천합니다. 기존 Oracle Cloud/레거시 볼륨처럼 이미 `1001:1001`로 파일이 만들어진 환경에서는 setup의 `Custom UID/GID`에서 `1001:1001`을 선택하거나, 먼저 기존 `/data` 볼륨의 소유권을 새 UID/GID에 맞춰 조정하세요.
+기본 UID/GID는 일반적인 첫 Linux 사용자와 맞는 `1000:1000`입니다. `mcbot setup config`는 가능하면 기존 `./data` 디렉터리 소유자 또는 현재 실행 사용자의 UID/GID를 감지해 추천합니다. 기존 Oracle Cloud/레거시 볼륨처럼 이미 `1001:1001`로 파일이 만들어진 환경에서는 setup의 `Custom UID/GID`에서 `1001:1001`을 선택하거나, 먼저 기존 `/data` 볼륨의 소유권을 새 UID/GID에 맞춰 조정하세요. 새 Compose 레이아웃에서 실제 게임 데이터는 `./data/minecraft`에 있어야 합니다.
+
+백업 정책도 `mc-server.toml`의 `[backup]` 섹션에서 관리합니다. 기본값은 일일 04:00(Local) 자동 백업, 최대 14개 보관, 백업 저장소 `./backups`입니다. `.env`에는 Discord/RCON 비밀값이 남고, 백업 archive에는 `.env`, Discord 토큰, 봇 런타임 상태(`./data/mcbot`)가 포함되지 않아야 합니다.
 
 `mc-server.toml` 값을 바꾼 뒤 운영 반영은 기본적으로 canonical CLI 경로인 `mcbot server stop` 후 `mcbot server start`를 사용하세요. 아래 raw Compose 재생성 명령은 canonical CLI/TOML bridge를 우회하는 low-level/manual escape hatch입니다. CLI가 아닌 Compose 동작 자체를 직접 점검해야 할 때만 사용하세요:
 
@@ -167,10 +169,20 @@ cd mcbot && ./mcbot server stop
 cd mcbot && ./mcbot config validate
 cd mcbot && ./mcbot env validate
 
+# 백업/복원
+cd mcbot && ./mcbot backup create
+cd mcbot && ./mcbot backup list
+cd mcbot && ./mcbot backup validate --backup-id 20260522T043000Z-k4p9az2x
+cd mcbot && ./mcbot backup prune --dry-run --delete-after-days 30 --max-total-size 1073741824
+cd mcbot && ./mcbot backup restore --interactive
+cd mcbot && ./mcbot --yes backup restore --backup-id 20260522T043000Z-k4p9az2x
+
 # 파일 내용 확인/수정
 cd mcbot && ./mcbot config show
 cd mcbot && ./mcbot config get server.version
+cd mcbot && ./mcbot config get backup.retention_count
 cd mcbot && ./mcbot config set server.version 1.21.4
+cd mcbot && ./mcbot config set backup.daily_time 04:00
 cd mcbot && ./mcbot config init
 cd mcbot && ./mcbot env show
 cd mcbot && ./mcbot env get DISCORD_TOKEN
@@ -189,7 +201,24 @@ cd mcbot && ./mcbot env init
 
 `config init`과 `env init`은 기존 파일을 덮어쓸 수 있으므로, 비대화식 경로에서는 `--yes` 또는 `--force`를 명시해야 합니다. `--no-input`이 켜진 prompt-capable 경로는 exit code 2로 실패합니다. `config ... --file <path>`와 `env ... --file <path>`를 사용하면 기본 경로 대신 다른 파일을 대상으로 실행할 수 있습니다. `--quiet`는 성공 메시지 같은 비필수 출력을 숨깁니다.
 
-`make setup`, `make setup-env`, `make setup-config`, `make up`, `make up-all`, `make up-mc`, `make stop`, `make status`, `make config-validate`, `make env-validate`는 같은 CLI/Compose 운영 경로를 감싼 편의 래퍼입니다.
+`make setup`, `make setup-env`, `make setup-config`, `make up`, `make up-all`, `make up-mc`, `make stop`, `make status`, `make config-validate`, `make env-validate`, `make backup`, `make restore BACKUP=<id>`는 같은 CLI/Compose 운영 경로를 감싼 편의 래퍼입니다.
+
+### 4. 게임 데이터 백업과 복원
+
+백업의 canonical 인터페이스는 `mcbot backup ...` 입니다. Make target은 얇은 래퍼이며, `GLOBAL_ARGS`는 명령 앞에 배치됩니다.
+
+```bash
+make backup
+make backup-list
+make backup-validate ARGS="--backup-id 20260522T043000Z-k4p9az2x"
+make backup-prune ARGS="--dry-run --delete-after-days 30 --max-total-size 1073741824"
+make restore BACKUP=20260522T043000Z-k4p9az2x GLOBAL_ARGS="--yes"
+make backup-restore ARGS="--interactive"
+```
+
+복원은 의도적으로 고마찰 작업입니다. 자동 복원은 없으며, 대화형 복원도 유효한 백업 목록에서 선택한 뒤 내부적으로 명시적 `backup_id`로 변환되어 같은 검증/확인 경로를 탑니다. 비대화식 복원은 `--backup-id <id>`가 필요하고, archive path나 implicit latest는 허용하지 않습니다. `--no-input`에서는 복원 확인 프롬프트가 필요하면 실패하며, 자동화는 `--yes`를 명시해야 합니다.
+
+실행 중이거나 정지 상태가 증명되지 않은 서버를 백업할 때는 RCON `save-off`, `save-all flush`, archive read, `save-on` 순서로 quiesce가 성공해야 합니다. host CLI에서 기본 `RCON_HOST=mc-server`를 사용할 때는 host 네트워크 DNS에 의존하지 않고 `docker exec <MC_CONTAINER_NAME> rcon-cli ...` 경로로 quiesce합니다. `RCON_HOST`를 `127.0.0.1` 같은 명시적 host로 바꾸면 TCP RCON client를 사용하므로 별도 port publish가 필요합니다. quiesce가 증명되지 않으면 v1은 raw live copy로 fallback하지 않고 실패합니다.
 
 ### 3. 디스코드에서 사용
 
@@ -251,6 +280,22 @@ docker compose up -d mcbot
 
 이후 서버 시작/종료는 상시 임베드 메시지의 버튼을 통해 수행합니다.
 
+### 기존 `./data:/data` 설치에서 `./data/minecraft:/data`로 전환
+
+백업이 봇 런타임 상태를 포함하지 않도록 Compose 레이아웃은 Minecraft 데이터를 `./data/minecraft`에, 봇 런타임 상태를 `./data/mcbot`에 분리합니다. 기존 설치에서 월드 파일(`world`, `world_nether`, `server.properties`, `mods` 등)이 `./data` 바로 아래에 있다면 서버를 중지한 뒤 명시적으로 옮겨야 합니다. 봇은 일반 startup에서 기존 데이터를 자동 이동하거나 삭제하지 않습니다.
+
+예시:
+
+```bash
+docker compose stop mc-server mcbot
+mkdir -p data/minecraft
+# 아래 mv 대상은 환경마다 다릅니다. world/mods/config 등 실제 Minecraft 파일만 옮기고 data/mcbot은 옮기지 마세요.
+mv data/world data/world_nether data/world_the_end data/server.properties data/mods data/config data/minecraft/ 2>/dev/null || true
+docker compose up -d
+```
+
+`./data/mcbot`, `.env`, `backups/`는 게임 데이터 백업 source가 아닙니다. migration 전에는 `mcbot backup create`가 안전을 증명할 수 없는 legacy layout을 거부하고 migration 안내를 출력할 수 있습니다.
+
 ## Make 명령어 레퍼런스
 
 프로젝트는 CLI를 감싼 편의 래퍼만 제공합니다. 운영의 기준은 항상 `mcbot ...` 입니다.
@@ -275,6 +320,13 @@ docker compose up -d mcbot
 | `make env-unset` | `mcbot env unset $(ARGS)` |
 | `make env-init` | `mcbot env init $(ARGS)` |
 | `make env-validate` | `mcbot env validate` |
+| `make backup` | `mcbot backup create $(ARGS)` |
+| `make restore BACKUP=<id>` | `mcbot backup restore --backup-id $(BACKUP) $(ARGS)` |
+| `make backup-create` | `mcbot backup create $(ARGS)` |
+| `make backup-list` | `mcbot backup list $(ARGS)` |
+| `make backup-validate` | `mcbot backup validate $(ARGS)` |
+| `make backup-prune` | `mcbot backup prune $(ARGS)` |
+| `make backup-restore` | `mcbot backup restore $(ARGS)` |
 
 ### 서버 실행 명령어
 
@@ -345,6 +397,17 @@ docker compose up -d mcbot
 | `container.port_publish` | 포트 매핑 |
 | `container.uid` | 컨테이너 UID |
 | `container.gid` | 컨테이너 GID |
+| `backup.enabled` | 일일 자동 백업 활성화 여부 |
+| `backup.directory` | repo root 기준 백업 저장소. 기본값 `backups` |
+| `backup.retention_count` | 보관할 regular successful backup 최대 개수 |
+| `backup.retention_days` | 0이면 age pruning 비활성, 양수면 해당 일수 초과 백업 prune 후보 |
+| `backup.retention_max_bytes` | 0이면 size pruning 비활성, 양수면 전체 백업 크기 상한 |
+| `backup.daily_time` | `HH:MM` 24시간 형식의 일일 자동 백업 시각 |
+| `backup.timezone` | `Local` 또는 IANA timezone |
+| `backup.quiesce_timeout_seconds` | RCON quiesce timeout |
+| `backup.include_mc_server_toml` | 백업에 `mc-server.toml` snapshot 포함 여부 |
+
+봇 컨테이너의 일일 scheduler는 안전한 좁은 mount(`/app/data/minecraft:ro`, `/app/backups`, `/app/mc-server.toml:ro`)만 사용하므로 `backup.directory = "backups"`일 때만 활성화됩니다. 비기본 backup directory는 host CLI/Make 경로에서 사용할 수 있지만, 컨테이너 scheduler는 시작 시 경고 후 비활성화됩니다.
 
 `config` 명령은 `mc-server.toml`만 읽고, `env` 명령은 `.env`만 읽습니다. 서로의 키를 거꾸로 쓰면 거부됩니다.
 
@@ -492,6 +555,9 @@ RCON_CMDS_STARTUP=gamerule keepInventory true
 ├── .env.example                # 환경 변수 템플릿
 ├── .gitignore
 ├── data/                       # MC 서버 데이터 (gitignore)
+│   ├── minecraft/              # 게임 데이터; mc-server /data 및 백업 source
+│   └── mcbot/                  # 봇 런타임 상태; 백업 source 제외
+├── backups/                    # 기본 backup.directory; gitignore
 ├── docs/
 │   ├── README.md               # 프로젝트 문서
 │   └── TESTING.md              # 테스트 가이드

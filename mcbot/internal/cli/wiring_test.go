@@ -39,6 +39,12 @@ func TestMakeOperationalTargetsAreDeduplicated(t *testing.T) {
 		"config validate",
 		"env-validate:",
 		"env validate",
+		"backup:",
+		"backup create",
+		"restore:",
+		"backup restore --backup-id $(BACKUP)",
+		"backup-list:",
+		"backup list",
 	} {
 		assertContains(t, makefile, want)
 	}
@@ -96,6 +102,9 @@ func TestCommittedMcServerConfigMatchesCodeDefaults(t *testing.T) {
 	config := readRepoFile(t, repo, "mc-server.toml")
 
 	assertContains(t, config, `type = "FORGE"`)
+	assertContains(t, config, `[backup]`)
+	assertContains(t, config, `directory = "backups"`)
+	assertContains(t, config, `retention_count = 14`)
 }
 
 func TestDocsDescribeSetupWorkflow(t *testing.T) {
@@ -145,6 +154,51 @@ func TestDocsDescribeSetupWorkflow(t *testing.T) {
 	} {
 		assertContains(t, makefile, want)
 	}
+}
+
+func TestBackupLayoutAndDocs(t *testing.T) {
+	repo := repoRoot(t)
+	compose := readRepoFile(t, repo, "docker-compose.yml")
+	makefile := readRepoFile(t, repo, "Makefile")
+	readme := readRepoFile(t, repo, "docs", "README.md")
+	testingDoc := readRepoFile(t, repo, "docs", "TESTING.md")
+	gitignore := readRepoFile(t, repo, ".gitignore")
+
+	for _, want := range []string{
+		"./data/minecraft:/data",
+		"./data/mcbot:/app/data/mcbot",
+		"./data/minecraft:/app/data/minecraft:ro",
+		"./backups:/app/backups",
+		"./mc-server.toml:/app/mc-server.toml:ro",
+	} {
+		assertContains(t, compose, want)
+	}
+	if strings.Contains(compose, "./data:/data") {
+		t.Fatal("docker-compose.yml still mounts the whole ./data tree into mc-server")
+	}
+
+	for _, want := range []string{
+		"$(MCBOT_CLI) $(GLOBAL_ARGS) backup create $(ARGS)",
+		"$(MCBOT_CLI) $(GLOBAL_ARGS) backup restore --backup-id $(BACKUP) $(ARGS)",
+		"$(MCBOT_CLI) $(GLOBAL_ARGS) backup list $(ARGS)",
+		"$(MCBOT_CLI) $(GLOBAL_ARGS) backup validate $(ARGS)",
+		"$(MCBOT_CLI) $(GLOBAL_ARGS) backup prune $(ARGS)",
+	} {
+		assertContains(t, makefile, want)
+	}
+
+	for _, want := range []string{
+		"backup.retention_count",
+		"data/minecraft",
+		"data/mcbot",
+		"mcbot backup restore --interactive",
+		"quiesce",
+		"자동 복원은 없으며",
+	} {
+		assertContains(t, readme, want)
+	}
+	assertContains(t, testingDoc, "백업/복원 회귀")
+	assertContains(t, gitignore, "/backups/")
 }
 
 func TestControllerMissingContainerGuidancePrefersCanonicalCLI(t *testing.T) {

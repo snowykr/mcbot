@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/snowy/mcbot/internal/backup"
 	"github.com/snowy/mcbot/internal/envfile"
 	"github.com/snowy/mcbot/internal/mcconfig"
 	"github.com/snowy/mcbot/internal/serverops"
@@ -134,6 +135,7 @@ func TestSetupCommandTree(t *testing.T) {
 
 	tree := CommandTree()
 	assertCommandTreeContains(t, tree, "setup", "env", "config")
+	assertCommandTreeContains(t, tree, "backup", "create", "list", "inspect", "validate", "verify", "prune", "restore")
 }
 
 func TestShowSecretsRejectedOutsideEnvCommands(t *testing.T) {
@@ -178,6 +180,13 @@ func TestJSONOutputPolicy(t *testing.T) {
 		{"env", "show"},
 		{"env", "get"},
 		{"env", "validate"},
+		{"backup", "create"},
+		{"backup", "list"},
+		{"backup", "inspect"},
+		{"backup", "validate"},
+		{"backup", "verify"},
+		{"backup", "prune"},
+		{"backup", "restore"},
 	} {
 		if !SupportsJSON(args) {
 			t.Fatalf("SupportsJSON(%v) = false, want true", args)
@@ -1382,6 +1391,331 @@ func TestConfigSetValidationFailureLeavesFileUnchanged(t *testing.T) {
 	}
 }
 
+func TestBackupCreateListValidateAndPruneCLI(t *testing.T) {
+	tempDir := t.TempDir()
+	sourceDir := filepath.Join(tempDir, "data", "minecraft")
+	backupDir := filepath.Join(tempDir, "backups")
+	configFile := filepath.Join(tempDir, "mc-server.toml")
+	if err := os.WriteFile(filepath.Join(tempDir, "docker-compose.yml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tempDir, "mcbot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "mcbot", "go.mod"), []byte("module test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceDir, "world"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "world", "level.dat"), []byte("level"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mcconfig.Write(configFile, mcconfig.Defaults()); err != nil {
+		t.Fatal(err)
+	}
+	server := &fakeServerRunner{status: serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}}
+	defer SetServerRunnerForTest(server)()
+
+	stdout, stderr, exitCode := runCLI(t, "--json", "backup", "create", "--source-dir", sourceDir, "--backup-dir", backupDir, "--config-file", configFile, "--no-retention")
+	if exitCode != ExitOK {
+		t.Fatalf("backup create exit = %d stderr=%q stdout=%q", exitCode, stderr, stdout)
+	}
+	assertContains(t, stdout, `"backup_id"`)
+	var created backup.CreateResult
+	if err := json.Unmarshal([]byte(stdout), &created); err != nil {
+		t.Fatalf("decode create json: %v", err)
+	}
+
+	stdout, stderr, exitCode = runCLI(t, "--json", "backup", "list", "--backup-dir", backupDir, "--config-file", configFile)
+	if exitCode != ExitOK {
+		t.Fatalf("backup list exit = %d stderr=%q", exitCode, stderr)
+	}
+	assertContains(t, stdout, created.BackupID)
+
+	stdout, stderr, exitCode = runCLI(t, "--json", "backup", "validate", "--backup-dir", backupDir, "--config-file", configFile, "--backup-id", created.BackupID)
+	if exitCode != ExitOK {
+		t.Fatalf("backup validate exit = %d stderr=%q", exitCode, stderr)
+	}
+	assertContains(t, stdout, `"validated_files"`)
+
+	stdout, stderr, exitCode = runCLI(t, "--json", "backup", "prune", "--backup-dir", backupDir, "--config-file", configFile, "--dry-run")
+	if exitCode != ExitOK {
+		t.Fatalf("backup prune exit = %d stderr=%q", exitCode, stderr)
+	}
+	assertContains(t, stdout, `"dry_run":true`)
+}
+
+func TestBackupDirectoryMustStayUnderRepo(t *testing.T) {
+	tempDir := t.TempDir()
+	outsideDir := filepath.Join(t.TempDir(), "backups")
+	configFile := filepath.Join(tempDir, "mc-server.toml")
+	if err := os.WriteFile(filepath.Join(tempDir, "docker-compose.yml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tempDir, "mcbot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "mcbot", "go.mod"), []byte("module test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mcconfig.Write(configFile, mcconfig.Defaults()); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, exitCode := runCLI(t, "backup", "list", "--backup-dir", outsideDir, "--config-file", configFile)
+	if exitCode != ExitValidation {
+		t.Fatalf("backup list outside repo exit = %d, want %d; stderr=%q stdout=%q", exitCode, ExitValidation, stderr, stdout)
+	}
+	assertContains(t, stderr, "under the repository root")
+}
+
+func TestBackupSourceRejectsSymlinkComponent(t *testing.T) {
+	tempDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside")
+	configFile := filepath.Join(tempDir, "mc-server.toml")
+	if err := os.WriteFile(filepath.Join(tempDir, "docker-compose.yml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tempDir, "mcbot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "mcbot", "go.mod"), []byte("module test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(outside, "minecraft"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(tempDir, "data")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := mcconfig.Write(configFile, mcconfig.Defaults()); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, exitCode := runCLI(t, "backup", "list", "--source-dir", filepath.Join(tempDir, "data", "minecraft"), "--backup-dir", filepath.Join(tempDir, "backups"), "--config-file", configFile)
+	if exitCode != ExitValidation {
+		t.Fatalf("backup list symlink source exit = %d, want %d; stderr=%q stdout=%q", exitCode, ExitValidation, stderr, stdout)
+	}
+	assertContains(t, stderr, "symlink")
+}
+
+func TestDefaultComposeRCONUsesDockerExecQuiescer(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envPath, []byte("RCON_PASSWORD=secret\nMC_CONTAINER_NAME=my-mc\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var gotContainer string
+	var gotCommand string
+	previous := dockerExecRCONCommand
+	dockerExecRCONCommand = func(_ context.Context, container, command string) ([]byte, error) {
+		gotContainer = container
+		gotCommand = command
+		return []byte("ok"), nil
+	}
+	defer func() { dockerExecRCONCommand = previous }()
+	q, err := rconClientFromEnv(envPath)
+	if err != nil {
+		t.Fatalf("rconClientFromEnv failed: %v", err)
+	}
+	if _, err := q.Execute(context.Background(), "save-off"); err != nil {
+		t.Fatalf("docker exec quiescer failed: %v", err)
+	}
+	if gotContainer != "my-mc" || gotCommand != "save-off" {
+		t.Fatalf("docker exec args = container %q command %q", gotContainer, gotCommand)
+	}
+}
+
+func TestBackupRestoreRequiresExplicitIDOrInteractive(t *testing.T) {
+	stdout, stderr, exitCode := runCLI(t, "backup", "restore")
+	if exitCode != ExitUsage {
+		t.Fatalf("backup restore exit = %d, want %d", exitCode, ExitUsage)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	assertContains(t, stderr, "requires --backup-id")
+
+	stdout, stderr, exitCode = runCLI(t, "backup", "restore", "--archive", "/tmp/backup.tar.gz")
+	if exitCode != ExitUsage {
+		t.Fatalf("backup restore --archive exit = %d, want %d", exitCode, ExitUsage)
+	}
+	assertContains(t, stderr, "does not accept --archive")
+}
+
+func TestBackupRestoreNoInputRequiresYes(t *testing.T) {
+	tempDir := t.TempDir()
+	sourceDir := filepath.Join(tempDir, "source")
+	targetDir := filepath.Join(tempDir, "data", "minecraft")
+	backupDir := filepath.Join(tempDir, "backups")
+	configFile := filepath.Join(tempDir, "mc-server.toml")
+	if err := os.WriteFile(filepath.Join(tempDir, "docker-compose.yml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tempDir, "mcbot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "mcbot", "go.mod"), []byte("module test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceDir, "world"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "world", "level.dat"), []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(targetDir, "old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "old", "old.dat"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mcconfig.Defaults()
+	cfg.Container.UID = os.Getuid()
+	cfg.Container.GID = os.Getgid()
+	if err := mcconfig.Write(configFile, cfg); err != nil {
+		t.Fatal(err)
+	}
+	created, err := backup.Create(context.Background(), backup.CreateOptions{
+		SourceDir:     sourceDir,
+		ConfigPath:    configFile,
+		BackupDir:     backupDir,
+		Policy:        cfg.Backup,
+		StoppedProven: true,
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("seed backup failed: %v", err)
+	}
+	server := &fakeServerRunner{status: serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}}
+	defer SetServerRunnerForTest(server)()
+
+	stdout, stderr, exitCode := runCLI(t, "--no-input", "backup", "restore", "--source-dir", targetDir, "--backup-dir", backupDir, "--config-file", configFile, "--backup-id", created.BackupID)
+	if exitCode != ExitUsage {
+		t.Fatalf("backup restore --no-input exit = %d, want %d; stderr=%q stdout=%q", exitCode, ExitUsage, stderr, stdout)
+	}
+	assertContains(t, stderr, "prompt required")
+
+	stdout, stderr, exitCode = runCLI(t, "--yes", "--json", "backup", "restore", "--source-dir", targetDir, "--backup-dir", backupDir, "--config-file", configFile, "--backup-id", created.BackupID)
+	if exitCode != ExitOK {
+		t.Fatalf("backup restore --yes exit = %d stderr=%q stdout=%q", exitCode, stderr, stdout)
+	}
+	assertContains(t, stdout, `"safety_backup_id"`)
+	if got := readTestFile(t, filepath.Join(targetDir, "world", "level.dat")); got != "new" {
+		t.Fatalf("restored file = %q", got)
+	}
+	assertFileDoesNotExist(t, filepath.Join(targetDir, "old", "old.dat"))
+}
+
+func TestBackupRestoreJSONConfirmationKeepsStdoutParseable(t *testing.T) {
+	tempDir := t.TempDir()
+	sourceDir := filepath.Join(tempDir, "source")
+	targetDir := filepath.Join(tempDir, "data", "minecraft")
+	backupDir := filepath.Join(tempDir, "backups")
+	configFile := filepath.Join(tempDir, "mc-server.toml")
+	if err := os.WriteFile(filepath.Join(tempDir, "docker-compose.yml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tempDir, "mcbot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "mcbot", "go.mod"), []byte("module test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(sourceDir, "world", "level.dat"), "new")
+	writeTestFile(t, filepath.Join(targetDir, "old", "old.dat"), "old")
+	cfg := mcconfig.Defaults()
+	cfg.Container.UID = os.Getuid()
+	cfg.Container.GID = os.Getgid()
+	if err := mcconfig.Write(configFile, cfg); err != nil {
+		t.Fatal(err)
+	}
+	created, err := backup.Create(context.Background(), backup.CreateOptions{
+		SourceDir:     sourceDir,
+		ConfigPath:    configFile,
+		BackupDir:     backupDir,
+		Policy:        cfg.Backup,
+		StoppedProven: true,
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("seed backup failed: %v", err)
+	}
+	server := &fakeServerRunner{status: serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}}
+	defer SetServerRunnerForTest(server)()
+
+	stdout, stderr, exitCode := runCLIWithInput(t, "y\n", "--json", "backup", "restore", "--source-dir", targetDir, "--backup-dir", backupDir, "--config-file", configFile, "--backup-id", created.BackupID)
+	if exitCode != ExitOK {
+		t.Fatalf("backup restore --json confirm exit = %d stderr=%q stdout=%q", exitCode, stderr, stdout)
+	}
+	var result backup.RestoreResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("restore stdout is not parseable JSON: %v; stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	if result.BackupID != created.BackupID {
+		t.Fatalf("restore backup id = %q, want %q", result.BackupID, created.BackupID)
+	}
+	if strings.Contains(stdout, "Restore backup") || strings.Contains(stdout, "Replace current game data") {
+		t.Fatalf("stdout contains human confirmation text: %q", stdout)
+	}
+	assertContains(t, stderr, "Restore backup")
+	assertContains(t, stderr, "Replace current game data")
+}
+
+func TestBackupRestoreInteractiveSelectsBackupID(t *testing.T) {
+	tempDir := t.TempDir()
+	sourceDir := filepath.Join(tempDir, "source")
+	targetDir := filepath.Join(tempDir, "data", "minecraft")
+	backupDir := filepath.Join(tempDir, "backups")
+	configFile := filepath.Join(tempDir, "mc-server.toml")
+	if err := os.WriteFile(filepath.Join(tempDir, "docker-compose.yml"), []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tempDir, "mcbot"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "mcbot", "go.mod"), []byte("module test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceDir, "world"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "world", "level.dat"), []byte("interactive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := mcconfig.Defaults()
+	cfg.Container.UID = os.Getuid()
+	cfg.Container.GID = os.Getgid()
+	if err := mcconfig.Write(configFile, cfg); err != nil {
+		t.Fatal(err)
+	}
+	created, err := backup.Create(context.Background(), backup.CreateOptions{
+		SourceDir:     sourceDir,
+		ConfigPath:    configFile,
+		BackupDir:     backupDir,
+		Policy:        cfg.Backup,
+		StoppedProven: true,
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("seed backup failed: %v", err)
+	}
+	server := &fakeServerRunner{status: serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}}
+	defer SetServerRunnerForTest(server)()
+
+	stdout, stderr, exitCode := runCLIWithInput(t, "1\ny\n", "backup", "restore", "--interactive", "--source-dir", targetDir, "--backup-dir", backupDir, "--config-file", configFile)
+	if exitCode != ExitOK {
+		t.Fatalf("interactive restore exit = %d stderr=%q stdout=%q", exitCode, stderr, stdout)
+	}
+	assertContains(t, stdout, created.BackupID)
+	if got := readTestFile(t, filepath.Join(targetDir, "world", "level.dat")); got != "interactive" {
+		t.Fatalf("restored interactive file = %q", got)
+	}
+}
+
 func TestEnvShowAndGetMaskSecretsByDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	if err := os.WriteFile(path, []byte("DISCORD_TOKEN=secret-token\nMC_CONTAINER_NAME=mc-server\n"), 0o600); err != nil {
@@ -1969,6 +2303,16 @@ func readTestFile(t *testing.T, path string) string {
 		t.Fatalf("read %s failed: %v", path, err)
 	}
 	return string(data)
+}
+
+func writeTestFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write %s failed: %v", path, err)
+	}
 }
 
 func assertFileDoesNotExist(t *testing.T, path string) {

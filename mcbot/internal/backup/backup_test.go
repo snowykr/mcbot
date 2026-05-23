@@ -1,0 +1,1188 @@
+package backup
+
+import (
+	"archive/tar"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/snowy/mcbot/internal/mcconfig"
+)
+
+func TestCreateStoppedBackupWritesManifestAndGameDataOnly(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, filepath.Join(source, ".env"), "secret")
+	writeFile(t, filepath.Join(source, ".secret"), "hidden")
+	writeFile(t, filepath.Join(source, "logs", "latest.log"), "log")
+	writeFile(t, filepath.Join(source, "world", "session.lock"), "lock")
+	writeFile(t, filepath.Join(source, "world", "scratch.tmp"), "tmp")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+
+	result, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		CreatedBy:     "cli",
+		Reason:        "manual",
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("abcdefgh"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if result.BackupID != "20260522T043000Z-abcdefgh" {
+		t.Fatalf("backup id = %q", result.BackupID)
+	}
+	validation, err := ValidateArchive(result.ArchivePath)
+	if err != nil {
+		t.Fatalf("ValidateArchive failed: %v", err)
+	}
+	if validation.Manifest.BackupID != result.BackupID {
+		t.Fatalf("manifest backup id = %q", validation.Manifest.BackupID)
+	}
+	names := tarNames(t, result.ArchivePath)
+	for _, want := range []string{"manifest.json", "mc-server.toml", "world-data/world", "world-data/world/level.dat"} {
+		if !contains(names, want) {
+			t.Fatalf("archive names %v missing %s", names, want)
+		}
+	}
+	for _, forbidden := range []string{"world-data/.env", "world-data/.secret", "world-data/logs/latest.log", "world-data/world/session.lock", "world-data/world/scratch.tmp", "data/mcbot"} {
+		if contains(names, forbidden) {
+			t.Fatalf("archive names %v unexpectedly contains %s", names, forbidden)
+		}
+	}
+}
+
+func TestCreateRunningBackupRequiresAndUsesQuiesce(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+
+	if _, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: false,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("bbbbbbbb"),
+		NoRetention:   true,
+	}); err == nil {
+		t.Fatal("Create without quiescer succeeded, want fail closed")
+	}
+
+	q := &fakeQuiescer{}
+	_, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: false,
+		Quiescer:      q,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("cccccccc"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create with quiescer failed: %v", err)
+	}
+	want := []string{"save-off", "save-all flush", "save-on"}
+	if !reflect.DeepEqual(q.commands, want) {
+		t.Fatalf("quiesce commands = %v, want %v", q.commands, want)
+	}
+}
+
+func TestRunQuiescedReportsSaveOnCleanupAfterOperationFailure(t *testing.T) {
+	q := &failingQuiescer{failures: map[string]error{"save-on": errors.New("save-on down")}}
+	err := RunQuiesced(context.Background(), q, time.Second, func(context.Context, QuiesceManifest) error {
+		return errors.New("archive failed")
+	})
+	if err == nil || !strings.Contains(err.Error(), "archive failed") || !strings.Contains(err.Error(), "save-on cleanup failed") {
+		t.Fatalf("RunQuiesced error = %v, want operation and save-on cleanup failures", err)
+	}
+	if got := strings.Join(q.commands, ","); got != "save-off,save-all flush,save-on" {
+		t.Fatalf("commands = %s", got)
+	}
+}
+
+func TestCreateRunningBackupCancelsArchiveAndStillSaveOn(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	policy := mcconfig.Defaults().Backup
+	ctx, cancel := context.WithCancel(context.Background())
+	q := &cancelAfterFlushQuiescer{cancel: cancel}
+
+	_, err := Create(ctx, CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        policy,
+		StoppedProven: false,
+		Quiescer:      q,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("ctxabort"),
+		NoRetention:   true,
+	})
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Create error = %v, want context.Canceled", err)
+	}
+	if got := strings.Join(q.commands, ","); got != "save-off,save-all flush,save-on" {
+		t.Fatalf("commands = %s, want save-on cleanup after archive cancellation", got)
+	}
+	if _, err := os.Stat(filepath.Join(backups, "20260522T043000Z-ctxabort.tar.gz")); !os.IsNotExist(err) {
+		t.Fatalf("archive exists after canceled live backup or stat failed: %v", err)
+	}
+}
+
+func TestCreateRejectsSourceSymlink(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	if err := os.MkdirAll(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	if err := os.Symlink("/tmp", filepath.Join(source, "escape")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	_, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("dddddddd"),
+		NoRetention:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Create error = %v, want symlink rejection", err)
+	}
+}
+
+func TestCreateArchiveWithLongAndUnicodePathsValidatesAndRestores(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	target := filepath.Join(root, "data", "minecraft-restored")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	longDir := strings.Repeat("longsegment", 12)
+	unicodePath := filepath.Join(source, "world", longDir, "한글-월드-데이터.dat")
+	writeFile(t, unicodePath, "unicode-long")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+
+	created, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("paxpath1"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if _, err := ValidateArchive(created.ArchivePath); err != nil {
+		t.Fatalf("ValidateArchive rejected self-created PAX archive: %v", err)
+	}
+	if _, err := Restore(context.Background(), RestoreOptions{
+		BackupDir:     backups,
+		BackupID:      created.BackupID,
+		TargetDir:     target,
+		ConfigPath:    configPath,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		UID:           os.Getuid(),
+		GID:           os.Getgid(),
+		Now:           fixedNow,
+	}); err != nil {
+		t.Fatalf("Restore failed for self-created PAX archive: %v", err)
+	}
+	if got := readFile(t, filepath.Join(target, "world", longDir, "한글-월드-데이터.dat")); got != "unicode-long" {
+		t.Fatalf("restored unicode long file = %q", got)
+	}
+}
+
+func TestValidateArchiveRejectsUnsafeTarEntries(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "20260522T043000Z-eeeeeeee.tar.gz")
+	manifest := Manifest{
+		FormatVersion: ManifestFormatVersion,
+		BackupID:      "20260522T043000Z-eeeeeeee",
+		CreatedAt:     fixedNow(),
+		CreatedBy:     "cli",
+		BackupReason:  "manual",
+		Files:         []FileManifest{{Path: "world-data/escape", Size: 0, SHA256: emptySHA256}},
+	}
+	writeCustomArchive(t, path, manifest, func(tw *tar.Writer) {
+		if err := tw.WriteHeader(&tar.Header{Name: "world-data/escape", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"}); err != nil {
+			t.Fatalf("write symlink header: %v", err)
+		}
+	})
+	if _, err := ValidateArchive(path); err == nil || !strings.Contains(err.Error(), "unsupported type") {
+		t.Fatalf("ValidateArchive error = %v, want unsupported type", err)
+	}
+}
+
+func TestValidateArchiveRejectsExcludedPayloadPaths(t *testing.T) {
+	for _, entryName := range []string{"world-data/.secret", "world-data/logs/latest.log", "world-data/world/scratch.tmp", "world-data/world/session.lock"} {
+		t.Run(entryName, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "20260522T043000Z-excluded.tar.gz")
+			manifest := Manifest{
+				FormatVersion: ManifestFormatVersion,
+				BackupID:      "20260522T043000Z-excluded",
+				CreatedAt:     fixedNow(),
+				CreatedBy:     "cli",
+				BackupReason:  "manual",
+				Files:         []FileManifest{{Path: entryName, Size: 0, SHA256: emptySHA256}},
+			}
+			writeCustomArchive(t, path, manifest, func(tw *tar.Writer) {
+				if err := tw.WriteHeader(&tar.Header{Name: entryName, Typeflag: tar.TypeReg, Size: 0}); err != nil {
+					t.Fatalf("write header: %v", err)
+				}
+			})
+			if _, err := ValidateArchive(path); err == nil || !strings.Contains(err.Error(), "excluded") {
+				t.Fatalf("ValidateArchive error = %v, want excluded path rejection", err)
+			}
+		})
+	}
+}
+
+func TestValidateArchiveRejectsDuplicateManifestPathsAndNonCanonicalID(t *testing.T) {
+	t.Run("duplicate manifest paths", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "20260522T043000Z-dupepath.tar.gz")
+		manifest := Manifest{
+			FormatVersion: ManifestFormatVersion,
+			BackupID:      "20260522T043000Z-dupepath",
+			CreatedAt:     fixedNow(),
+			CreatedBy:     "cli",
+			BackupReason:  "manual",
+			Files: []FileManifest{
+				{Path: "world-data/level.dat", Size: 0, SHA256: emptySHA256},
+				{Path: "world-data/level.dat", Size: 0, SHA256: emptySHA256},
+			},
+		}
+		writeCustomArchive(t, path, manifest, func(tw *tar.Writer) {
+			if err := tw.WriteHeader(&tar.Header{Name: "world-data/level.dat", Typeflag: tar.TypeReg, Size: 0}); err != nil {
+				t.Fatalf("write header: %v", err)
+			}
+		})
+		if _, err := ValidateArchive(path); err == nil || !strings.Contains(err.Error(), "duplicate manifest") {
+			t.Fatalf("ValidateArchive error = %v, want duplicate manifest path rejection", err)
+		}
+	})
+	t.Run("non canonical backup id", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "not-canonical.tar.gz")
+		manifest := Manifest{
+			FormatVersion: ManifestFormatVersion,
+			BackupID:      "not-canonical",
+			CreatedAt:     fixedNow(),
+			CreatedBy:     "cli",
+			BackupReason:  "manual",
+		}
+		writeCustomArchive(t, path, manifest, func(*tar.Writer) {})
+		if _, err := ValidateArchive(path); err == nil || !strings.Contains(err.Error(), "canonical") {
+			t.Fatalf("ValidateArchive error = %v, want canonical id rejection", err)
+		}
+	})
+}
+
+func TestValidateArchiveRejectsConfigManifestMismatch(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "20260522T043000Z-cfgmismt.tar.gz")
+	configBytes := []byte("config")
+	sum := sha256Hex(configBytes)
+	manifest := Manifest{
+		FormatVersion:       ManifestFormatVersion,
+		BackupID:            "20260522T043000Z-cfgmismt",
+		CreatedAt:           fixedNow(),
+		CreatedBy:           "cli",
+		BackupReason:        "manual",
+		IncludeMCServerTOML: false,
+		Files:               []FileManifest{{Path: "mc-server.toml", Size: int64(len(configBytes)), SHA256: sum}},
+	}
+	writeCustomArchive(t, path, manifest, func(tw *tar.Writer) {
+		if err := tw.WriteHeader(&tar.Header{Name: "mc-server.toml", Typeflag: tar.TypeReg, Size: int64(len(configBytes))}); err != nil {
+			t.Fatalf("write config header: %v", err)
+		}
+		if _, err := tw.Write(configBytes); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	})
+	if _, err := ValidateArchive(path); err == nil || !strings.Contains(err.Error(), "include_mc_server_toml") {
+		t.Fatalf("ValidateArchive error = %v, want config flag mismatch rejection", err)
+	}
+}
+
+func TestValidateArchiveRejectsReservedPathDirectories(t *testing.T) {
+	for _, entryName := range []string{"manifest.json", "mc-server.toml"} {
+		t.Run(entryName, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "20260522T043000Z-reservd1.tar.gz")
+			manifest := Manifest{
+				FormatVersion:       ManifestFormatVersion,
+				BackupID:            "20260522T043000Z-reservd1",
+				CreatedAt:           fixedNow(),
+				CreatedBy:           "cli",
+				BackupReason:        "manual",
+				IncludeMCServerTOML: false,
+			}
+			writeCustomArchive(t, path, manifest, func(tw *tar.Writer) {
+				if err := tw.WriteHeader(&tar.Header{Name: entryName, Typeflag: tar.TypeDir}); err != nil {
+					t.Fatalf("write directory header: %v", err)
+				}
+			})
+			if _, err := ValidateArchive(path); err == nil || !strings.Contains(err.Error(), "regular file") {
+				t.Fatalf("ValidateArchive error = %v, want reserved path directory rejection", err)
+			}
+		})
+	}
+}
+
+func TestValidateArchiveRejectsSymlinkArchive(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	created, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("symlink1"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	linkPath := filepath.Join(root, "20260522T043000Z-symlink1.tar.gz")
+	if err := os.Symlink(created.ArchivePath, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := ValidateArchive(linkPath); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("ValidateArchive error = %v, want symlink rejection", err)
+	}
+}
+
+func TestAcquireLockBlocksActiveAndRecoversStale(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "backups")
+	now := time.Now().UTC()
+	first, err := AcquireLock(dir, LockMetadata{
+		Operation: "create",
+		Owner:     "cli",
+		BackupID:  "20260522T043000Z-locktest",
+		CreatedAt: now,
+		StaleAt:   now.Add(time.Hour),
+		Status:    "active",
+	})
+	if err != nil {
+		t.Fatalf("AcquireLock first failed: %v", err)
+	}
+	if _, err := AcquireLock(dir, LockMetadata{Operation: "prune", Owner: "cli", CreatedAt: now, StaleAt: now.Add(time.Hour)}); err == nil {
+		t.Fatal("AcquireLock with active lock succeeded, want contention")
+	}
+	if err := first.Release(); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
+	stalePath := filepath.Join(dir, LockDirName, lockFileName)
+	stale := LockMetadata{Operation: "create", Owner: "cli", CreatedAt: now.Add(-time.Hour), StaleAt: now.Add(-time.Minute), Status: "stale"}
+	data, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, stalePath, string(data))
+	recovered, err := AcquireLock(dir, LockMetadata{Operation: "restore", Owner: "cli", CreatedAt: now, StaleAt: now.Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("AcquireLock did not recover stale lock: %v", err)
+	}
+	if err := recovered.Release(); err != nil {
+		t.Fatalf("Release recovered failed: %v", err)
+	}
+}
+
+func TestLockReleaseDoesNotRemoveSuccessorAfterStaleRecovery(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "backups")
+	now := time.Now().UTC()
+	original, err := AcquireLock(dir, LockMetadata{
+		Operation: "create",
+		Owner:     "first",
+		CreatedAt: now.Add(-2 * time.Hour),
+		StaleAt:   now.Add(-time.Hour),
+		Status:    "stale original",
+	})
+	if err != nil {
+		t.Fatalf("AcquireLock original failed: %v", err)
+	}
+	successor, err := AcquireLock(dir, LockMetadata{
+		Operation: "restore",
+		Owner:     "second",
+		CreatedAt: now,
+		StaleAt:   now.Add(time.Hour),
+		Status:    "successor active",
+	})
+	if err != nil {
+		t.Fatalf("AcquireLock successor failed: %v", err)
+	}
+	if err := original.Release(); err != nil {
+		t.Fatalf("Release original failed: %v", err)
+	}
+	if _, err := AcquireLock(dir, LockMetadata{
+		Operation: "prune",
+		Owner:     "third",
+		CreatedAt: now,
+		StaleAt:   now.Add(time.Hour),
+		Status:    "should block",
+	}); err == nil {
+		t.Fatal("AcquireLock after stale owner's Release succeeded, successor lock was removed")
+	}
+	if err := successor.Release(); err != nil {
+		t.Fatalf("Release successor failed: %v", err)
+	}
+}
+
+func TestPruneUsesCanonicalLock(t *testing.T) {
+	backups := filepath.Join(t.TempDir(), "backups")
+	now := time.Now().UTC()
+	lock, err := AcquireLock(backups, LockMetadata{
+		Operation: "create",
+		Owner:     "test",
+		CreatedAt: now,
+		StaleAt:   now.Add(time.Hour),
+		Status:    "active",
+	})
+	if err != nil {
+		t.Fatalf("AcquireLock failed: %v", err)
+	}
+	defer lock.Release()
+	if _, err := Prune(context.Background(), PruneOptions{BackupDir: backups, Policy: mcconfig.Defaults().Backup}); err == nil || !strings.Contains(err.Error(), "active") {
+		t.Fatalf("Prune error = %v, want active lock contention", err)
+	}
+}
+
+func TestPruneRetainsNewestCountAndProtectsSafetyBackups(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	policy := mcconfig.Defaults().Backup
+	policy.RetentionCount = 2
+
+	createAt := func(ts string, suffix string, reason string) {
+		t.Helper()
+		when, err := time.Parse(time.RFC3339, ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = Create(context.Background(), CreateOptions{
+			SourceDir:     source,
+			ConfigPath:    configPath,
+			BackupDir:     backups,
+			Policy:        policy,
+			Reason:        reason,
+			StoppedProven: true,
+			Now:           func() time.Time { return when },
+			RandomSuffix:  fixedSuffix(suffix),
+			NoRetention:   true,
+		})
+		if err != nil {
+			t.Fatalf("Create(%s) failed: %v", suffix, err)
+		}
+	}
+	createAt("2026-05-20T04:30:00Z", "aaaaaaa1", "manual")
+	createAt("2026-05-21T04:30:00Z", "aaaaaaa2", "restore-safety")
+	createAt("2026-05-22T04:30:00Z", "aaaaaaa3", "manual")
+	createAt("2026-05-23T04:30:00Z", "aaaaaaa4", "manual")
+
+	result, err := Prune(context.Background(), PruneOptions{BackupDir: backups, Policy: policy})
+	if err != nil {
+		t.Fatalf("Prune failed: %v", err)
+	}
+	if len(result.Deleted) != 1 || !strings.HasSuffix(result.Deleted[0].BackupID, "aaaaaaa1") {
+		t.Fatalf("deleted = %+v, want oldest regular only", result.Deleted)
+	}
+	if len(result.Protected) != 1 || !strings.Contains(result.Protected[0].Reason, "safety") {
+		t.Fatalf("protected = %+v, want safety backup", result.Protected)
+	}
+	if _, err := os.Stat(filepath.Join(backups, result.Deleted[0].BackupID+".tar.gz")); !os.IsNotExist(err) {
+		t.Fatalf("deleted backup still exists or stat failed: %v", err)
+	}
+}
+
+func TestCreateRetentionCountsCurrentBackup(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	policy := mcconfig.Defaults().Backup
+	policy.RetentionCount = 1
+	create := func(ts, suffix string) {
+		t.Helper()
+		when, err := time.Parse(time.RFC3339, ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Create(context.Background(), CreateOptions{
+			SourceDir:     source,
+			ConfigPath:    configPath,
+			BackupDir:     backups,
+			Policy:        policy,
+			StoppedProven: true,
+			Now:           func() time.Time { return when },
+			RandomSuffix:  fixedSuffix(suffix),
+		}); err != nil {
+			t.Fatalf("Create(%s) failed: %v", suffix, err)
+		}
+	}
+	create("2026-05-21T04:30:00Z", "retentn1")
+	create("2026-05-22T04:30:00Z", "retentn2")
+	items, err := List(context.Background(), backups)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(items) != 1 || !strings.HasSuffix(items[0].BackupID, "retentn2") {
+		t.Fatalf("retained backups = %+v, want only newest current backup", items)
+	}
+}
+
+func TestCreateRetentionMaxBytesPreservesCurrentBackup(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), strings.Repeat("x", 1024))
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	policy := mcconfig.Defaults().Backup
+	policy.RetentionCount = 10
+	policy.RetentionMaxBytes = 1
+
+	result, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        policy,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("sizelive"),
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if _, err := os.Stat(result.ArchivePath); err != nil {
+		t.Fatalf("created archive missing after retention: %v", err)
+	}
+	items, err := List(context.Background(), backups)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(items) != 1 || items[0].BackupID != result.BackupID {
+		t.Fatalf("retained backups = %+v, want current backup %s", items, result.BackupID)
+	}
+	if result.RetentionResult == nil {
+		t.Fatal("Create did not report retention result")
+	}
+	for _, deleted := range result.RetentionResult.Deleted {
+		if deleted.BackupID == result.BackupID {
+			t.Fatalf("retention deleted current backup: %+v", deleted)
+		}
+	}
+}
+
+func TestRestoreRejectsUnsafeTargetRoot(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	created, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("badroot1"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	target := filepath.Join(root, "data")
+	writeFile(t, filepath.Join(target, "mcbot", "state.json"), "{}")
+	if _, err := Restore(context.Background(), RestoreOptions{
+		BackupDir:     backups,
+		BackupID:      created.BackupID,
+		TargetDir:     target,
+		ConfigPath:    configPath,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		UID:           os.Getuid(),
+		GID:           os.Getgid(),
+		Now:           fixedNow,
+	}); err == nil || !strings.Contains(err.Error(), "protected path") {
+		t.Fatalf("Restore error = %v, want protected target rejection", err)
+	}
+	if got := readFile(t, filepath.Join(target, "mcbot", "state.json")); got != "{}" {
+		t.Fatalf("protected bot data changed: %q", got)
+	}
+}
+
+func TestRestoreRejectsSymlinkTargetComponent(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	outside := filepath.Join(root, "outside")
+	dataLink := filepath.Join(root, "data")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, filepath.Join(outside, "minecraft", "old.dat"), "old")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	if err := os.Symlink(outside, dataLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	created, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("targetln"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if _, err := Restore(context.Background(), RestoreOptions{
+		BackupDir:     backups,
+		BackupID:      created.BackupID,
+		TargetDir:     filepath.Join(dataLink, "minecraft"),
+		ConfigPath:    configPath,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		UID:           os.Getuid(),
+		GID:           os.Getgid(),
+		Now:           fixedNow,
+	}); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Restore error = %v, want symlink component rejection", err)
+	}
+	if got := readFile(t, filepath.Join(outside, "minecraft", "old.dat")); got != "old" {
+		t.Fatalf("escaped target changed: %q", got)
+	}
+}
+
+func TestRestoreRejectsSymlinkConfigPath(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	outsideConfig := filepath.Join(root, "outside.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "new")
+	writeFile(t, filepath.Join(target, "old.dat"), "old")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	writeFile(t, outsideConfig, "outside")
+	created, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("cfgsymbl"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideConfig, configPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := Restore(context.Background(), RestoreOptions{
+		BackupDir:     backups,
+		BackupID:      created.BackupID,
+		TargetDir:     target,
+		ConfigPath:    configPath,
+		RepoRoot:      root,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		UID:           os.Getuid(),
+		GID:           os.Getgid(),
+		Now:           fixedNow,
+	}); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Restore error = %v, want symlink config rejection", err)
+	}
+	if got := readFile(t, outsideConfig); got != "outside" {
+		t.Fatalf("outside config changed: %q", got)
+	}
+}
+
+func TestRestoreSafetyBackupIncludesConfigWhenArchiveRestoresConfig(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "new")
+	writeFile(t, filepath.Join(target, "old.dat"), "old")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	created, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("cfgsafe1"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	restorePolicy := mcconfig.Defaults().Backup
+	restorePolicy.IncludeMCServerTOML = false
+	result, err := Restore(context.Background(), RestoreOptions{
+		BackupDir:     backups,
+		BackupID:      created.BackupID,
+		TargetDir:     target,
+		ConfigPath:    configPath,
+		RepoRoot:      root,
+		Policy:        restorePolicy,
+		StoppedProven: true,
+		UID:           os.Getuid(),
+		GID:           os.Getgid(),
+		Now:           fixedNow,
+	})
+	if err != nil {
+		t.Fatalf("Restore failed: %v", err)
+	}
+	validation, err := ValidateArchive(result.SafetyArchivePath)
+	if err != nil {
+		t.Fatalf("Validate safety archive failed: %v", err)
+	}
+	if !validation.Manifest.IncludeMCServerTOML {
+		t.Fatal("safety backup did not include current config before config-restoring archive")
+	}
+}
+
+func TestRestoreConfigArchiveSucceedsWhenCurrentConfigMissing(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	configContents := mcconfig.Render(mcconfig.Defaults())
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "new")
+	writeFile(t, filepath.Join(target, "old.dat"), "old")
+	writeFile(t, configPath, configContents)
+	created, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("cfgmiss1"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := os.Remove(configPath); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Restore(context.Background(), RestoreOptions{
+		BackupDir:     backups,
+		BackupID:      created.BackupID,
+		TargetDir:     target,
+		ConfigPath:    configPath,
+		RepoRoot:      root,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		UID:           os.Getuid(),
+		GID:           os.Getgid(),
+		Now:           fixedNow,
+	})
+	if err != nil {
+		t.Fatalf("Restore with missing current config failed: %v", err)
+	}
+	if !result.RestoredConfig {
+		t.Fatal("Restore did not restore archived config")
+	}
+	if got := readFile(t, configPath); got != configContents {
+		t.Fatalf("restored config = %q, want original archive config", got)
+	}
+	if got := readFile(t, filepath.Join(target, "world", "level.dat")); got != "new" {
+		t.Fatalf("restored world = %q", got)
+	}
+	validation, err := ValidateArchive(result.SafetyArchivePath)
+	if err != nil {
+		t.Fatalf("Validate safety archive failed: %v", err)
+	}
+	if validation.Manifest.IncludeMCServerTOML {
+		t.Fatal("safety backup included missing current config")
+	}
+}
+
+func TestRestoreRejectsInvalidStagedConfigBeforeReplacingTarget(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	archivePath := filepath.Join(backups, "20260522T043000Z-badconf1.tar.gz")
+	oldConfig := mcconfig.Render(mcconfig.Defaults())
+	newWorld := []byte("new")
+	invalidConfig := []byte("unknown_key = true\n")
+	writeFile(t, filepath.Join(target, "world", "level.dat"), "old")
+	writeFile(t, configPath, oldConfig)
+	if err := os.MkdirAll(backups, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{
+		FormatVersion:       ManifestFormatVersion,
+		BackupID:            "20260522T043000Z-badconf1",
+		CreatedAt:           fixedNow(),
+		CreatedBy:           "cli",
+		BackupReason:        "manual",
+		IncludeMCServerTOML: true,
+		Files: []FileManifest{
+			{Path: "world-data/world/level.dat", Size: int64(len(newWorld)), SHA256: sha256Hex(newWorld)},
+			{Path: "mc-server.toml", Size: int64(len(invalidConfig)), SHA256: sha256Hex(invalidConfig)},
+		},
+	}
+	writeCustomArchive(t, archivePath, manifest, func(tw *tar.Writer) {
+		if err := tw.WriteHeader(&tar.Header{Name: "world-data/world/level.dat", Typeflag: tar.TypeReg, Size: int64(len(newWorld))}); err != nil {
+			t.Fatalf("write world header: %v", err)
+		}
+		if _, err := tw.Write(newWorld); err != nil {
+			t.Fatalf("write world: %v", err)
+		}
+		if err := tw.WriteHeader(&tar.Header{Name: "mc-server.toml", Typeflag: tar.TypeReg, Size: int64(len(invalidConfig))}); err != nil {
+			t.Fatalf("write config header: %v", err)
+		}
+		if _, err := tw.Write(invalidConfig); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	})
+	if _, err := Restore(context.Background(), RestoreOptions{
+		BackupDir:     backups,
+		BackupID:      "20260522T043000Z-badconf1",
+		TargetDir:     target,
+		ConfigPath:    configPath,
+		RepoRoot:      root,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		UID:           os.Getuid(),
+		GID:           os.Getgid(),
+		Now:           fixedNow,
+	}); err == nil || !strings.Contains(err.Error(), "staged mc-server.toml is invalid") {
+		t.Fatalf("Restore error = %v, want invalid staged config rejection", err)
+	}
+	if got := readFile(t, filepath.Join(target, "world", "level.dat")); got != "old" {
+		t.Fatalf("target world changed before config validation failure: %q", got)
+	}
+	if got := readFile(t, configPath); got != oldConfig {
+		t.Fatalf("config changed before config validation failure")
+	}
+}
+
+func TestNormalizePathReportsChownFailureEvenWhenOperatorCanWrite(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "level.dat")
+	writeFile(t, path, "level")
+	oldChown := chownPath
+	chownPath = func(string, int, int) error {
+		return fmt.Errorf("operation not permitted")
+	}
+	t.Cleanup(func() { chownPath = oldChown })
+
+	err := normalizePath(path, 1001, 1001, false)
+	if err == nil || !strings.Contains(err.Error(), "normalize ownership") {
+		t.Fatalf("normalizePath error = %v, want ownership failure", err)
+	}
+	if got := readFile(t, path); got != "level" {
+		t.Fatalf("normalizePath changed file contents: %q", got)
+	}
+}
+
+func TestRestoreNormalizationFailureLeavesTargetUnchanged(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "new")
+	writeFile(t, filepath.Join(target, "old-world", "old.dat"), "old")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	created, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("normfail"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	oldChown := chownPath
+	chownPath = func(string, int, int) error {
+		return fmt.Errorf("operation not permitted")
+	}
+	t.Cleanup(func() { chownPath = oldChown })
+
+	_, err = Restore(context.Background(), RestoreOptions{
+		BackupDir:     backups,
+		BackupID:      created.BackupID,
+		TargetDir:     target,
+		ConfigPath:    configPath,
+		RepoRoot:      root,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		UID:           1001,
+		GID:           1001,
+		Now:           fixedNow,
+	})
+	if err == nil || !strings.Contains(err.Error(), "normalize staged restore tree") {
+		t.Fatalf("Restore error = %v, want staged normalization failure", err)
+	}
+	if got := readFile(t, filepath.Join(target, "old-world", "old.dat")); got != "old" {
+		t.Fatalf("target old-world changed after failed normalization: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(target, "world", "level.dat")); !os.IsNotExist(err) {
+		t.Fatalf("new restored world exists after failed normalization or stat failed: %v", err)
+	}
+}
+
+func TestRestoreRequiresStoppedServerAndReplacesTarget(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "new")
+	writeFile(t, filepath.Join(target, "old-world", "old.dat"), "old")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	created, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("restore1"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if _, err := Restore(context.Background(), RestoreOptions{
+		BackupDir:     backups,
+		BackupID:      created.BackupID,
+		TargetDir:     target,
+		ConfigPath:    configPath,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: false,
+		UID:           os.Getuid(),
+		GID:           os.Getgid(),
+		Now:           fixedNow,
+	}); err == nil {
+		t.Fatal("Restore while not stopped succeeded, want error")
+	}
+	result, err := Restore(context.Background(), RestoreOptions{
+		BackupDir:     backups,
+		BackupID:      created.BackupID,
+		TargetDir:     target,
+		ConfigPath:    configPath,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		UID:           os.Getuid(),
+		GID:           os.Getgid(),
+		Now:           fixedNow,
+	})
+	if err != nil {
+		t.Fatalf("Restore failed: %v", err)
+	}
+	if result.SafetyBackupID == "" {
+		t.Fatal("Restore did not create safety backup")
+	}
+	if got := readFile(t, filepath.Join(target, "world", "level.dat")); got != "new" {
+		t.Fatalf("restored level.dat = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(target, "old-world", "old.dat")); !os.IsNotExist(err) {
+		t.Fatalf("old overlay file still exists or stat failed: %v", err)
+	}
+}
+
+func fixedNow() time.Time {
+	return time.Date(2026, 5, 22, 4, 30, 0, 0, time.UTC)
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s failed: %v", path, err)
+	}
+	return string(data)
+}
+
+func fixedSuffix(value string) func() (string, error) {
+	return func() (string, error) { return value, nil }
+}
+
+type fakeQuiescer struct {
+	commands []string
+}
+
+func (f *fakeQuiescer) Execute(_ context.Context, command string) (string, error) {
+	f.commands = append(f.commands, command)
+	return "ok", nil
+}
+
+type cancelAfterFlushQuiescer struct {
+	commands []string
+	cancel   context.CancelFunc
+}
+
+func (f *cancelAfterFlushQuiescer) Execute(_ context.Context, command string) (string, error) {
+	f.commands = append(f.commands, command)
+	if command == "save-all flush" && f.cancel != nil {
+		f.cancel()
+	}
+	return "ok", nil
+}
+
+type failingQuiescer struct {
+	commands []string
+	failures map[string]error
+}
+
+func (f *failingQuiescer) Execute(_ context.Context, command string) (string, error) {
+	f.commands = append(f.commands, command)
+	if err := f.failures[command]; err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+func writeFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write %s failed: %v", path, err)
+	}
+}
+
+func tarNames(t *testing.T, path string) []string {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	gzr, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gzr.Close()
+	tr := tar.NewReader(gzr)
+	var names []string
+	for {
+		header, err := tr.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatal(err)
+		}
+		names = append(names, header.Name)
+	}
+	return names
+}
+
+func contains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func writeCustomArchive(t *testing.T, path string, manifest Manifest, writeEntries func(*tar.Writer)) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	gzw := gzip.NewWriter(file)
+	defer gzw.Close()
+	tw := tar.NewWriter(gzw)
+	defer tw.Close()
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "manifest.json", Typeflag: tar.TypeReg, Mode: 0o640, Size: int64(len(data))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	writeEntries(tw)
+}

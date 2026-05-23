@@ -166,7 +166,7 @@ func runWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "version":
 		fmt.Fprintf(stdout, "mcbot %s\n", version)
 		return ExitOK
-	case "bot", "server", "config", "env", "setup":
+	case "bot", "server", "config", "env", "setup", "backup":
 		return dispatchPlaceholder(opts, remaining, stdin, stdout, stderr)
 	default:
 		return usageError(stderr, "unknown command %q", remaining[0])
@@ -511,6 +511,7 @@ func CommandTree() []Command {
 		{Name: "server", Description: "Minecraft server operations", Subcommands: []Command{{Name: "start"}, {Name: "stop"}, {Name: "status"}}},
 		{Name: "config", Description: "Minecraft server configuration", Subcommands: []Command{{Name: "show"}, {Name: "get"}, {Name: "set"}, {Name: "init"}, {Name: "validate"}}},
 		{Name: "env", Description: "Environment file management", Subcommands: []Command{{Name: "show"}, {Name: "get"}, {Name: "set"}, {Name: "unset"}, {Name: "init"}, {Name: "validate"}}},
+		{Name: "backup", Description: "Game data backup and restore", Subcommands: []Command{{Name: "create"}, {Name: "list"}, {Name: "inspect"}, {Name: "validate"}, {Name: "verify"}, {Name: "prune"}, {Name: "restore"}}},
 		{Name: "setup", Description: "Guided setup flow", Subcommands: []Command{{Name: "env"}, {Name: "config"}}},
 	}
 }
@@ -563,6 +564,8 @@ func SupportsJSON(args []string) bool {
 		return args[1] == "status"
 	case "config", "env":
 		return args[1] == "show" || args[1] == "get" || args[1] == "validate"
+	case "backup":
+		return args[1] == "create" || args[1] == "list" || args[1] == "inspect" || args[1] == "validate" || args[1] == "verify" || args[1] == "prune" || args[1] == "restore"
 	default:
 		return false
 	}
@@ -637,6 +640,9 @@ func dispatchPlaceholder(opts Options, args []string, stdin io.Reader, stdout, s
 	}
 	if args[0] == "config" {
 		return dispatchConfig(opts, args[1], args[2:], stdout, stderr)
+	}
+	if args[0] == "backup" {
+		return dispatchBackup(opts, args[1], args[2:], stdin, stdout, stderr)
 	}
 	return dispatchEnv(opts, args[1], args[2:], stdout, stderr)
 }

@@ -16,8 +16,11 @@ services:
       RCON_PORT:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      # Shared under ./data so mc-server already sees it via ./data:/data.
+      # Keep bot runtime state separate from game data so backups stay game-only.
       - ./data/mcbot:/app/data/mcbot
+      - ./data/minecraft:/app/data/minecraft:ro
+      - ./backups:/app/backups
+      - ./mc-server.toml:/app/mc-server.toml:ro
 
   mc-server:
     image: itzg/minecraft-server
@@ -48,7 +51,7 @@ services:
       RCON_CMDS_STARTUP:
 
     volumes:
-      - ./data:/data
+      - ./data/minecraft:/data
 
     deploy:
       resources:
