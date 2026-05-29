@@ -1414,8 +1414,10 @@ func TestBackupCreateListValidateAndPruneCLI(t *testing.T) {
 	if err := mcconfig.Write(configFile, mcconfig.Defaults()); err != nil {
 		t.Fatal(err)
 	}
-	server := &fakeServerRunner{status: serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}}
-	defer SetServerRunnerForTest(server)()
+	stopped := serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}
+	defer SetBackupServerStatusForTest(func(context.Context, backupPaths) (serverops.Result, error) {
+		return stopped, nil
+	})()
 
 	stdout, stderr, exitCode := runCLI(t, "--json", "backup", "create", "--source-dir", sourceDir, "--backup-dir", backupDir, "--config-file", configFile, "--no-retention")
 	if exitCode != ExitOK {
@@ -1587,8 +1589,10 @@ func TestBackupRestoreNoInputRequiresYes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed backup failed: %v", err)
 	}
-	server := &fakeServerRunner{status: serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}}
-	defer SetServerRunnerForTest(server)()
+	stopped := serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}
+	defer SetBackupServerStatusForTest(func(context.Context, backupPaths) (serverops.Result, error) {
+		return stopped, nil
+	})()
 
 	stdout, stderr, exitCode := runCLI(t, "--no-input", "backup", "restore", "--source-dir", targetDir, "--backup-dir", backupDir, "--config-file", configFile, "--backup-id", created.BackupID)
 	if exitCode != ExitUsage {
@@ -1641,8 +1645,10 @@ func TestBackupRestoreJSONConfirmationKeepsStdoutParseable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed backup failed: %v", err)
 	}
-	server := &fakeServerRunner{status: serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}}
-	defer SetServerRunnerForTest(server)()
+	stopped := serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}
+	defer SetBackupServerStatusForTest(func(context.Context, backupPaths) (serverops.Result, error) {
+		return stopped, nil
+	})()
 
 	stdout, stderr, exitCode := runCLIWithInput(t, "y\n", "--json", "backup", "restore", "--source-dir", targetDir, "--backup-dir", backupDir, "--config-file", configFile, "--backup-id", created.BackupID)
 	if exitCode != ExitOK {
@@ -1703,8 +1709,10 @@ func TestBackupRestoreInteractiveSelectsBackupID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed backup failed: %v", err)
 	}
-	server := &fakeServerRunner{status: serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}}
-	defer SetServerRunnerForTest(server)()
+	stopped := serverops.Result{Service: "mc-server", Exists: true, Running: false, Status: "exited"}
+	defer SetBackupServerStatusForTest(func(context.Context, backupPaths) (serverops.Result, error) {
+		return stopped, nil
+	})()
 
 	stdout, stderr, exitCode := runCLIWithInput(t, "1\ny\n", "backup", "restore", "--interactive", "--source-dir", targetDir, "--backup-dir", backupDir, "--config-file", configFile)
 	if exitCode != ExitOK {

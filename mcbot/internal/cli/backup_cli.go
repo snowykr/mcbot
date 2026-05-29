@@ -16,9 +16,28 @@ import (
 	"github.com/snowy/mcbot/internal/envfile"
 	"github.com/snowy/mcbot/internal/mcconfig"
 	"github.com/snowy/mcbot/internal/rcon"
+	"github.com/snowy/mcbot/internal/serverops"
 )
 
 var dockerExecRCONCommand = runDockerExecRCONCommand
+
+func defaultBackupServerStatus(ctx context.Context, paths backupPaths) (serverops.Result, error) {
+	return serverops.Status(ctx, serverops.Options{Paths: composePathsFromBackup(paths)})
+}
+
+var backupServerStatus = defaultBackupServerStatus
+
+func SetBackupServerStatusForTest(fn func(context.Context, backupPaths) (serverops.Result, error)) func() {
+	old := backupServerStatus
+	if fn != nil {
+		backupServerStatus = fn
+	} else {
+		backupServerStatus = defaultBackupServerStatus
+	}
+	return func() {
+		backupServerStatus = old
+	}
+}
 
 type backupFlags struct {
 	opts              Options
@@ -177,7 +196,7 @@ func dispatchBackupRestore(ctx context.Context, flags backupFlags, paths backupP
 	if backupID == "" {
 		return usageError(stderr, "backup restore requires --backup-id <id> or --interactive")
 	}
-	stopped, err := restoreStoppedPrecondition(ctx)
+	stopped, err := restoreStoppedPrecondition(ctx, paths)
 	if err != nil {
 		fmt.Fprintf(stderr, "%v\n", err)
 		return ExitOperational
@@ -487,8 +506,17 @@ func pathsOverlap(a, b string) bool {
 	return pathWithin(a, b) || pathWithin(b, a)
 }
 
+func composePathsFromBackup(paths backupPaths) composectl.Paths {
+	return composectl.Paths{
+		RepoRoot:    paths.repoRoot,
+		EnvFile:     paths.envFile,
+		ConfigFile:  paths.configPath,
+		ComposeFile: filepath.Join(paths.repoRoot, "docker-compose.yml"),
+	}
+}
+
 func backupCreatePreconditions(ctx context.Context, paths backupPaths) (bool, backup.Quiescer, error) {
-	status, err := serverRunner.Status(ctx)
+	status, err := backupServerStatus(ctx, paths)
 	if err == nil && !status.Running {
 		return true, nil, nil
 	}
@@ -502,8 +530,8 @@ func backupCreatePreconditions(ctx context.Context, paths backupPaths) (bool, ba
 	return false, q, nil
 }
 
-func restoreStoppedPrecondition(ctx context.Context) (bool, error) {
-	status, err := serverRunner.Status(ctx)
+func restoreStoppedPrecondition(ctx context.Context, paths backupPaths) (bool, error) {
+	status, err := backupServerStatus(ctx, paths)
 	if err != nil {
 		return false, err
 	}
