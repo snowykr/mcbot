@@ -791,7 +791,7 @@ func RunQuiesced(ctx context.Context, q Quiescer, timeout time.Duration, fn func
 		return fmt.Errorf("rcon save-all flush failed: %w", err)
 	}
 	manifest.Succeeded = true
-	err := fn(qctx, manifest)
+	err := fn(ctx, manifest)
 	if saveOffSucceeded {
 		if _, onErr := q.Execute(context.Background(), "save-on"); onErr != nil {
 			if err != nil {

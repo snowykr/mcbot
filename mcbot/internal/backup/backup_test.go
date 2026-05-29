@@ -113,6 +113,26 @@ func TestCreateRunningBackupRequiresAndUsesQuiesce(t *testing.T) {
 	}
 }
 
+func TestRunQuiescedArchiveOutlivesQuiesceTimeout(t *testing.T) {
+	q := &fakeQuiescer{}
+	err := RunQuiesced(context.Background(), q, 50*time.Millisecond, func(opCtx context.Context, _ QuiesceManifest) error {
+		timer := time.NewTimer(150 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-opCtx.Done():
+			return opCtx.Err()
+		case <-timer.C:
+			return nil
+		}
+	})
+	if err != nil {
+		t.Fatalf("RunQuiesced error = %v, want archive work to outlive quiesce timeout", err)
+	}
+	if got := strings.Join(q.commands, ","); got != "save-off,save-all flush,save-on" {
+		t.Fatalf("commands = %s", got)
+	}
+}
+
 func TestRunQuiescedReportsSaveOnCleanupAfterOperationFailure(t *testing.T) {
 	q := &failingQuiescer{failures: map[string]error{"save-on": errors.New("save-on down")}}
 	err := RunQuiesced(context.Background(), q, time.Second, func(context.Context, QuiesceManifest) error {
@@ -1208,6 +1228,48 @@ func TestRestoreRejectsSymlinkConfigPath(t *testing.T) {
 	}
 	if got := readFile(t, outsideConfig); got != "outside" {
 		t.Fatalf("outside config changed: %q", got)
+	}
+}
+
+func TestRestoreDoesNotPreserveStaleDataDirectory(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "world")
+	writeFile(t, filepath.Join(source, "data", "scoreboard.dat"), "from-archive")
+	writeFile(t, filepath.Join(target, "data", "scoreboard.dat"), "stale-local")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	created, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("staledat"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if _, err := Restore(context.Background(), RestoreOptions{
+		BackupDir:     backups,
+		BackupID:      created.BackupID,
+		TargetDir:     target,
+		ConfigPath:    configPath,
+		RepoRoot:      root,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		UID:           os.Getuid(),
+		GID:           os.Getgid(),
+		Now:           fixedNow,
+	}); err != nil {
+		t.Fatalf("Restore failed: %v", err)
+	}
+	if got := readFile(t, filepath.Join(target, "data", "scoreboard.dat")); got != "from-archive" {
+		t.Fatalf("restored data = %q, want archive contents not preserved stale target data", got)
 	}
 }
 

@@ -159,7 +159,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 		ConfigIncluded:    validation.Manifest.IncludeMCServerTOML,
 		ValidatedFiles:    validation.ValidatedFiles,
 		ReplacementScope:  "target directory contents",
-		PreservedPaths:    ".env,mcbot,data,backups,.locks,.git,.omx,.mcbot-restore-*",
+		PreservedPaths:    ".env,mcbot,backups,.locks,.git,.omx,.mcbot-restore-*",
 	}, nil
 }
 
@@ -485,7 +485,7 @@ func copyPreservedRestoreEntries(targetDir, replacement string) error {
 
 func preserveRestoreEntry(name string) bool {
 	switch name {
-	case ".env", "mcbot", "data", "backups", ".locks", ".git", ".omx":
+	case ".env", "mcbot", "backups", ".locks", ".git", ".omx":
 		return true
 	default:
 		return strings.HasPrefix(name, ".mcbot-restore-")

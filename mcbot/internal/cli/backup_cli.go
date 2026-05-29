@@ -220,7 +220,7 @@ func dispatchBackupRestore(ctx context.Context, flags backupFlags, paths backupP
 			fmt.Fprintf(stderr, "%v\n", err)
 			return ExitInternal
 		}
-		if err := restoreConfirmationLine(out, flags.opts, "Replacement scope: target directory contents; preserved: .env,mcbot,data,backups,.locks,.git,.omx,.mcbot-restore-*"); err != nil {
+		if err := restoreConfirmationLine(out, flags.opts, "Replacement scope: target directory contents; preserved: .env,mcbot,backups,.locks,.git,.omx,.mcbot-restore-*"); err != nil {
 			fmt.Fprintf(stderr, "%v\n", err)
 			return ExitInternal
 		}
