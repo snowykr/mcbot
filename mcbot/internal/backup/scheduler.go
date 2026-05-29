@@ -12,14 +12,15 @@ import (
 )
 
 type SchedulerOptions struct {
-	Policy     mcconfig.BackupConfig
-	SourceDir  string
-	ConfigPath string
-	BackupDir  string
-	Quiescer   Quiescer
-	Now        func() time.Time
-	Sleep      func(context.Context, time.Duration) error
-	Logf       func(string, ...any)
+	Policy        mcconfig.BackupConfig
+	SourceDir     string
+	ConfigPath    string
+	BackupDir     string
+	Quiescer      Quiescer
+	ServerRunning func(ctx context.Context) (bool, error)
+	Now           func() time.Time
+	Sleep         func(context.Context, time.Duration) error
+	Logf          func(string, ...any)
 }
 
 type Scheduler struct {
@@ -78,6 +79,7 @@ func (s *Scheduler) RunOnce(ctx context.Context, reason string) (CreateResult, e
 	if s.opts.Quiescer == nil {
 		return CreateResult{}, fmt.Errorf("backup scheduler requires RCON quiescer")
 	}
+	stoppedProven := s.serverStoppedProven(ctx)
 	result, err := Create(ctx, CreateOptions{
 		SourceDir:     s.opts.SourceDir,
 		ConfigPath:    s.opts.ConfigPath,
@@ -85,7 +87,7 @@ func (s *Scheduler) RunOnce(ctx context.Context, reason string) (CreateResult, e
 		Policy:        s.opts.Policy,
 		CreatedBy:     "bot-auto",
 		Reason:        reason,
-		StoppedProven: false,
+		StoppedProven: stoppedProven,
 		Quiescer:      s.opts.Quiescer,
 		Now:           s.opts.Now,
 	})
@@ -177,6 +179,18 @@ func (s *Scheduler) loop(ctx context.Context) {
 
 func (s *Scheduler) logf(format string, args ...any) {
 	s.opts.Logf(format, args...)
+}
+
+func (s *Scheduler) serverStoppedProven(ctx context.Context) bool {
+	if s.opts.ServerRunning == nil {
+		return false
+	}
+	running, err := s.opts.ServerRunning(ctx)
+	if err != nil {
+		s.logf("[BACKUP] server state check failed, requiring RCON quiesce: %v", err)
+		return false
+	}
+	return !running
 }
 
 func schedulerLocation(name string) (*time.Location, error) {

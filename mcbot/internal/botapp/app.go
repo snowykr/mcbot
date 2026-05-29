@@ -14,6 +14,7 @@ import (
 	"github.com/snowy/mcbot/internal/backup"
 	"github.com/snowy/mcbot/internal/composectl"
 	"github.com/snowy/mcbot/internal/config"
+	"github.com/snowy/mcbot/internal/dockerctl"
 	"github.com/snowy/mcbot/internal/discord"
 	"github.com/snowy/mcbot/internal/mcconfig"
 	"github.com/snowy/mcbot/internal/mcserver"
@@ -192,8 +193,25 @@ func startConfiguredBackupScheduler(ctx context.Context, quiescer backup.Quiesce
 	if cfg.Backup.Enabled && cfg.Backup.Directory != defaultBackupDir {
 		return fmt.Errorf("container backup scheduler requires backup.directory=%q; configured %q; use host CLI/Make for non-default backup directories", defaultBackupDir, cfg.Backup.Directory)
 	}
-	_, err = backup.StartScheduler(ctx, backup.ContainerSchedulerOptions(cfg.Backup, quiescer))
+	opts := backup.ContainerSchedulerOptions(cfg.Backup, quiescer)
+	opts.ServerRunning = mcContainerRunning
+	_, err = backup.StartScheduler(ctx, opts)
 	return err
+}
+
+func mcContainerRunning(ctx context.Context) (bool, error) {
+	name := os.Getenv("MC_CONTAINER_NAME")
+	if name == "" {
+		name = composectl.MCServerService
+	}
+	state, err := dockerctl.InspectContainer(ctx, name)
+	if err != nil {
+		return false, fmt.Errorf("inspect container %s: %w", name, err)
+	}
+	if !state.Exists {
+		return false, nil
+	}
+	return state.Running, nil
 }
 
 func ResolveStartupEmbedChannelID(ctx context.Context, cfg *config.Config, store RuntimeEmbedChannelStore) string {
