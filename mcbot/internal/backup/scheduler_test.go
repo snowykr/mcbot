@@ -65,6 +65,53 @@ func TestSchedulerNextRunUsesLocalCalendarDayAcrossDST(t *testing.T) {
 	}
 }
 
+func TestSchedulerRunMissedIgnoresSafetyBackupForSameDay(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	configPath := filepath.Join(root, "mc-server.toml")
+	backups := filepath.Join(root, "backups")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	policy := mcconfig.Defaults().Backup
+	policy.DailyTime = "04:00"
+	policy.Timezone = "UTC"
+	policy.QuiesceTimeoutSeconds = 5
+	now := time.Date(2026, 5, 22, 5, 0, 0, 0, time.UTC)
+	_, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        policy,
+		Reason:        "restore-safety",
+		StoppedProven: true,
+		Now:           func() time.Time { return now.Add(-time.Hour) },
+	})
+	if err != nil {
+		t.Fatalf("Create safety backup failed: %v", err)
+	}
+	q := &fakeQuiescer{}
+	s, err := NewScheduler(SchedulerOptions{
+		Policy:        policy,
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Quiescer:      q,
+		ServerRunning: func(context.Context) (bool, error) { return true, nil },
+		Now:           func() time.Time { return now },
+		Logf:          func(string, ...any) {},
+	})
+	if err != nil {
+		t.Fatalf("NewScheduler failed: %v", err)
+	}
+	ran, err := s.RunMissedIfDue(context.Background())
+	if err != nil {
+		t.Fatalf("RunMissedIfDue failed: %v", err)
+	}
+	if !ran {
+		t.Fatal("RunMissedIfDue skipped missed backup because of same-day restore-safety archive")
+	}
+}
+
 func TestSchedulerRunMissedCreatesQuiescedBackupOnce(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "data", "minecraft")

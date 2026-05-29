@@ -139,6 +139,9 @@ func (s *Scheduler) successfulBackupExistsForLocalDate(now time.Time) bool {
 		return false
 	}
 	for _, item := range items {
+		if isSafetyBackupReason(item.Reason) {
+			continue
+		}
 		if item.CreatedAt.In(s.loc).Format("2006-01-02") == date {
 			return true
 		}

@@ -224,12 +224,16 @@ func verifiedBackups(backupDir string) ([]verifiedBackup, error) {
 	return backups, nil
 }
 
+func isSafetyBackupReason(reason string) bool {
+	reason = strings.ToLower(reason)
+	return strings.Contains(reason, "restore-safety") || strings.Contains(reason, "safety")
+}
+
 func isProtectedBackup(manifest Manifest, active map[string]struct{}) bool {
 	if _, ok := active[manifest.BackupID]; ok {
 		return true
 	}
-	reason := strings.ToLower(manifest.BackupReason)
-	return strings.Contains(reason, "restore-safety") || strings.Contains(reason, "safety")
+	return isSafetyBackupReason(manifest.BackupReason)
 }
 
 func sortSummaries(items []BackupSummary) {
