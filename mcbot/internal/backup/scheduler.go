@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -92,7 +93,7 @@ func (s *Scheduler) RunOnce(ctx context.Context, reason string) (CreateResult, e
 		Now:           s.opts.Now,
 	})
 	if err != nil {
-		if result.BackupID != "" {
+		if result.BackupID != "" && errors.Is(err, ErrRetentionAfterCreate) {
 			s.logf("[BACKUP] automatic backup created id=%s but retention failed: %v", result.BackupID, err)
 		} else {
 			s.logf("[BACKUP] automatic backup failed: %v", err)

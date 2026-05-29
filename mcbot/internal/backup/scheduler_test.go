@@ -2,7 +2,11 @@ package backup
 
 import (
 	"context"
+	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +260,112 @@ func TestStartSchedulerEnabledAllowsColdOnlyWithoutQuiescer(t *testing.T) {
 	case <-loopStarted:
 	case <-time.After(2 * time.Second):
 		t.Fatal("cold-only scheduler did not start loop")
+	}
+}
+
+func TestSchedulerRunOnceFailsOnSaveOnCleanupDespiteCreatedArchive(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	configPath := filepath.Join(root, "mc-server.toml")
+	backups := filepath.Join(root, "backups")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	policy := mcconfig.Defaults().Backup
+	policy.QuiesceTimeoutSeconds = 5
+	q := &failingQuiescer{failures: map[string]error{"save-on": errors.New("save-on down")}}
+	s, err := NewScheduler(SchedulerOptions{
+		Policy:        policy,
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Quiescer:      q,
+		ServerRunning: func(context.Context) (bool, error) { return true, nil },
+		Now:           fixedNow,
+		Logf:          func(string, ...any) {},
+	})
+	if err != nil {
+		t.Fatalf("NewScheduler failed: %v", err)
+	}
+	_, err = s.RunOnce(context.Background(), "scheduled-daily")
+	if err == nil || !strings.Contains(err.Error(), "save-on cleanup failed") {
+		t.Fatalf("RunOnce error = %v, want save-on cleanup failure", err)
+	}
+	if s.lastSuccessfulLocalDate != "" {
+		t.Fatalf("lastSuccessfulLocalDate = %q, want empty after save-on cleanup failure", s.lastSuccessfulLocalDate)
+	}
+}
+
+func TestSchedulerRunOnceSucceedsWhenRetentionFailsAfterCreate(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	configPath := filepath.Join(root, "mc-server.toml")
+	backups := filepath.Join(root, "backups")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	policy := mcconfig.Defaults().Backup
+	policy.QuiesceTimeoutSeconds = 5
+	_, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        policy,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("oldseed1"),
+	})
+	if err != nil {
+		t.Fatalf("seed backup failed: %v", err)
+	}
+	entries, err := os.ReadDir(backups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldArchive string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".tar.gz") {
+			oldArchive = filepath.Join(backups, entry.Name())
+			break
+		}
+	}
+	if oldArchive == "" {
+		t.Fatal("seed backup archive missing")
+	}
+	if runtime.GOOS == "darwin" {
+		if err := exec.Command("chflags", "uchg", oldArchive).Run(); err != nil {
+			t.Skipf("chflags uchg unavailable: %v", err)
+		}
+		defer func() { _ = exec.Command("chflags", "nouchg", oldArchive).Run() }()
+	} else if err := os.Chmod(backups, 0o555); err != nil {
+		t.Fatalf("chmod backup directory: %v", err)
+	} else {
+		defer func() { _ = os.Chmod(backups, 0o755) }()
+	}
+	s, err := NewScheduler(SchedulerOptions{
+		Policy:        policy,
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Quiescer:      &fakeQuiescer{},
+		ServerRunning: func(context.Context) (bool, error) { return true, nil },
+		Now:           func() time.Time { return fixedNow().Add(time.Minute) },
+		Logf:          func(string, ...any) {},
+	})
+	if err != nil {
+		t.Fatalf("NewScheduler failed: %v", err)
+	}
+	result, err := s.RunOnce(context.Background(), "scheduled-daily")
+	if err != nil {
+		t.Fatalf("RunOnce error = %v, want retention-only partial success", err)
+	}
+	if result.BackupID == "" {
+		t.Fatalf("backup id empty, want new backup despite retention failure")
+	}
+	if _, err := os.Stat(result.ArchivePath); err != nil {
+		t.Fatalf("new archive missing after retention failure: %v", err)
+	}
+	wantDate := fixedNow().Add(time.Minute).In(s.loc).Format("2006-01-02")
+	if s.lastSuccessfulLocalDate != wantDate {
+		t.Fatalf("lastSuccessfulLocalDate = %q, want %q", s.lastSuccessfulLocalDate, wantDate)
 	}
 }
 
