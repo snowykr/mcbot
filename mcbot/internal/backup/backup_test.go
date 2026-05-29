@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -794,7 +796,7 @@ func TestLockHeartbeatKeepsExpiredOwnerActive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcquireLock failed: %v", err)
 	}
-	stopHeartbeat, err := lock.StartHeartbeat(10*time.Millisecond, time.Hour)
+	stopHeartbeat, _, err := lock.StartHeartbeat(10*time.Millisecond, time.Hour)
 	if err != nil {
 		t.Fatalf("StartHeartbeat failed: %v", err)
 	}
@@ -825,7 +827,7 @@ func TestLockHeartbeatSurvivesMutationGuardContention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcquireLock failed: %v", err)
 	}
-	stopHeartbeat, err := lock.StartHeartbeat(10*time.Millisecond, 50*time.Millisecond)
+	stopHeartbeat, _, err := lock.StartHeartbeat(10*time.Millisecond, 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("StartHeartbeat failed: %v", err)
 	}
@@ -994,12 +996,12 @@ func TestCreateRetentionCountsCurrentBackup(t *testing.T) {
 	}
 	create("2026-05-21T04:30:00Z", "retentn1")
 	create("2026-05-22T04:30:00Z", "retentn2")
-	items, err := List(context.Background(), backups)
+	listed, err := List(context.Background(), backups)
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
 	}
-	if len(items) != 1 || !strings.HasSuffix(items[0].BackupID, "retentn2") {
-		t.Fatalf("retained backups = %+v, want only newest current backup", items)
+	if len(listed.Valid) != 1 || !strings.HasSuffix(listed.Valid[0].BackupID, "retentn2") {
+		t.Fatalf("retained backups = %+v, want only newest current backup", listed.Valid)
 	}
 }
 
@@ -1029,12 +1031,12 @@ func TestCreateRetentionMaxBytesPreservesCurrentBackup(t *testing.T) {
 	if _, err := os.Stat(result.ArchivePath); err != nil {
 		t.Fatalf("created archive missing after retention: %v", err)
 	}
-	items, err := List(context.Background(), backups)
+	listed, err := List(context.Background(), backups)
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
 	}
-	if len(items) != 1 || items[0].BackupID != result.BackupID {
-		t.Fatalf("retained backups = %+v, want current backup %s", items, result.BackupID)
+	if len(listed.Valid) != 1 || listed.Valid[0].BackupID != result.BackupID {
+		t.Fatalf("retained backups = %+v, want current backup %s", listed.Valid, result.BackupID)
 	}
 	if result.RetentionResult == nil {
 		t.Fatal("Create did not report retention result")
@@ -1778,6 +1780,173 @@ const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b785
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func TestAcquireLockWithHeartbeatCancelsOnLockLoss(t *testing.T) {
+	oldInterval := lockHeartbeatInterval
+	lockHeartbeatInterval = 10 * time.Millisecond
+	defer func() { lockHeartbeatInterval = oldInterval }()
+
+	dir := filepath.Join(t.TempDir(), "backups")
+	now := time.Now().UTC()
+	lock, stop, opCtx, err := acquireLockWithHeartbeat(context.Background(), dir, LockMetadata{
+		Operation: "create",
+		Owner:     "test",
+		BackupID:  "20260522T043000Z-heartbeat",
+		CreatedAt: now,
+		StaleAt:   now.Add(time.Hour),
+		Status:    "long-running backup",
+	})
+	if err != nil {
+		t.Fatalf("acquireLockWithHeartbeat failed: %v", err)
+	}
+	defer lock.Release()
+	defer stop()
+	if err := os.Remove(lock.path); err != nil {
+		t.Fatalf("remove lock file: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for opCtx.Err() == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if opCtx.Err() == nil {
+		t.Fatal("opCtx was not cancelled after backup lock heartbeat loss")
+	}
+}
+
+func TestCreateRetentionFailurePreservesArchive(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	policy := mcconfig.Defaults().Backup
+	policy.RetentionCount = 1
+	if _, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        policy,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("rtnold01"),
+	}); err != nil {
+		t.Fatalf("seed Create failed: %v", err)
+	}
+	entries, err := os.ReadDir(backups)
+	if err != nil {
+		t.Fatalf("ReadDir backups: %v", err)
+	}
+	var oldArchive string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".tar.gz") {
+			oldArchive = filepath.Join(backups, entry.Name())
+			break
+		}
+	}
+	if oldArchive == "" {
+		t.Fatal("seed backup archive missing")
+	}
+	if runtime.GOOS == "darwin" {
+		if err := exec.Command("chflags", "uchg", oldArchive).Run(); err != nil {
+			t.Skipf("chflags uchg unavailable: %v", err)
+		}
+		defer func() { _ = exec.Command("chflags", "nouchg", oldArchive).Run() }()
+	} else if err := os.Chmod(backups, 0o555); err != nil {
+		t.Fatalf("chmod backup directory: %v", err)
+	} else {
+		defer func() { _ = os.Chmod(backups, 0o755) }()
+	}
+	result, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        policy,
+		StoppedProven: true,
+		Now:           func() time.Time { return fixedNow().Add(time.Minute) },
+		RandomSuffix:  fixedSuffix("rtnnew01"),
+	})
+	if !errors.Is(err, ErrRetentionAfterCreate) {
+		t.Fatalf("Create error = %v, want ErrRetentionAfterCreate", err)
+	}
+	if result.BackupID == "" || !strings.HasSuffix(result.BackupID, "rtnnew01") {
+		t.Fatalf("Create result = %+v, want partial success with new backup id", result)
+	}
+	if _, err := os.Stat(result.ArchivePath); err != nil {
+		t.Fatalf("new archive missing after retention failure: %v", err)
+	}
+}
+
+func TestListReportsInvalidArchives(t *testing.T) {
+	backups := filepath.Join(t.TempDir(), "backups")
+	if err := os.MkdirAll(backups, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	badPath := filepath.Join(backups, "not-a-valid-id.tar.gz")
+	if err := os.WriteFile(badPath, []byte("not a backup"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := List(context.Background(), backups)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(listed.Valid) != 0 {
+		t.Fatalf("valid backups = %+v, want none", listed.Valid)
+	}
+	if len(listed.Invalid) != 1 || listed.Invalid[0].FileName != "not-a-valid-id.tar.gz" {
+		t.Fatalf("invalid backups = %+v, want one invalid entry", listed.Invalid)
+	}
+}
+
+func TestPruneDeleteFailureDoesNotReportDeleted(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	policy := mcconfig.Defaults().Backup
+	policy.RetentionCount = 1
+	create := func(suffix string, when time.Time) string {
+		t.Helper()
+		result, err := Create(context.Background(), CreateOptions{
+			SourceDir:     source,
+			ConfigPath:    configPath,
+			BackupDir:     backups,
+			Policy:        policy,
+			StoppedProven: true,
+			Now:           func() time.Time { return when },
+			RandomSuffix:  fixedSuffix(suffix),
+			NoRetention:   true,
+		})
+		if err != nil {
+			t.Fatalf("Create(%s) failed: %v", suffix, err)
+		}
+		return result.ArchivePath
+	}
+	oldPath := create("pruneold", time.Date(2026, 5, 21, 4, 30, 0, 0, time.UTC))
+	create("prunenew", time.Date(2026, 5, 22, 4, 30, 0, 0, time.UTC))
+	if err := os.Chmod(backups, 0o555); err != nil {
+		t.Fatalf("chmod backup directory: %v", err)
+	}
+	result, err := Prune(context.Background(), PruneOptions{
+		BackupDir: backups,
+		Policy:    policy,
+		Now:       func() time.Time { return time.Date(2026, 5, 22, 4, 30, 0, 0, time.UTC) },
+	})
+	if err == nil {
+		t.Fatal("Prune succeeded, want delete failure")
+	}
+	if len(result.Deleted) != 0 {
+		t.Fatalf("Deleted = %+v, want no reported deletions before successful remove", result.Deleted)
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("old archive missing after failed prune: %v", err)
+	}
+	if err := os.Chmod(backups, 0o755); err != nil {
+		t.Fatalf("restore backup directory permissions: %v", err)
+	}
 }
 
 func writeCustomArchive(t *testing.T, path string, manifest Manifest, writeEntries func(*tar.Writer)) {

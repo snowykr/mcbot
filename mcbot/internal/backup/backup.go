@@ -116,10 +116,11 @@ func Create(ctx context.Context, opts CreateOptions) (CreateResult, error) {
 	if err != nil {
 		return CreateResult{}, err
 	}
+	opCtx := ctx
 	var lock *Lock
 	if !opts.AssumeLockHeld {
 		var stopHeartbeat func()
-		lock, stopHeartbeat, err = acquireLockWithHeartbeat(opts.BackupDir, LockMetadata{
+		lock, stopHeartbeat, opCtx, err = acquireLockWithHeartbeat(ctx, opts.BackupDir, LockMetadata{
 			Operation: "create",
 			Owner:     opts.CreatedBy,
 			BackupID:  id,
@@ -164,7 +165,8 @@ func Create(ctx context.Context, opts CreateOptions) (CreateResult, error) {
 				IgnoreActiveBackupID: id,
 			})
 			if err != nil {
-				return fmt.Errorf("apply retention after backup %s: %w", id, err)
+				result = created
+				return fmt.Errorf("%w: apply retention after backup %s: %w", ErrRetentionAfterCreate, id, err)
 			}
 			created.RetentionResult = &pruned
 		}
@@ -174,18 +176,24 @@ func Create(ctx context.Context, opts CreateOptions) (CreateResult, error) {
 
 	if opts.StoppedProven {
 		quiesce = QuiesceManifest{Attempted: false, Succeeded: false}
-		if err := createArchive(ctx); err != nil {
+		if err := createArchive(opCtx); err != nil {
+			if result.BackupID != "" {
+				return result, err
+			}
 			return CreateResult{}, err
 		}
 	} else {
 		if opts.Quiescer == nil {
 			return CreateResult{}, fmt.Errorf("backup requires RCON quiesce when server is running or stopped state is not proven")
 		}
-		err = RunQuiesced(ctx, opts.Quiescer, time.Duration(opts.Policy.QuiesceTimeoutSeconds)*time.Second, func(qctx context.Context, qm QuiesceManifest) error {
+		err = RunQuiesced(opCtx, opts.Quiescer, time.Duration(opts.Policy.QuiesceTimeoutSeconds)*time.Second, func(archiveCtx context.Context, qm QuiesceManifest) error {
 			quiesce = qm
-			return createArchive(qctx)
+			return createArchive(archiveCtx)
 		})
 		if err != nil {
+			if result.BackupID != "" {
+				return result, err
+			}
 			return CreateResult{}, err
 		}
 	}

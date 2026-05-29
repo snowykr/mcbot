@@ -68,7 +68,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 	if err := os.MkdirAll(opts.TargetDir, 0o755); err != nil {
 		return RestoreResult{}, fmt.Errorf("create restore target directory: %w", err)
 	}
-	lock, stopHeartbeat, err := acquireLockWithHeartbeat(opts.BackupDir, LockMetadata{
+	lock, stopHeartbeat, opCtx, err := acquireLockWithHeartbeat(ctx, opts.BackupDir, LockMetadata{
 		Operation: "restore",
 		Owner:     "cli",
 		BackupID:  opts.BackupID,
@@ -81,6 +81,9 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 	}
 	defer lock.Release()
 	defer stopHeartbeat()
+	if err := opCtx.Err(); err != nil {
+		return RestoreResult{}, err
+	}
 	archiveFile, validation, err := openValidatedArchive(archivePath)
 	if err != nil {
 		return RestoreResult{}, err
@@ -97,7 +100,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 		}
 		safetyPolicy.IncludeMCServerTOML = configExists
 	}
-	safety, err := Create(ctx, CreateOptions{
+	safety, err := Create(opCtx, CreateOptions{
 		SourceDir:      opts.TargetDir,
 		ConfigPath:     opts.ConfigPath,
 		BackupDir:      opts.BackupDir,
@@ -120,7 +123,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 		return RestoreResult{}, withSafetyBackup("create restore staging directory", safety, err)
 	}
 	defer os.RemoveAll(stage)
-	if err := extractArchiveToStage(archiveFile, archivePath, stage); err != nil {
+	if err := extractArchiveToStage(opCtx, archiveFile, archivePath, stage); err != nil {
 		return RestoreResult{}, withSafetyBackup("extract backup for restore", safety, err)
 	}
 	configStage := filepath.Join(stage, "mc-server.toml")
@@ -128,7 +131,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 		return RestoreResult{}, withSafetyBackup("validate staged mc-server.toml", safety, err)
 	}
 	worldStage := filepath.Join(stage, "world-data")
-	restoredFiles, err := replaceDirectoryContents(opts.TargetDir, worldStage, opts.UID, opts.GID)
+	restoredFiles, err := replaceDirectoryContents(opCtx, opts.TargetDir, worldStage, opts.UID, opts.GID)
 	if err != nil {
 		return RestoreResult{}, withSafetyBackup("replace restore target", safety, err)
 	}
@@ -242,7 +245,10 @@ func validBackupID(id string) bool {
 	return true
 }
 
-func extractArchiveToStage(file *os.File, archivePath, stage string) error {
+func extractArchiveToStage(ctx context.Context, file *os.File, archivePath, stage string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek restore archive: %w", err)
 	}
@@ -253,6 +259,9 @@ func extractArchiveToStage(file *os.File, archivePath, stage string) error {
 	defer gzr.Close()
 	tr := tar.NewReader(gzr)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		header, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			break
@@ -294,7 +303,10 @@ func extractArchiveToStage(file *os.File, archivePath, stage string) error {
 	return nil
 }
 
-func replaceDirectoryContents(targetDir, sourceDir string, uid, gid int) (int, error) {
+func replaceDirectoryContents(ctx context.Context, targetDir, sourceDir string, uid, gid int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	parent := filepath.Dir(targetDir)
 	replacement, err := os.MkdirTemp(parent, ".mcbot-restore-new-*")
 	if err != nil {

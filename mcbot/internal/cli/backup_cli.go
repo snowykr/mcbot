@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -103,6 +104,10 @@ func dispatchBackup(opts Options, subcommand string, args []string, stdin io.Rea
 			NoRetention:   flags.noRetention,
 		})
 		if err != nil {
+			if result.BackupID != "" && errors.Is(err, backup.ErrRetentionAfterCreate) {
+				fmt.Fprintf(stderr, "warning: %v\n", err)
+				return writeBackupCreateResult(out, flags.opts, result)
+			}
 			fmt.Fprintf(stderr, "%v\n", err)
 			return ExitOperational
 		}
@@ -111,12 +116,12 @@ func dispatchBackup(opts Options, subcommand string, args []string, stdin io.Rea
 		if len(flags.positionals) != 0 {
 			return usageError(stderr, "backup list does not accept arguments")
 		}
-		items, err := backup.List(ctx, paths.backupDir)
+		listed, err := backup.List(ctx, paths.backupDir)
 		if err != nil {
 			fmt.Fprintf(stderr, "%v\n", err)
 			return ExitOperational
 		}
-		return writeBackupList(out, flags.opts, items)
+		return writeBackupList(out, flags.opts, listed)
 	case "inspect", "validate", "verify":
 		if len(flags.positionals) != 0 {
 			return usageError(stderr, "backup %s does not accept positional arguments", subcommand)
@@ -614,15 +619,15 @@ func resolveArchiveArg(backupDir string, flags backupFlags) (string, error) {
 }
 
 func selectBackupID(ctx context.Context, backupDir string, prompter Prompter) (string, error) {
-	items, err := backup.List(ctx, backupDir)
+	listed, err := backup.List(ctx, backupDir)
 	if err != nil {
 		return "", err
 	}
-	if len(items) == 0 {
+	if len(listed.Valid) == 0 {
 		return "", fmt.Errorf("no valid backups found in %s", backupDir)
 	}
-	options := make([]string, 0, len(items))
-	for _, item := range items {
+	options := make([]string, 0, len(listed.Valid))
+	for _, item := range listed.Valid {
 		options = append(options, fmt.Sprintf("%s %s %s", item.BackupID, item.CreatedAt.Format(time.RFC3339), item.Reason))
 	}
 	selected, err := prompter.Select("Select backup to restore", options, 0)
@@ -646,15 +651,20 @@ func writeBackupCreateResult(out Output, opts Options, result backup.CreateResul
 	return ExitOK
 }
 
-func writeBackupList(out Output, opts Options, items []backup.BackupSummary) int {
+func writeBackupList(out Output, opts Options, listed backup.ListResult) int {
 	if opts.JSON {
-		if err := out.SuccessJSON(items); err != nil {
+		if err := out.SuccessJSON(listed); err != nil {
 			return ExitInternal
 		}
 		return ExitOK
 	}
-	for _, item := range items {
+	for _, item := range listed.Valid {
 		if err := out.SuccessLine("%s\t%s\t%d bytes", item.BackupID, item.CreatedAt.Format(time.RFC3339), item.SizeBytes); err != nil {
+			return ExitInternal
+		}
+	}
+	for _, item := range listed.Invalid {
+		if err := out.Diagnostic("invalid backup %s: %s", item.FileName, item.Error); err != nil {
 			return ExitInternal
 		}
 	}

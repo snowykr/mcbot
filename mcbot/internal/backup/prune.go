@@ -41,21 +41,36 @@ type BackupSummary struct {
 	Protected   bool      `json:"protected,omitempty"`
 }
 
-func List(ctx context.Context, backupDir string) ([]BackupSummary, error) {
-	_ = ctx
-	entries, err := verifiedBackups(backupDir)
+type InvalidBackupSummary struct {
+	FileName string `json:"file_name"`
+	Path     string `json:"path"`
+	Error    string `json:"error"`
+}
+
+type ListResult struct {
+	Valid   []BackupSummary        `json:"valid"`
+	Invalid []InvalidBackupSummary `json:"invalid,omitempty"`
+}
+
+func List(ctx context.Context, backupDir string) (ListResult, error) {
+	inventory, err := inventoryBackups(ctx, backupDir)
 	if err != nil {
-		return nil, err
+		return ListResult{}, err
 	}
-	out := make([]BackupSummary, 0, len(entries))
-	for _, entry := range entries {
-		out = append(out, entry.summary)
+	out := ListResult{
+		Valid:   make([]BackupSummary, 0, len(inventory.valid)),
+		Invalid: inventory.invalid,
+	}
+	for _, entry := range inventory.valid {
+		out.Valid = append(out.Valid, entry.summary)
 	}
 	return out, nil
 }
 
 func Prune(ctx context.Context, opts PruneOptions) (PruneResult, error) {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return PruneResult{}, err
+	}
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -63,7 +78,7 @@ func Prune(ctx context.Context, opts PruneOptions) (PruneResult, error) {
 		return PruneResult{}, fmt.Errorf("backup.retention_count must be at least 1")
 	}
 	if !opts.AssumeLockHeld {
-		lock, stopHeartbeat, err := acquireLockWithHeartbeat(opts.BackupDir, LockMetadata{
+		lock, stopHeartbeat, opCtx, err := acquireLockWithHeartbeat(ctx, opts.BackupDir, LockMetadata{
 			Operation: "prune",
 			Owner:     "cli",
 			CreatedAt: opts.Now().UTC(),
@@ -75,8 +90,9 @@ func Prune(ctx context.Context, opts PruneOptions) (PruneResult, error) {
 		}
 		defer lock.Release()
 		defer stopHeartbeat()
+		ctx = opCtx
 	}
-	entries, err := verifiedBackups(opts.BackupDir)
+	entries, err := verifiedBackups(ctx, opts.BackupDir)
 	if err != nil {
 		return PruneResult{}, err
 	}
@@ -150,9 +166,10 @@ func Prune(ctx context.Context, opts PruneOptions) (PruneResult, error) {
 	}
 	for _, entry := range candidates {
 		if doomed, ok := toDelete[entry.manifest.BackupID]; ok {
-			result.Deleted = append(result.Deleted, doomed.summary)
-			result.ReclaimedBytes += doomed.summary.SizeBytes
 			if !opts.DryRun {
+				if err := ctx.Err(); err != nil {
+					return result, err
+				}
 				info, err := os.Lstat(doomed.summary.ArchivePath)
 				if err != nil {
 					return result, fmt.Errorf("stat backup %s before delete: %w", doomed.manifest.BackupID, err)
@@ -164,6 +181,8 @@ func Prune(ctx context.Context, opts PruneOptions) (PruneResult, error) {
 					return result, fmt.Errorf("delete backup %s: %w", doomed.manifest.BackupID, err)
 				}
 			}
+			result.Deleted = append(result.Deleted, doomed.summary)
+			result.ReclaimedBytes += doomed.summary.SizeBytes
 			continue
 		}
 		result.Retained = append(result.Retained, entry.summary)
@@ -179,32 +198,67 @@ type verifiedBackup struct {
 	summary  BackupSummary
 }
 
-func verifiedBackups(backupDir string) ([]verifiedBackup, error) {
+type backupInventory struct {
+	valid   []verifiedBackup
+	invalid []InvalidBackupSummary
+}
+
+func inventoryBackups(ctx context.Context, backupDir string) (backupInventory, error) {
+	if err := ctx.Err(); err != nil {
+		return backupInventory{}, err
+	}
 	entries, err := os.ReadDir(backupDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return backupInventory{}, nil
 		}
-		return nil, fmt.Errorf("read backup directory: %w", err)
+		return backupInventory{}, fmt.Errorf("read backup directory: %w", err)
 	}
-	var backups []verifiedBackup
+	var inv backupInventory
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return backupInventory{}, err
+		}
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tar.gz") {
 			continue
 		}
-		if !validBackupID(strings.TrimSuffix(entry.Name(), ".tar.gz")) {
+		path := filepath.Join(backupDir, entry.Name())
+		id := strings.TrimSuffix(entry.Name(), ".tar.gz")
+		if !validBackupID(id) {
+			inv.invalid = append(inv.invalid, InvalidBackupSummary{
+				FileName: entry.Name(),
+				Path:     path,
+				Error:    fmt.Sprintf("invalid backup_id %q", id),
+			})
 			continue
 		}
-		path := filepath.Join(backupDir, entry.Name())
 		info, err := os.Lstat(path)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		if err != nil {
+			inv.invalid = append(inv.invalid, InvalidBackupSummary{
+				FileName: entry.Name(),
+				Path:     path,
+				Error:    fmt.Sprintf("stat archive: %v", err),
+			})
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			inv.invalid = append(inv.invalid, InvalidBackupSummary{
+				FileName: entry.Name(),
+				Path:     path,
+				Error:    "archive is not a regular file",
+			})
 			continue
 		}
 		validation, err := ValidateArchive(path)
 		if err != nil {
+			inv.invalid = append(inv.invalid, InvalidBackupSummary{
+				FileName: entry.Name(),
+				Path:     path,
+				Error:    err.Error(),
+			})
 			continue
 		}
-		backups = append(backups, verifiedBackup{
+		inv.valid = append(inv.valid, verifiedBackup{
 			manifest: validation.Manifest,
 			summary: BackupSummary{
 				BackupID:    validation.Manifest.BackupID,
@@ -215,13 +269,24 @@ func verifiedBackups(backupDir string) ([]verifiedBackup, error) {
 			},
 		})
 	}
-	sort.Slice(backups, func(i, j int) bool {
-		if !backups[i].summary.CreatedAt.Equal(backups[j].summary.CreatedAt) {
-			return backups[i].summary.CreatedAt.After(backups[j].summary.CreatedAt)
+	sort.Slice(inv.valid, func(i, j int) bool {
+		if !inv.valid[i].summary.CreatedAt.Equal(inv.valid[j].summary.CreatedAt) {
+			return inv.valid[i].summary.CreatedAt.After(inv.valid[j].summary.CreatedAt)
 		}
-		return backups[i].summary.BackupID > backups[j].summary.BackupID
+		return inv.valid[i].summary.BackupID > inv.valid[j].summary.BackupID
 	})
-	return backups, nil
+	sort.Slice(inv.invalid, func(i, j int) bool {
+		return inv.invalid[i].FileName < inv.invalid[j].FileName
+	})
+	return inv, nil
+}
+
+func verifiedBackups(ctx context.Context, backupDir string) ([]verifiedBackup, error) {
+	inv, err := inventoryBackups(ctx, backupDir)
+	if err != nil {
+		return nil, err
+	}
+	return inv.valid, nil
 }
 
 func isSafetyBackupReason(reason string) bool {

@@ -92,8 +92,12 @@ func (s *Scheduler) RunOnce(ctx context.Context, reason string) (CreateResult, e
 		Now:           s.opts.Now,
 	})
 	if err != nil {
-		s.logf("[BACKUP] automatic backup failed: %v", err)
-		return CreateResult{}, err
+		if result.BackupID != "" {
+			s.logf("[BACKUP] automatic backup created id=%s but retention failed: %v", result.BackupID, err)
+		} else {
+			s.logf("[BACKUP] automatic backup failed: %v", err)
+			return CreateResult{}, err
+		}
 	}
 	localDate := result.Manifest.CreatedAt.In(s.loc).Format("2006-01-02")
 	s.mu.Lock()
@@ -133,12 +137,12 @@ func (s *Scheduler) successfulBackupExistsForLocalDate(now time.Time) bool {
 		return true
 	}
 	s.mu.Unlock()
-	items, err := List(context.Background(), s.opts.BackupDir)
+	listed, err := List(context.Background(), s.opts.BackupDir)
 	if err != nil {
 		s.logf("[BACKUP] could not inspect existing backups for missed-run check: %v", err)
 		return false
 	}
-	for _, item := range items {
+	for _, item := range listed.Valid {
 		if isSafetyBackupReason(item.Reason) {
 			continue
 		}

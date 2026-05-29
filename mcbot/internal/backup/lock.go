@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -109,17 +110,34 @@ func AcquireLock(backupDir string, metadata LockMetadata) (*Lock, error) {
 	return nil, fmt.Errorf("backup lock contention")
 }
 
-func acquireLockWithHeartbeat(backupDir string, metadata LockMetadata) (*Lock, func(), error) {
+func acquireLockWithHeartbeat(ctx context.Context, backupDir string, metadata LockMetadata) (*Lock, func(), context.Context, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	lock, err := AcquireLock(backupDir, metadata)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	stopHeartbeat, err := lock.StartHeartbeat(0, DefaultStaleTimeout)
+	stopHeartbeat, lost, err := lock.StartHeartbeat(0, DefaultStaleTimeout)
 	if err != nil {
 		_ = lock.Release()
-		return nil, nil, fmt.Errorf("start backup lock heartbeat: %w", err)
+		return nil, nil, nil, fmt.Errorf("start backup lock heartbeat: %w", err)
 	}
-	return lock, stopHeartbeat, nil
+	opCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		select {
+		case heartbeatErr, ok := <-lost:
+			if ok && heartbeatErr != nil {
+				cancel()
+			}
+		case <-opCtx.Done():
+		}
+	}()
+	stop := func() {
+		stopHeartbeat()
+		cancel()
+	}
+	return lock, stop, opCtx, nil
 }
 
 func acquireLockMutationGuardWithRetry(lockPath string) (*lockMutationGuard, error) {
@@ -315,9 +333,11 @@ func (l *Lock) Refresh(staleAt time.Time, status string) error {
 	return nil
 }
 
-func (l *Lock) StartHeartbeat(interval, ttl time.Duration) (func(), error) {
+func (l *Lock) StartHeartbeat(interval, ttl time.Duration) (func(), <-chan error, error) {
+	lost := make(chan error, 1)
 	if l == nil || l.path == "" {
-		return func() {}, nil
+		close(lost)
+		return func() {}, lost, nil
 	}
 	if interval <= 0 {
 		interval = lockHeartbeatInterval
@@ -326,12 +346,14 @@ func (l *Lock) StartHeartbeat(interval, ttl time.Duration) (func(), error) {
 		ttl = DefaultStaleTimeout
 	}
 	if err := l.Refresh(time.Now().UTC().Add(ttl), ""); err != nil {
-		return nil, err
+		close(lost)
+		return nil, nil, err
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer close(lost)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -340,6 +362,10 @@ func (l *Lock) StartHeartbeat(interval, ttl time.Duration) (func(), error) {
 				if err := l.Refresh(time.Now().UTC().Add(ttl), ""); err != nil {
 					if errors.Is(err, errLockMutationActive) {
 						continue
+					}
+					select {
+					case lost <- fmt.Errorf("backup lock heartbeat lost: %w", err):
+					default:
 					}
 					return
 				}
@@ -354,7 +380,7 @@ func (l *Lock) StartHeartbeat(interval, ttl time.Duration) (func(), error) {
 			close(stop)
 		})
 		<-done
-	}, nil
+	}, lost, nil
 }
 
 func replaceLockFile(path string, metadata LockMetadata) error {
