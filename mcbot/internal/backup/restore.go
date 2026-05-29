@@ -68,7 +68,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 	if err := os.MkdirAll(opts.TargetDir, 0o755); err != nil {
 		return RestoreResult{}, fmt.Errorf("create restore target directory: %w", err)
 	}
-	lock, err := AcquireLock(opts.BackupDir, LockMetadata{
+	lock, stopHeartbeat, err := acquireLockWithHeartbeat(opts.BackupDir, LockMetadata{
 		Operation: "restore",
 		Owner:     "cli",
 		BackupID:  opts.BackupID,
@@ -80,6 +80,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 		return RestoreResult{}, err
 	}
 	defer lock.Release()
+	defer stopHeartbeat()
 	archiveFile, validation, err := openValidatedArchive(archivePath)
 	if err != nil {
 		return RestoreResult{}, err

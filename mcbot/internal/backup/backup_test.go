@@ -714,6 +714,167 @@ func TestLockReleaseDoesNotRemoveSuccessorAfterStaleRecovery(t *testing.T) {
 	}
 }
 
+func TestSameLockInstanceRequiresUnchangedTokenLease(t *testing.T) {
+	now := time.Now().UTC()
+	first := LockMetadata{Token: "same-token", StaleAt: now}
+	refreshed := LockMetadata{Token: "same-token", StaleAt: now.Add(time.Minute)}
+	if sameLockInstance(first, refreshed) {
+		t.Fatal("sameLockInstance matched refreshed token lease, want changed lease to block stale removal")
+	}
+}
+
+func TestLockRefreshDoesNotOverwriteSuccessorAfterStaleRecovery(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "backups")
+	now := time.Now().UTC()
+	original, err := AcquireLock(dir, LockMetadata{
+		Operation: "create",
+		Owner:     "first",
+		CreatedAt: now.Add(-2 * time.Hour),
+		StaleAt:   now.Add(-time.Hour),
+		Status:    "stale original",
+	})
+	if err != nil {
+		t.Fatalf("AcquireLock original failed: %v", err)
+	}
+	successor, err := AcquireLock(dir, LockMetadata{
+		Operation: "restore",
+		Owner:     "second",
+		CreatedAt: now,
+		StaleAt:   now.Add(time.Hour),
+		Status:    "successor active",
+	})
+	if err != nil {
+		t.Fatalf("AcquireLock successor failed: %v", err)
+	}
+	if err := original.Refresh(now.Add(2*time.Hour), "stale owner refresh"); err == nil {
+		t.Fatal("stale owner Refresh succeeded after successor acquired lock")
+	}
+	metadata, err := readLock(filepath.Join(dir, LockDirName, lockFileName))
+	if err != nil {
+		t.Fatalf("read successor lock failed: %v", err)
+	}
+	if metadata.Owner != "second" || metadata.Operation != "restore" {
+		t.Fatalf("successor lock overwritten by stale owner: %+v", metadata)
+	}
+	if err := successor.Release(); err != nil {
+		t.Fatalf("Release successor failed: %v", err)
+	}
+}
+
+func TestLockHeartbeatKeepsExpiredOwnerActive(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "backups")
+	now := time.Now().UTC()
+	lock, err := AcquireLock(dir, LockMetadata{
+		Operation: "create",
+		Owner:     "test",
+		CreatedAt: now.Add(-time.Hour),
+		StaleAt:   now.Add(-time.Minute),
+		Status:    "long-running backup",
+	})
+	if err != nil {
+		t.Fatalf("AcquireLock failed: %v", err)
+	}
+	stopHeartbeat, err := lock.StartHeartbeat(10*time.Millisecond, time.Hour)
+	if err != nil {
+		t.Fatalf("StartHeartbeat failed: %v", err)
+	}
+	defer lock.Release()
+	defer stopHeartbeat()
+	metadata, err := readLock(filepath.Join(dir, LockDirName, lockFileName))
+	if err != nil {
+		t.Fatalf("read refreshed lock failed: %v", err)
+	}
+	if !metadata.StaleAt.After(time.Now().UTC()) {
+		t.Fatalf("heartbeat did not refresh stale deadline: %s", metadata.StaleAt)
+	}
+	if _, err := AcquireLock(dir, LockMetadata{Operation: "prune", Owner: "contender"}); err == nil || !strings.Contains(err.Error(), "active") {
+		t.Fatalf("AcquireLock contender error = %v, want active lock contention", err)
+	}
+}
+
+func TestLockHeartbeatSurvivesMutationGuardContention(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "backups")
+	now := time.Now().UTC()
+	lock, err := AcquireLock(dir, LockMetadata{
+		Operation: "create",
+		Owner:     "test",
+		CreatedAt: now,
+		StaleAt:   now.Add(50 * time.Millisecond),
+		Status:    "long-running backup",
+	})
+	if err != nil {
+		t.Fatalf("AcquireLock failed: %v", err)
+	}
+	stopHeartbeat, err := lock.StartHeartbeat(10*time.Millisecond, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("StartHeartbeat failed: %v", err)
+	}
+	defer lock.Release()
+	defer stopHeartbeat()
+	guard, err := acquireLockMutationGuard(lock.path)
+	if err != nil {
+		t.Fatalf("acquire mutation guard failed: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+	if err := guard.Release(); err != nil {
+		t.Fatalf("release mutation guard failed: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if _, err := AcquireLock(dir, LockMetadata{Operation: "prune", Owner: "contender"}); err == nil || !strings.Contains(err.Error(), "active") {
+		t.Fatalf("AcquireLock contender error = %v, want heartbeat to survive transient guard contention", err)
+	}
+}
+
+func TestCreateRefreshesLockWhileQuiesceIsRunning(t *testing.T) {
+	oldInterval := lockHeartbeatInterval
+	lockHeartbeatInterval = 10 * time.Millisecond
+	defer func() { lockHeartbeatInterval = oldInterval }()
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	q := &blockingFlushQuiescer{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	resultCh := make(chan error, 1)
+	staleNow := func() time.Time { return time.Now().UTC().Add(-time.Hour) }
+	go func() {
+		_, err := Create(context.Background(), CreateOptions{
+			SourceDir:     source,
+			ConfigPath:    configPath,
+			BackupDir:     backups,
+			Policy:        mcconfig.Defaults().Backup,
+			StoppedProven: false,
+			Quiescer:      q,
+			Now:           staleNow,
+			RandomSuffix:  fixedSuffix("livebeat"),
+			NoRetention:   true,
+		})
+		resultCh <- err
+	}()
+	select {
+	case <-q.entered:
+	case <-time.After(time.Second):
+		t.Fatal("Create did not reach blocking quiesce point")
+	}
+	if _, err := AcquireLock(backups, LockMetadata{Operation: "prune", Owner: "contender"}); err == nil || !strings.Contains(err.Error(), "active") {
+		close(q.release)
+		t.Fatalf("AcquireLock contender error = %v, want active lock contention", err)
+	}
+	close(q.release)
+	select {
+	case err := <-resultCh:
+		if err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Create did not finish after quiesce release")
+	}
+}
+
 func TestPruneUsesCanonicalLock(t *testing.T) {
 	backups := filepath.Join(t.TempDir(), "backups")
 	now := time.Now().UTC()
@@ -1456,6 +1617,25 @@ type fakeQuiescer struct {
 
 func (f *fakeQuiescer) Execute(_ context.Context, command string) (string, error) {
 	f.commands = append(f.commands, command)
+	return "ok", nil
+}
+
+type blockingFlushQuiescer struct {
+	commands []string
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+func (f *blockingFlushQuiescer) Execute(ctx context.Context, command string) (string, error) {
+	f.commands = append(f.commands, command)
+	if command == "save-all flush" {
+		close(f.entered)
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
 	return "ok", nil
 }
 

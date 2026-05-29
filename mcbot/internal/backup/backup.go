@@ -118,7 +118,8 @@ func Create(ctx context.Context, opts CreateOptions) (CreateResult, error) {
 	}
 	var lock *Lock
 	if !opts.AssumeLockHeld {
-		lock, err = AcquireLock(opts.BackupDir, LockMetadata{
+		var stopHeartbeat func()
+		lock, stopHeartbeat, err = acquireLockWithHeartbeat(opts.BackupDir, LockMetadata{
 			Operation: "create",
 			Owner:     opts.CreatedBy,
 			BackupID:  id,
@@ -130,6 +131,7 @@ func Create(ctx context.Context, opts CreateOptions) (CreateResult, error) {
 			return CreateResult{}, err
 		}
 		defer lock.Release()
+		defer stopHeartbeat()
 	}
 
 	var quiesce QuiesceManifest

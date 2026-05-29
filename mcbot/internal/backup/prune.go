@@ -63,7 +63,7 @@ func Prune(ctx context.Context, opts PruneOptions) (PruneResult, error) {
 		return PruneResult{}, fmt.Errorf("backup.retention_count must be at least 1")
 	}
 	if !opts.AssumeLockHeld {
-		lock, err := AcquireLock(opts.BackupDir, LockMetadata{
+		lock, stopHeartbeat, err := acquireLockWithHeartbeat(opts.BackupDir, LockMetadata{
 			Operation: "prune",
 			Owner:     "cli",
 			CreatedAt: opts.Now().UTC(),
@@ -74,6 +74,7 @@ func Prune(ctx context.Context, opts PruneOptions) (PruneResult, error) {
 			return PruneResult{}, err
 		}
 		defer lock.Release()
+		defer stopHeartbeat()
 	}
 	entries, err := verifiedBackups(opts.BackupDir)
 	if err != nil {
