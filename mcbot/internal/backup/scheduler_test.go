@@ -163,7 +163,7 @@ func TestSchedulerDisabledDoesNotSleepOrRun(t *testing.T) {
 	}
 }
 
-func TestStartSchedulerEnabledRequiresQuiescer(t *testing.T) {
+func TestStartSchedulerEnabledRequiresQuiescerOrServerRunning(t *testing.T) {
 	policy := mcconfig.Defaults().Backup
 	policy.Enabled = true
 	_, err := StartScheduler(context.Background(), SchedulerOptions{
@@ -173,8 +173,66 @@ func TestStartSchedulerEnabledRequiresQuiescer(t *testing.T) {
 		BackupDir:  "/tmp/backups",
 		Logf:       func(string, ...any) {},
 	})
-	if err == nil || !strings.Contains(err.Error(), "requires RCON quiescer") {
-		t.Fatalf("StartScheduler error = %v, want missing quiescer failure", err)
+	if err == nil || !strings.Contains(err.Error(), "requires RCON quiescer or server status checker") {
+		t.Fatalf("StartScheduler error = %v, want missing runtime capability failure", err)
+	}
+}
+
+func TestStartSchedulerEnabledAllowsColdOnlyWithoutQuiescer(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	configPath := filepath.Join(root, "mc-server.toml")
+	backups := filepath.Join(root, "backups")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	policy := mcconfig.Defaults().Backup
+	loopStarted := make(chan struct{}, 1)
+	_, err := StartScheduler(context.Background(), SchedulerOptions{
+		Policy:        policy,
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		ServerRunning: func(context.Context) (bool, error) { return false, nil },
+		Sleep: func(context.Context, time.Duration) error {
+			select {
+			case loopStarted <- struct{}{}:
+			default:
+			}
+			return context.Canceled
+		},
+		Logf: func(string, ...any) {},
+	})
+	if err != nil {
+		t.Fatalf("StartScheduler failed: %v", err)
+	}
+	select {
+	case <-loopStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cold-only scheduler did not start loop")
+	}
+}
+
+func TestSchedulerRunOnceRequiresQuiescerWhenServerRunning(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	configPath := filepath.Join(root, "mc-server.toml")
+	backups := filepath.Join(root, "backups")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	s, err := NewScheduler(SchedulerOptions{
+		Policy:        mcconfig.Defaults().Backup,
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		ServerRunning: func(context.Context) (bool, error) { return true, nil },
+		Logf:          func(string, ...any) {},
+	})
+	if err != nil {
+		t.Fatalf("NewScheduler failed: %v", err)
+	}
+	_, err = s.RunOnce(context.Background(), "scheduled-running")
+	if err == nil || !strings.Contains(err.Error(), "requires RCON quiescer when server is running") {
+		t.Fatalf("RunOnce error = %v, want running-server quiescer failure", err)
 	}
 }
 

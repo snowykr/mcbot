@@ -39,8 +39,8 @@ func StartScheduler(ctx context.Context, opts SchedulerOptions) (*Scheduler, err
 		s.logf("[BACKUP] scheduler disabled by mc-server.toml")
 		return s, nil
 	}
-	if opts.Quiescer == nil {
-		return nil, fmt.Errorf("backup scheduler requires RCON quiescer")
+	if err := validateSchedulerRuntime(opts); err != nil {
+		return nil, err
 	}
 	go s.loop(ctx)
 	return s, nil
@@ -76,10 +76,10 @@ func (s *Scheduler) RunOnce(ctx context.Context, reason string) (CreateResult, e
 	if !s.opts.Policy.Enabled {
 		return CreateResult{}, fmt.Errorf("backup scheduler disabled")
 	}
-	if s.opts.Quiescer == nil {
-		return CreateResult{}, fmt.Errorf("backup scheduler requires RCON quiescer")
-	}
 	stoppedProven := s.serverStoppedProven(ctx)
+	if !stoppedProven && s.opts.Quiescer == nil {
+		return CreateResult{}, fmt.Errorf("backup scheduler requires RCON quiescer when server is running")
+	}
 	result, err := Create(ctx, CreateOptions{
 		SourceDir:     s.opts.SourceDir,
 		ConfigPath:    s.opts.ConfigPath,
@@ -179,6 +179,13 @@ func (s *Scheduler) loop(ctx context.Context) {
 
 func (s *Scheduler) logf(format string, args ...any) {
 	s.opts.Logf(format, args...)
+}
+
+func validateSchedulerRuntime(opts SchedulerOptions) error {
+	if opts.Quiescer != nil || opts.ServerRunning != nil {
+		return nil
+	}
+	return fmt.Errorf("backup scheduler requires RCON quiescer or server status checker")
 }
 
 func (s *Scheduler) serverStoppedProven(ctx context.Context) bool {
