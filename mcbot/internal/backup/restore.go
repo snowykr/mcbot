@@ -62,13 +62,6 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 	if err != nil {
 		return RestoreResult{}, err
 	}
-	validation, err := ValidateArchive(archivePath)
-	if err != nil {
-		return RestoreResult{}, err
-	}
-	if validation.Manifest.BackupID != opts.BackupID {
-		return RestoreResult{}, fmt.Errorf("validated manifest id mismatch")
-	}
 	if err := validateRestoreConfigPath(opts.ConfigPath, opts.RepoRoot, opts.TargetDir, opts.BackupDir); err != nil {
 		return RestoreResult{}, err
 	}
@@ -87,6 +80,14 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 		return RestoreResult{}, err
 	}
 	defer lock.Release()
+	archiveFile, validation, err := openValidatedArchive(archivePath)
+	if err != nil {
+		return RestoreResult{}, err
+	}
+	defer archiveFile.Close()
+	if validation.Manifest.BackupID != opts.BackupID {
+		return RestoreResult{}, fmt.Errorf("validated manifest id mismatch")
+	}
 	safetyPolicy := opts.Policy
 	if safetyPolicy.IncludeMCServerTOML || validation.Manifest.IncludeMCServerTOML {
 		configExists, err := restoreConfigFileExists(opts.ConfigPath)
@@ -110,7 +111,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("create pre-restore safety backup: %w", err)
 	}
-	if _, err := ValidateArchive(archivePath); err != nil {
+	if _, err := validateOpenArchive(archiveFile, archivePath); err != nil {
 		return RestoreResult{}, withSafetyBackup("revalidate backup before restore", safety, err)
 	}
 	stage, err := os.MkdirTemp(filepath.Dir(opts.TargetDir), ".mcbot-restore-*")
@@ -118,7 +119,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreResult, error) {
 		return RestoreResult{}, withSafetyBackup("create restore staging directory", safety, err)
 	}
 	defer os.RemoveAll(stage)
-	if err := extractArchiveToStage(archivePath, stage); err != nil {
+	if err := extractArchiveToStage(archiveFile, archivePath, stage); err != nil {
 		return RestoreResult{}, withSafetyBackup("extract backup for restore", safety, err)
 	}
 	configStage := filepath.Join(stage, "mc-server.toml")
@@ -240,12 +241,10 @@ func validBackupID(id string) bool {
 	return true
 }
 
-func extractArchiveToStage(archivePath, stage string) error {
-	file, err := os.Open(archivePath)
-	if err != nil {
-		return fmt.Errorf("open restore archive: %w", err)
+func extractArchiveToStage(file *os.File, archivePath, stage string) error {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek restore archive: %w", err)
 	}
-	defer file.Close()
 	gzr, err := gzip.NewReader(file)
 	if err != nil {
 		return fmt.Errorf("open restore gzip: %w", err)
@@ -376,8 +375,19 @@ func validateRestoreTarget(targetDir, backupDir string) error {
 	if pathContains(targetAbs, backupAbs) || pathContains(backupAbs, targetAbs) {
 		return fmt.Errorf("restore target must not overlap backup directory")
 	}
-	if err := rejectSymlinkPathComponents(commonPathPrefix(targetAbs, backupAbs), targetAbs, "restore target"); err != nil {
+	commonRoot := commonPathPrefix(targetAbs, backupAbs)
+	if err := rejectSymlinkPathComponentsUnderRoot(commonRoot, targetAbs, "restore target"); err != nil {
 		return err
+	}
+	if err := rejectSymlinkPathComponentsUnderRoot(commonRoot, backupAbs, "backup directory"); err != nil {
+		return err
+	}
+	backupInfo, err := lstatNoSymlink(backupAbs, "backup directory", backupDir)
+	if err != nil {
+		return err
+	}
+	if !backupInfo.IsDir() {
+		return fmt.Errorf("backup directory is not a directory: %s", backupDir)
 	}
 	slashTarget := filepath.ToSlash(targetAbs)
 	if strings.Contains(slashTarget, "/data/mcbot") || strings.HasSuffix(slashTarget, "/data/mcbot") {
@@ -419,7 +429,7 @@ func validateRestoreConfigPath(configPath, repoRoot, targetDir, backupDir string
 			return fmt.Errorf("restore config path must not be inside protected path %s", protected)
 		}
 	}
-	if err := rejectSymlinkPathComponents(repoAbs, configAbs, "restore config path"); err != nil {
+	if err := rejectSymlinkPathComponentsUnderRoot(repoAbs, configAbs, "restore config path"); err != nil {
 		return err
 	}
 	if info, err := os.Lstat(configAbs); err == nil {
@@ -433,52 +443,6 @@ func validateRestoreConfigPath(configPath, repoRoot, targetDir, backupDir string
 		return fmt.Errorf("stat restore config path: %w", err)
 	}
 	return nil
-}
-
-func rejectSymlinkPathComponents(root, path, label string) error {
-	root = filepath.Clean(root)
-	current := filepath.Clean(path)
-	for {
-		info, err := os.Lstat(current)
-		if err == nil {
-			if info.Mode()&os.ModeSymlink != 0 {
-				return fmt.Errorf("%s must not be or pass through a symlink: %s", label, current)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("stat %s %s: %w", label, current, err)
-		}
-		if current == root {
-			return nil
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return nil
-		}
-		current = parent
-	}
-}
-
-func commonPathPrefix(a, b string) string {
-	a = filepath.Clean(a)
-	b = filepath.Clean(b)
-	av := strings.Split(a, string(filepath.Separator))
-	bv := strings.Split(b, string(filepath.Separator))
-	limit := len(av)
-	if len(bv) < limit {
-		limit = len(bv)
-	}
-	var parts []string
-	for i := 0; i < limit && av[i] == bv[i]; i++ {
-		parts = append(parts, av[i])
-	}
-	if len(parts) == 0 {
-		return string(filepath.Separator)
-	}
-	prefix := filepath.Join(parts...)
-	if strings.HasPrefix(a, string(filepath.Separator)) {
-		prefix = string(filepath.Separator) + prefix
-	}
-	return filepath.Clean(prefix)
 }
 
 func copyPreservedRestoreEntries(targetDir, replacement string) error {
@@ -495,11 +459,14 @@ func copyPreservedRestoreEntries(targetDir, replacement string) error {
 		}
 		src := filepath.Join(targetDir, entry.Name())
 		dst := filepath.Join(replacement, entry.Name())
-		info, err := entry.Info()
-		if err != nil {
-			return fmt.Errorf("stat preserved restore entry %s: %w", entry.Name(), err)
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("preserved restore entry must not be a symlink: %s", entry.Name())
 		}
-		if entry.IsDir() {
+		info, err := lstatNoSymlink(src, "preserved restore entry", entry.Name())
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
 			if err := copyTree(src, dst); err != nil {
 				return fmt.Errorf("preserve restore directory %s: %w", entry.Name(), err)
 			}
@@ -550,11 +517,14 @@ func copyTree(src, dst string) error {
 			return nil
 		}
 		target := filepath.Join(dst, rel)
-		info, err := d.Info()
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("staged restore entry must not be a symlink: %s", rel)
+		}
+		info, err := lstatNoSymlink(path, "staged restore entry", rel)
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
+		if info.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
 		if !info.Mode().IsRegular() {
@@ -565,11 +535,22 @@ func copyTree(src, dst string) error {
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
+	in, _, err := openVerifiedRegularFile(src, "copy source")
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	srcAbs, err := filepath.Abs(filepath.Clean(src))
+	if err != nil {
+		return fmt.Errorf("resolve copy source: %w", err)
+	}
+	dstAbs, err := filepath.Abs(filepath.Clean(dst))
+	if err != nil {
+		return fmt.Errorf("resolve copy destination: %w", err)
+	}
+	if err := rejectSymlinkPathComponentsUnderRoot(commonPathPrefix(srcAbs, dstAbs), filepath.Dir(dstAbs), "copy destination parent"); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
@@ -578,18 +559,33 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".mcbot-copy-*")
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
+	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	if err := out.Close(); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-	return os.Chmod(dst, mode)
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func backupExistingConfig(path string, now func() time.Time) error {
@@ -615,12 +611,19 @@ func normalizeTree(root string, uid, gid int) (int, error) {
 		if walkErr != nil {
 			return walkErr
 		}
-		if path == root {
-			return normalizePath(path, uid, gid, true)
+		rel, err := filepath.Rel(root, path)
+		if err != nil || rel == "." {
+			rel = filepath.Base(path)
 		}
-		info, err := d.Info()
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refuse to normalize restore symlink: %s", rel)
+		}
+		info, err := lstatNoSymlink(path, "restore entry", rel)
 		if err != nil {
 			return err
+		}
+		if path == root {
+			return normalizePath(path, uid, gid, true)
 		}
 		if !info.IsDir() {
 			count++

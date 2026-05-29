@@ -146,6 +146,12 @@ func Create(ctx context.Context, opts CreateOptions) (CreateResult, error) {
 			_ = os.Remove(archivePath)
 			return err
 		}
+		validation, err := ValidateArchive(archivePath)
+		if err != nil {
+			_ = os.Remove(archivePath)
+			return fmt.Errorf("validate newly created backup %s: %w", id, err)
+		}
+		manifest = validation.Manifest
 		created := CreateResult{BackupID: id, ArchivePath: archivePath, Manifest: manifest, Quiesce: quiesce}
 		if !opts.NoRetention {
 			pruned, err := Prune(ctx, PruneOptions{
@@ -207,20 +213,42 @@ func validateCreateOptions(opts CreateOptions) error {
 	if err := ensureUsableBackupDir(opts.BackupDir, opts.SourceDir); err != nil {
 		return err
 	}
-	sourceInfo, err := os.Stat(opts.SourceDir)
+	sourceAbs, err := filepath.Abs(filepath.Clean(opts.SourceDir))
 	if err != nil {
-		return fmt.Errorf("stat game data source: %w", err)
+		return fmt.Errorf("resolve game data source: %w", err)
+	}
+	backupAbs, err := filepath.Abs(filepath.Clean(opts.BackupDir))
+	if err != nil {
+		return fmt.Errorf("resolve backup directory: %w", err)
+	}
+	commonRoot := commonPathPrefix(sourceAbs, backupAbs)
+	if err := rejectSymlinkPathComponentsUnderRoot(commonRoot, sourceAbs, "game data source"); err != nil {
+		return err
+	}
+	if err := rejectSymlinkPathComponentsUnderRoot(commonRoot, backupAbs, "backup directory"); err != nil {
+		return err
+	}
+	sourceInfo, err := lstatNoSymlink(sourceAbs, "game data source", opts.SourceDir)
+	if err != nil {
+		return err
 	}
 	if !sourceInfo.IsDir() {
 		return fmt.Errorf("game data source is not a directory: %s", opts.SourceDir)
 	}
 	if opts.Policy.IncludeMCServerTOML {
-		info, err := os.Stat(opts.ConfigPath)
+		configAbs, err := filepath.Abs(filepath.Clean(opts.ConfigPath))
+		if err != nil {
+			return fmt.Errorf("resolve mc-server.toml for backup: %w", err)
+		}
+		if err := rejectSymlinkPathComponentsUnderRoot(commonPathPrefix(commonRoot, configAbs), configAbs, "mc-server.toml backup path"); err != nil {
+			return err
+		}
+		info, err := lstatNoSymlink(configAbs, "mc-server.toml backup path", opts.ConfigPath)
 		if err != nil {
 			return fmt.Errorf("stat mc-server.toml for backup: %w", err)
 		}
-		if info.IsDir() {
-			return fmt.Errorf("mc-server.toml backup path is a directory: %s", opts.ConfigPath)
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("mc-server.toml backup path is not a regular file: %s", opts.ConfigPath)
 		}
 	}
 	return nil
@@ -305,10 +333,6 @@ func collectEntries(ctx context.Context, root, prefix string) ([]fileEntry, erro
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
@@ -317,14 +341,18 @@ func collectEntries(ctx context.Context, root, prefix string) ([]fileEntry, erro
 			return nil
 		}
 		slashRel := filepath.ToSlash(rel)
+		if d.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("refuse to backup source symlink: %s", slashRel)
+		}
+		info, err := lstatNoSymlink(path, "backup source entry", slashRel)
+		if err != nil {
+			return err
+		}
 		if excludedSourcePath(slashRel, info) {
-			if d.IsDir() {
+			if info.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refuse to backup source symlink: %s", slashRel)
 		}
 		if !info.Mode().IsRegular() && !info.IsDir() {
 			return fmt.Errorf("refuse to backup non-regular source entry: %s", slashRel)
@@ -481,22 +509,15 @@ func writeFileEntry(ctx context.Context, tw *tar.Writer, src, name string) error
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	info, err := os.Lstat(src)
+	file, info, err := openVerifiedRegularFile(src, "archive source")
 	if err != nil {
-		return fmt.Errorf("stat archive source %s: %w", src, err)
+		return err
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("archive source is not a regular file: %s", src)
-	}
+	defer file.Close()
 	header := &tar.Header{Name: cleanArchivePath(name), Typeflag: tar.TypeReg, Mode: 0o644, Size: info.Size(), ModTime: info.ModTime()}
 	if err := tw.WriteHeader(header); err != nil {
 		return fmt.Errorf("write archive header %s: %w", name, err)
 	}
-	file, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open archive source %s: %w", src, err)
-	}
-	defer file.Close()
 	if _, err := copyWithContext(ctx, tw, file); err != nil {
 		return fmt.Errorf("write archive file %s: %w", name, err)
 	}
@@ -504,9 +525,9 @@ func writeFileEntry(ctx context.Context, tw *tar.Writer, src, name string) error
 }
 
 func ReadManifest(path string) (Manifest, error) {
-	file, err := os.Open(path)
+	file, _, err := openVerifiedRegularFile(path, "backup archive")
 	if err != nil {
-		return Manifest{}, fmt.Errorf("open backup archive: %w", err)
+		return Manifest{}, err
 	}
 	defer file.Close()
 	gzr, err := gzip.NewReader(file)
@@ -537,21 +558,35 @@ type ValidationResult struct {
 }
 
 func ValidateArchive(path string) (ValidationResult, error) {
-	info, err := os.Lstat(path)
+	file, result, err := openValidatedArchive(path)
 	if err != nil {
-		return ValidationResult{}, fmt.Errorf("stat backup archive: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return ValidationResult{}, fmt.Errorf("backup archive must not be a symlink: %s", path)
-	}
-	if !info.Mode().IsRegular() {
-		return ValidationResult{}, fmt.Errorf("backup archive is not a regular file: %s", path)
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return ValidationResult{}, fmt.Errorf("open backup archive: %w", err)
+		return ValidationResult{}, err
 	}
 	defer file.Close()
+	return result, nil
+}
+
+func openValidatedArchive(path string) (*os.File, ValidationResult, error) {
+	file, _, err := openVerifiedRegularFile(path, "backup archive")
+	if err != nil {
+		return nil, ValidationResult{}, err
+	}
+	result, err := validateOpenArchive(file, path)
+	if err != nil {
+		_ = file.Close()
+		return nil, ValidationResult{}, err
+	}
+	return file, result, nil
+}
+
+func validateOpenArchive(file *os.File, path string) (ValidationResult, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return ValidationResult{}, fmt.Errorf("stat opened backup archive: %w", err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return ValidationResult{}, fmt.Errorf("seek backup archive: %w", err)
+	}
 	gzr, err := gzip.NewReader(file)
 	if err != nil {
 		return ValidationResult{}, fmt.Errorf("open backup gzip: %w", err)
@@ -705,9 +740,6 @@ func validateArchivePath(path string) error {
 	if strings.HasPrefix(clean, "world-data/") && excludedPayloadPath(strings.TrimPrefix(clean, "world-data/")) {
 		return fmt.Errorf("archive entry %q is excluded", path)
 	}
-	if clean == ".env" || strings.Contains(clean, "/.env") || strings.Contains(clean, "data/mcbot") || strings.Contains(clean, "backups/") {
-		return fmt.Errorf("archive entry %q is excluded", path)
-	}
 	return nil
 }
 
@@ -804,9 +836,9 @@ func fileSHA256(ctx context.Context, path string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	file, err := os.Open(path)
+	file, _, err := openVerifiedRegularFile(path, "checksum source")
 	if err != nil {
-		return "", fmt.Errorf("open file for checksum %s: %w", path, err)
+		return "", err
 	}
 	defer file.Close()
 	sum := sha256.New()

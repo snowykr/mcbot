@@ -186,6 +186,212 @@ func TestCreateRejectsSourceSymlink(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsSourceRootSymlink(t *testing.T) {
+	root := t.TempDir()
+	realSource := filepath.Join(root, "real-minecraft")
+	sourceLink := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(realSource, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	if err := os.MkdirAll(filepath.Dir(sourceLink), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realSource, sourceLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	_, err := Create(context.Background(), CreateOptions{
+		SourceDir:     sourceLink,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("rootsyml"),
+		NoRetention:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Create error = %v, want source root symlink rejection", err)
+	}
+	if _, err := os.Stat(filepath.Join(backups, "20260522T043000Z-rootsyml.tar.gz")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("archive exists after rejected source root symlink or stat failed: %v", err)
+	}
+}
+
+func TestCreateRejectsSourceParentSymlink(t *testing.T) {
+	root := t.TempDir()
+	realData := filepath.Join(root, "real-data")
+	dataLink := filepath.Join(root, "data")
+	source := filepath.Join(dataLink, "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(realData, "minecraft", "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	if err := os.Symlink(realData, dataLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	_, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("parents"),
+		NoRetention:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Create error = %v, want source parent symlink rejection", err)
+	}
+}
+
+func TestCreateRejectsBackupParentSymlink(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	realBackups := filepath.Join(root, "real-backups")
+	backupsLink := filepath.Join(root, "backup-link")
+	backups := filepath.Join(backupsLink, "archives")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	if err := os.MkdirAll(realBackups, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realBackups, backupsLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	_, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("backsyml"),
+		NoRetention:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Create error = %v, want backup parent symlink rejection", err)
+	}
+	if entries, err := os.ReadDir(realBackups); err != nil {
+		t.Fatal(err)
+	} else if len(entries) != 0 {
+		t.Fatalf("real backup directory changed after rejected symlink path: %v", entries)
+	}
+}
+
+func TestCreateRejectsConfigParentSymlink(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	realConfigDir := filepath.Join(root, "real-config")
+	configLink := filepath.Join(root, "config-link")
+	configPath := filepath.Join(configLink, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, filepath.Join(realConfigDir, "mc-server.toml"), mcconfig.Render(mcconfig.Defaults()))
+	if err := os.Symlink(realConfigDir, configLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	_, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("cfgsymln"),
+		NoRetention:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Create error = %v, want config parent symlink rejection", err)
+	}
+}
+
+func TestRejectSymlinkPathComponentsUsesTrustedRootBoundary(t *testing.T) {
+	root := t.TempDir()
+	trustedRoot := filepath.Join(root, "trusted")
+	path := filepath.Join(trustedRoot, "safe", "child")
+	writeFile(t, filepath.Join(path, "level.dat"), "level")
+	if err := rejectSymlinkPathComponentsUnderRoot(trustedRoot, path, "test path"); err != nil {
+		t.Fatalf("rejectSymlinkPathComponentsUnderRoot safe path error = %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "outside"), filepath.Join(trustedRoot, "linked")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	err := rejectSymlinkPathComponentsUnderRoot(trustedRoot, filepath.Join(trustedRoot, "linked", "child"), "test path")
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("rejectSymlinkPathComponentsUnderRoot error = %v, want symlink rejection below trusted root", err)
+	}
+}
+
+func TestRejectSymlinkPathComponentsRequiresTrustedRoot(t *testing.T) {
+	root := t.TempDir()
+	trustedRoot := filepath.Join(root, "trusted")
+	path := filepath.Join(root, "other", "safe", "child")
+	writeFile(t, filepath.Join(path, "level.dat"), "level")
+	err := rejectSymlinkPathComponentsUnderRoot(trustedRoot, path, "test path")
+	if err == nil || !strings.Contains(err.Error(), "trusted root") {
+		t.Fatalf("rejectSymlinkPathComponentsUnderRoot error = %v, want trusted root rejection", err)
+	}
+}
+
+func TestCreateRejectsSourceSymlinkToRegularFile(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	outside := filepath.Join(root, "outside-secret.txt")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, outside, "secret")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	if err := os.Symlink(outside, filepath.Join(source, "world", "linked-secret.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	_, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("filesyml"),
+		NoRetention:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Create error = %v, want symlink rejection", err)
+	}
+}
+
+func TestCreateRejectsExcludedSourceSymlinkBeforeSkipping(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "data", "minecraft")
+	backups := filepath.Join(root, "backups")
+	configPath := filepath.Join(root, "mc-server.toml")
+	outsideLogs := filepath.Join(root, "outside-logs")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "level")
+	writeFile(t, filepath.Join(outsideLogs, "latest.log"), "secret")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	if err := os.Symlink(outsideLogs, filepath.Join(source, "logs")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	_, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     backups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("excludes"),
+		NoRetention:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Create error = %v, want excluded symlink rejection", err)
+	}
+	if _, err := os.Stat(filepath.Join(backups, "20260522T043000Z-excludes.tar.gz")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("archive exists after rejected excluded symlink or stat failed: %v", err)
+	}
+}
+
 func TestCreateArchiveWithLongAndUnicodePathsValidatesAndRestores(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "data", "minecraft")
@@ -274,6 +480,39 @@ func TestValidateArchiveRejectsExcludedPayloadPaths(t *testing.T) {
 				t.Fatalf("ValidateArchive error = %v, want excluded path rejection", err)
 			}
 		})
+	}
+}
+
+func TestValidateArchiveAllowsReservedWordsInsideSafeSegments(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "20260522T043000Z-segment1.tar.gz")
+	files := map[string][]byte{
+		"world-data/world/mybackups/level.dat":    []byte("backup-looking segment"),
+		"world-data/world/data/mcbot_state.dat":   []byte("mcbot-looking segment"),
+		"world-data/world/player-backups/read.me": []byte("hyphenated backups segment"),
+	}
+	manifest := Manifest{
+		FormatVersion: ManifestFormatVersion,
+		BackupID:      "20260522T043000Z-segment1",
+		CreatedAt:     fixedNow(),
+		CreatedBy:     "cli",
+		BackupReason:  "manual",
+	}
+	for name, data := range files {
+		manifest.Files = append(manifest.Files, FileManifest{Path: name, Size: int64(len(data)), SHA256: sha256Hex(data)})
+	}
+	writeCustomArchive(t, path, manifest, func(tw *tar.Writer) {
+		for name, data := range files {
+			if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Size: int64(len(data))}); err != nil {
+				t.Fatalf("write header: %v", err)
+			}
+			if _, err := tw.Write(data); err != nil {
+				t.Fatalf("write file: %v", err)
+			}
+		}
+	})
+	if _, err := ValidateArchive(path); err != nil {
+		t.Fatalf("ValidateArchive rejected safe reserved-word segments: %v", err)
 	}
 }
 
@@ -710,6 +949,58 @@ func TestRestoreRejectsSymlinkTargetComponent(t *testing.T) {
 	}
 }
 
+func TestRestoreRejectsSymlinkBackupDirectoryBeforeLock(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "data", "minecraft")
+	realBackups := filepath.Join(root, "real-backups")
+	backupLink := filepath.Join(root, "backup-link")
+	configPath := filepath.Join(root, "mc-server.toml")
+	writeFile(t, filepath.Join(source, "world", "level.dat"), "new")
+	writeFile(t, filepath.Join(target, "old.dat"), "old")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+	created, err := Create(context.Background(), CreateOptions{
+		SourceDir:     source,
+		ConfigPath:    configPath,
+		BackupDir:     realBackups,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		Now:           fixedNow,
+		RandomSuffix:  fixedSuffix("backdirl"),
+		NoRetention:   true,
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(realBackups, LockDirName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realBackups, backupLink); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	_, err = Restore(context.Background(), RestoreOptions{
+		BackupDir:     backupLink,
+		BackupID:      created.BackupID,
+		TargetDir:     target,
+		ConfigPath:    configPath,
+		RepoRoot:      root,
+		Policy:        mcconfig.Defaults().Backup,
+		StoppedProven: true,
+		UID:           os.Getuid(),
+		GID:           os.Getgid(),
+		Now:           fixedNow,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Restore error = %v, want backup directory symlink rejection", err)
+	}
+	if _, err := os.Lstat(filepath.Join(realBackups, LockDirName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restore created lock directory through symlink or stat failed: %v", err)
+	}
+	if got := readFile(t, filepath.Join(target, "old.dat")); got != "old" {
+		t.Fatalf("target changed after rejected symlink backup directory: %q", got)
+	}
+}
+
 func TestRestoreRejectsSymlinkConfigPath(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
@@ -756,6 +1047,90 @@ func TestRestoreRejectsSymlinkConfigPath(t *testing.T) {
 	}
 	if got := readFile(t, outsideConfig); got != "outside" {
 		t.Fatalf("outside config changed: %q", got)
+	}
+}
+
+func TestCopyPreservedRestoreEntriesRejectsSymlinkFile(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	replacement := filepath.Join(root, "replacement")
+	outside := filepath.Join(root, "outside.env")
+	writeFile(t, outside, "secret")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(replacement, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(target, ".env")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := copyPreservedRestoreEntries(target, replacement); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("copyPreservedRestoreEntries error = %v, want symlink rejection", err)
+	}
+	if _, err := os.Lstat(filepath.Join(replacement, ".env")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement .env exists or stat failed after rejected symlink: %v", err)
+	}
+}
+
+func TestCopyTreeRejectsNestedSymlink(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	dst := filepath.Join(root, "dst")
+	outside := filepath.Join(root, "outside.txt")
+	writeFile(t, filepath.Join(src, "state", "ok.json"), "{}")
+	writeFile(t, outside, "secret")
+	if err := os.Symlink(outside, filepath.Join(src, "state", "linked-secret.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := copyTree(src, dst); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("copyTree error = %v, want symlink rejection", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dst, "state", "linked-secret.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("destination symlink exists or stat failed after rejected copy: %v", err)
+	}
+}
+
+func TestCopyFileRejectsDestinationSymlink(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "source.txt")
+	dst := filepath.Join(root, "dest.txt")
+	outside := filepath.Join(root, "outside.txt")
+	writeFile(t, src, "new")
+	writeFile(t, outside, "outside")
+	if err := os.Symlink(outside, dst); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := copyFile(src, dst, 0o644); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("copyFile error = %v, want destination symlink rejection", err)
+	}
+	if got := readFile(t, outside); got != "outside" {
+		t.Fatalf("outside destination target changed: %q", got)
+	}
+}
+
+func TestNormalizeTreeRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	replacement := filepath.Join(root, "replacement")
+	outside := filepath.Join(root, "outside.txt")
+	writeFile(t, filepath.Join(replacement, "world", "level.dat"), "level")
+	writeFile(t, outside, "secret")
+	if err := os.Symlink(outside, filepath.Join(replacement, "world", "linked-secret.txt")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	before, err := os.Lstat(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := normalizeTree(replacement, os.Getuid(), os.Getgid()); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("normalizeTree error = %v, want symlink rejection", err)
+	}
+	after, err := os.Lstat(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Mode().Perm() != before.Mode().Perm() {
+		t.Fatalf("outside mode changed from %v to %v", before.Mode().Perm(), after.Mode().Perm())
 	}
 }
 
