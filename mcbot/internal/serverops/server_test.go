@@ -1,0 +1,792 @@
+package serverops
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/snowy/mcbot/internal/composectl"
+	"github.com/snowy/mcbot/internal/dockerctl"
+)
+
+type fakeDocker struct {
+	states       []*dockerctl.ContainerState
+	inspects     []string
+	starts       []string
+	stopNames    []string
+	stops        []int
+	inspectErr   error
+	startErr     error
+	stopErr      error
+	inspectCalls int
+	inspectErrs  []error
+}
+
+func (d *fakeDocker) InspectContainer(_ context.Context, containerName string) (*dockerctl.ContainerState, error) {
+	d.inspectCalls++
+	d.inspects = append(d.inspects, containerName)
+	if len(d.inspectErrs) > 0 {
+		err := d.inspectErrs[0]
+		d.inspectErrs = d.inspectErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	if d.inspectErr != nil {
+		return nil, d.inspectErr
+	}
+	if len(d.states) == 0 {
+		return &dockerctl.ContainerState{Exists: false}, nil
+	}
+	state := d.states[0]
+	if len(d.states) > 1 {
+		d.states = d.states[1:]
+	}
+	return state, nil
+}
+
+func (d *fakeDocker) StartContainer(_ context.Context, containerName string) error {
+	d.starts = append(d.starts, containerName)
+	return d.startErr
+}
+
+func (d *fakeDocker) StopContainer(_ context.Context, containerName string, timeoutSeconds int) error {
+	d.stopNames = append(d.stopNames, containerName)
+	d.stops = append(d.stops, timeoutSeconds)
+	return d.stopErr
+}
+
+type failingIntentStore struct {
+	writeErr error
+	clears   int
+}
+
+func (s *failingIntentStore) WriteStopIntent(context.Context, StopIntent) error {
+	return s.writeErr
+}
+
+func (s *failingIntentStore) Clear(context.Context) error {
+	s.clears++
+	return nil
+}
+
+func (s *failingIntentStore) Load(context.Context) (StopIntent, bool, error) {
+	return StopIntent{}, false, nil
+}
+
+func (s *failingIntentStore) ClearStaleStopIntent(context.Context, string, time.Time, time.Time) (bool, error) {
+	return false, nil
+}
+
+func (s *failingIntentStore) HasUnexpiredStopIntent(context.Context, string, time.Time) (bool, error) {
+	return false, nil
+}
+
+func (s *failingIntentStore) ConsumeUnexpiredStopIntent(context.Context, string, time.Time) (bool, error) {
+	return false, nil
+}
+
+type fakeCompose struct {
+	calls int
+	env   map[string]string
+	err   error
+}
+
+func (c *fakeCompose) EnsureServiceCreated(_ context.Context, _ composectl.Paths, _ string, env map[string]string) error {
+	c.calls++
+	c.env = env
+	return c.err
+}
+
+func TestServerStartEnsuresContainer(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\n", "")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{
+		{Exists: false},
+		{Exists: true, Running: true, Status: "running"},
+	}}
+	compose := &fakeCompose{}
+
+	result, err := Start(context.Background(), Options{Paths: paths, Docker: docker, Compose: compose})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	if compose.calls != 1 {
+		t.Fatalf("compose calls = %d, want 1", compose.calls)
+	}
+	if got := len(docker.starts); got != 1 {
+		t.Fatalf("docker starts = %d, want 1", got)
+	}
+	if result.Service != composectl.MCServerService || !result.Exists || !result.Running || result.Status != "running" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestServerStartEnsuresStoppedContainerThroughComposeBridge(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\n", "")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{
+		{Exists: true, Running: false, Status: "exited"},
+		{Exists: true, Running: true, Status: "running"},
+	}}
+	compose := &fakeCompose{}
+
+	result, err := Start(context.Background(), Options{Paths: paths, Docker: docker, Compose: compose})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	if compose.calls != 1 {
+		t.Fatalf("compose calls = %d, want 1 for stopped container", compose.calls)
+	}
+	if got := compose.env["VERSION"]; got == "" {
+		t.Fatalf("compose env VERSION is empty; stopped start did not load TOML/default compose environment: %#v", compose.env)
+	}
+	if got := len(docker.starts); got != 1 {
+		t.Fatalf("docker starts = %d, want 1", got)
+	}
+	if result.Created {
+		t.Fatalf("Created = true, want false for existing stopped container")
+	}
+	if !result.Exists || !result.Running || result.Status != "running" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestServerStopIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "", "")
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: false, Status: "exited"}}}
+
+	result, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store})
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if len(docker.stops) != 0 {
+		t.Fatalf("docker stop called for stopped container")
+	}
+	if _, found, err := store.Load(context.Background()); err != nil || found {
+		t.Fatalf("stop intent found=%v err=%v, want no intent", found, err)
+	}
+	if result.Message != "server already stopped" {
+		t.Fatalf("message = %q", result.Message)
+	}
+}
+
+func TestServerStatusUsesDockerInspection(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\n", "")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}}}
+
+	result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+	if docker.inspectCalls != 1 {
+		t.Fatalf("inspect calls = %d, want 1", docker.inspectCalls)
+	}
+	if result.Service != composectl.MCServerService || !result.Exists || !result.Running || result.Status != "running" {
+		t.Fatalf("unexpected status: %+v", result)
+	}
+}
+
+func TestServerCommandsUseProcessEnvContainerNameWhenEnvFileOmitsIt(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "shell-mc")
+	tests := []struct {
+		name          string
+		run           func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result
+		states        []*dockerctl.ContainerState
+		wantInspects  []string
+		wantStarts    []string
+		wantStopNames []string
+	}{
+		{
+			name: "status",
+			run: func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result {
+				t.Helper()
+				result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+				if err != nil {
+					t.Fatalf("Status failed: %v", err)
+				}
+				return result
+			},
+			states:       []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}},
+			wantInspects: []string{"shell-mc"},
+		},
+		{
+			name: "start already running",
+			run: func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result {
+				t.Helper()
+				result, err := Start(context.Background(), Options{Paths: paths, Docker: docker, Compose: &fakeCompose{}})
+				if err != nil {
+					t.Fatalf("Start failed: %v", err)
+				}
+				return result
+			},
+			states:       []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}},
+			wantInspects: []string{"shell-mc"},
+		},
+		{
+			name: "stop running",
+			run: func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result {
+				t.Helper()
+				result, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: NewFileIntentStore(filepath.Join(paths.RepoRoot, "data", "mcbot"))})
+				if err != nil {
+					t.Fatalf("Stop failed: %v", err)
+				}
+				return result
+			},
+			states:        []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}, {Exists: true, Running: false, Status: "exited"}},
+			wantInspects:  []string{"shell-mc", "shell-mc"},
+			wantStopNames: []string{"shell-mc"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			paths := writeServerOpsFiles(t, dir, "", "")
+			docker := &fakeDocker{states: tt.states}
+
+			result := tt.run(t, paths, docker)
+
+			if result.Container != "shell-mc" {
+				t.Fatalf("result.Container = %q, want shell-mc", result.Container)
+			}
+			assertStringSlice(t, "inspect names", docker.inspects, tt.wantInspects)
+			assertStringSlice(t, "start names", docker.starts, tt.wantStarts)
+			assertStringSlice(t, "stop names", docker.stopNames, tt.wantStopNames)
+		})
+	}
+}
+
+func TestServerCommandsPreferEnvFileContainerNameOverProcessEnv(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "shell-mc")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=file-mc\n", "")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}}}
+
+	result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+
+	if result.Container != "file-mc" {
+		t.Fatalf("result.Container = %q, want file-mc", result.Container)
+	}
+	if len(docker.inspects) != 1 || docker.inspects[0] != "file-mc" {
+		t.Fatalf("inspect names = %v, want [file-mc]", docker.inspects)
+	}
+}
+
+func TestServerCommandsUseComposeStyleEnvFileContainerName(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "shell-mc")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=file-mc # local default\n", "")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}}}
+
+	result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+
+	if result.Container != "file-mc" {
+		t.Fatalf("result.Container = %q, want file-mc", result.Container)
+	}
+	assertStringSlice(t, "inspect names", docker.inspects, []string{"file-mc"})
+}
+
+func TestServerCommandsUseDefaultContainerNameWhenUnset(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "", "")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}}}
+
+	result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+
+	if result.Container != composectl.MCServerService {
+		t.Fatalf("result.Container = %q, want %q", result.Container, composectl.MCServerService)
+	}
+	assertStringSlice(t, "inspect names", docker.inspects, []string{composectl.MCServerService})
+}
+
+func TestServerCommandsUseDefaultContainerNameWhenEnvFileSetsEmptyName(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "shell-mc")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=\n", "")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}}}
+
+	result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+	if err != nil {
+		t.Fatalf("Status failed: %v", err)
+	}
+
+	if result.Container != composectl.MCServerService {
+		t.Fatalf("result.Container = %q, want %q", result.Container, composectl.MCServerService)
+	}
+	assertStringSlice(t, "inspect names", docker.inspects, []string{composectl.MCServerService})
+}
+
+func TestServerCommandsFailWhenEnvFileCannotBeReadForContainerName(t *testing.T) {
+	t.Setenv("MC_CONTAINER_NAME", "shell-mc")
+	tests := []struct {
+		name   string
+		run    func(paths composectl.Paths, docker *fakeDocker) error
+		states []*dockerctl.ContainerState
+	}{
+		{
+			name: "status",
+			run: func(paths composectl.Paths, docker *fakeDocker) error {
+				_, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+				return err
+			},
+			states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}},
+		},
+		{
+			name: "start",
+			run: func(paths composectl.Paths, docker *fakeDocker) error {
+				_, err := Start(context.Background(), Options{Paths: paths, Docker: docker, Compose: &fakeCompose{}})
+				return err
+			},
+			states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}},
+		},
+		{
+			name: "stop",
+			run: func(paths composectl.Paths, docker *fakeDocker) error {
+				_, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: NewFileIntentStore(filepath.Join(paths.RepoRoot, "data", "mcbot"))})
+				return err
+			},
+			states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}, {Exists: true, Running: false, Status: "exited"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=file-mc\n", "")
+			badEnvPath := filepath.Join(dir, "env-as-directory")
+			if err := os.Mkdir(badEnvPath, 0o700); err != nil {
+				t.Fatalf("mkdir bad env path failed: %v", err)
+			}
+			paths.EnvFile = badEnvPath
+			docker := &fakeDocker{states: tt.states}
+
+			err := tt.run(paths, docker)
+
+			if err == nil {
+				t.Fatal("command succeeded, want env file read error")
+			}
+			if !strings.Contains(err.Error(), "env file") {
+				t.Fatalf("error = %v, want env file read error", err)
+			}
+			if len(docker.inspects) != 0 {
+				t.Fatalf("inspect names = %v, want no Docker operation after env read error", docker.inspects)
+			}
+			if len(docker.starts) != 0 || len(docker.stopNames) != 0 {
+				t.Fatalf("docker mutated state despite env read error: starts=%v stops=%v", docker.starts, docker.stopNames)
+			}
+		})
+	}
+}
+
+func assertStringSlice(t *testing.T, label string, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s = %v, want %v", label, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s[%d] = %q, want %q (full %s = %v)", label, i, got[i], want[i], label, got)
+		}
+	}
+}
+
+func TestCliStopDoesNotTriggerFalseCrashRecovery(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "STOP_TIMEOUT_SECONDS=5\n", "")
+	now := time.Date(2026, 5, 16, 12, 0, 0, 0, time.UTC)
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{
+		{Exists: true, Running: true, Status: "running"},
+		{Exists: true, Running: false, Status: "exited"},
+	}}
+
+	if _, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store, Now: func() time.Time { return now }}); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	matched, err := store.HasUnexpiredStopIntent(context.Background(), composectl.MCServerService, now.Add(10*time.Second))
+	if err != nil {
+		t.Fatalf("HasUnexpiredStopIntent failed: %v", err)
+	}
+	if !matched {
+		t.Fatal("CLI stop intent expired or missing before bot could observe it")
+	}
+	matched, err = store.ConsumeUnexpiredStopIntent(context.Background(), composectl.MCServerService, now.Add(10*time.Second))
+	if err != nil {
+		t.Fatalf("ConsumeUnexpiredStopIntent failed: %v", err)
+	}
+	if !matched {
+		t.Fatal("CLI stop intent was not consumed by bot-side observation")
+	}
+	matched, err = store.HasUnexpiredStopIntent(context.Background(), composectl.MCServerService, now.Add(11*time.Second))
+	if err != nil {
+		t.Fatalf("HasUnexpiredStopIntent after consume failed: %v", err)
+	}
+	if matched {
+		t.Fatal("CLI stop intent matched more than once after bot-side observation")
+	}
+}
+
+func TestServerStopContinuesWhenStopIntentCannotBeRecorded(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "", "")
+	store := &failingIntentStore{writeErr: errors.New("permission denied")}
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{
+		{Exists: true, Running: true, Status: "running"},
+		{Exists: true, Running: false, Status: "exited"},
+	}}
+
+	result, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store})
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if len(docker.stops) != 1 || docker.stops[0] != defaultStopTimeoutSeconds {
+		t.Fatalf("docker stop timeouts = %v, want [%d]", docker.stops, defaultStopTimeoutSeconds)
+	}
+	if !result.Stopped || result.Message != "server stopped" {
+		t.Fatalf("unexpected result after stop: %+v", result)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "stop intent not recorded") || !strings.Contains(result.Warnings[0], "permission denied") {
+		t.Fatalf("warnings = %v, want stop intent warning with cause", result.Warnings)
+	}
+	if store.clears != 0 {
+		t.Fatalf("intent clears = %d, want 0 because intent was never recorded", store.clears)
+	}
+}
+
+func TestServerStopClearsIntentWhenStopFailsAndContainerStillRuns(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "", "")
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	docker := &fakeDocker{stopErr: errors.New("boom"), states: []*dockerctl.ContainerState{
+		{Exists: true, Running: true, Status: "running"},
+		{Exists: true, Running: true, Status: "running"},
+	}}
+
+	if _, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store}); err == nil {
+		t.Fatal("Stop succeeded, want error")
+	}
+	if _, found, err := store.Load(context.Background()); err != nil || found {
+		t.Fatalf("stop intent found=%v err=%v, want cleared intent", found, err)
+	}
+}
+
+func TestServerStopClearsIntentWhenStopFailsAndInspectAfterStopFails(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "", "")
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	docker := &fakeDocker{
+		stopErr:     errors.New("stop failed"),
+		inspectErrs: []error{nil, errors.New("inspect failed")},
+		states:      []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}},
+	}
+
+	if _, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store}); err == nil {
+		t.Fatal("Stop succeeded, want error")
+	}
+	if _, found, err := store.Load(context.Background()); err != nil || found {
+		t.Fatalf("stop intent found=%v err=%v, want cleared intent after indeterminate stop failure", found, err)
+	}
+}
+
+func TestServerStopHonorsEnvStopTimeoutWhenTomlIsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\nSTOP_TIMEOUT_SECONDS=5\n", "[server\nversion = \"1.20.1\"\n")
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	now := time.Date(2026, 5, 17, 6, 0, 0, 0, time.UTC)
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}, {Exists: true, Running: false, Status: "exited"}}}
+
+	result, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if result.Container != "snowy-mc" {
+		t.Fatalf("result.Container = %q, want snowy-mc", result.Container)
+	}
+	if len(docker.stops) != 1 {
+		t.Fatalf("docker stops = %v, want [5]", docker.stops)
+	}
+	if docker.stops[0] != 5 {
+		t.Fatalf("docker stop timeout = %d, want 5", docker.stops[0])
+	}
+	intent, found, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load stop intent failed: %v", err)
+	}
+	if !found {
+		t.Fatal("stop intent not found after Stop")
+	}
+	wantExpiresAt := now.Add(5*time.Second + StopIntentBuffer)
+	if !intent.ExpiresAt.Equal(wantExpiresAt) {
+		t.Fatalf("intent.ExpiresAt = %v, want %v", intent.ExpiresAt, wantExpiresAt)
+	}
+}
+
+func TestServerCommandsHonorEnvContainerNameWhenTomlIsInvalid(t *testing.T) {
+	tests := []struct {
+		name          string
+		run           func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result
+		wantInspects  []string
+		wantStarts    []string
+		wantStopNames []string
+		wantContainer string
+	}{
+		{
+			name: "status",
+			run: func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result {
+				t.Helper()
+				result, err := Status(context.Background(), Options{Paths: paths, Docker: docker})
+				if err != nil {
+					t.Fatalf("Status failed: %v", err)
+				}
+				return result
+			},
+			wantInspects:  []string{"snowy-mc"},
+			wantContainer: "snowy-mc",
+		},
+		{
+			name: "stop",
+			run: func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result {
+				t.Helper()
+				result, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: NewFileIntentStore(filepath.Join(paths.RepoRoot, "data", "mcbot"))})
+				if err != nil {
+					t.Fatalf("Stop failed: %v", err)
+				}
+				return result
+			},
+			wantInspects:  []string{"snowy-mc", "snowy-mc"},
+			wantStopNames: []string{"snowy-mc"},
+			wantContainer: "snowy-mc",
+		},
+		{
+			name: "start already running",
+			run: func(t *testing.T, paths composectl.Paths, docker *fakeDocker) Result {
+				t.Helper()
+				result, err := Start(context.Background(), Options{Paths: paths, Docker: docker, Compose: &fakeCompose{}})
+				if err != nil {
+					t.Fatalf("Start failed: %v", err)
+				}
+				return result
+			},
+			wantInspects:  []string{"snowy-mc"},
+			wantContainer: "snowy-mc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\n", "[server\nversion = \"1.20.1\"\n")
+			docker := &fakeDocker{}
+			switch tt.name {
+			case "status":
+				docker.states = []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}}
+			case "stop":
+				docker.states = []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}, {Exists: true, Running: false, Status: "exited"}}
+			case "start already running":
+				docker.states = []*dockerctl.ContainerState{{Exists: true, Running: true, Status: "running"}}
+			}
+
+			result := tt.run(t, paths, docker)
+
+			if result.Container != tt.wantContainer {
+				t.Fatalf("result.Container = %q, want %q", result.Container, tt.wantContainer)
+			}
+			if len(docker.inspects) != len(tt.wantInspects) {
+				t.Fatalf("inspect names = %v, want %v", docker.inspects, tt.wantInspects)
+			}
+			for i, want := range tt.wantInspects {
+				if docker.inspects[i] != want {
+					t.Fatalf("inspect[%d] = %q, want %q", i, docker.inspects[i], want)
+				}
+			}
+			if len(docker.starts) != len(tt.wantStarts) {
+				t.Fatalf("start names = %v, want %v", docker.starts, tt.wantStarts)
+			}
+			for i, want := range tt.wantStarts {
+				if docker.starts[i] != want {
+					t.Fatalf("start[%d] = %q, want %q", i, docker.starts[i], want)
+				}
+			}
+			if len(docker.stopNames) != len(tt.wantStopNames) {
+				t.Fatalf("stop names = %v, want %v", docker.stopNames, tt.wantStopNames)
+			}
+			for i, want := range tt.wantStopNames {
+				if docker.stopNames[i] != want {
+					t.Fatalf("stop[%d] = %q, want %q", i, docker.stopNames[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestServerStartFromStoppedContainerStillRequiresValidTomlForProvisioning(t *testing.T) {
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\n", "[server\nversion = \"1.20.1\"\n")
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{{Exists: true, Running: false, Status: "exited"}}}
+	compose := &fakeCompose{}
+
+	_, err := Start(context.Background(), Options{Paths: paths, Docker: docker, Compose: compose})
+	if err == nil {
+		t.Fatal("Start succeeded, want TOML load error")
+	}
+	if len(docker.inspects) != 1 || docker.inspects[0] != "snowy-mc" {
+		t.Fatalf("inspect names = %v, want [snowy-mc]", docker.inspects)
+	}
+	if got := len(docker.starts); got != 0 {
+		t.Fatalf("docker starts = %d, want 0", got)
+	}
+	if compose.calls != 0 {
+		t.Fatalf("compose calls = %d, want 0 before TOML load succeeds", compose.calls)
+	}
+}
+
+func writeServerOpsFiles(t *testing.T, dir, envContents, configContents string) composectl.Paths {
+	t.Helper()
+	paths := composectl.DefaultPaths(dir)
+	if err := os.WriteFile(paths.EnvFile, []byte(envContents), 0o600); err != nil {
+		t.Fatalf("write env failed: %v", err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(configContents), 0o600); err != nil {
+		t.Fatalf("write config failed: %v", err)
+	}
+	if err := os.WriteFile(paths.ComposeFile, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatalf("write compose failed: %v", err)
+	}
+	return paths
+}
+
+func TestServerStopUsesProcessEnvStopTimeoutWhenEnvFileOmitsIt(t *testing.T) {
+	t.Setenv("STOP_TIMEOUT_SECONDS", "7")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\n", "")
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	now := time.Date(2026, 5, 22, 4, 0, 0, 0, time.UTC)
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{
+		{Exists: true, Running: true, Status: "running"},
+		{Exists: true, Running: false, Status: "exited"},
+	}}
+
+	result, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if result.Container != "snowy-mc" {
+		t.Fatalf("result.Container = %q, want snowy-mc", result.Container)
+	}
+	if len(docker.stops) != 1 || docker.stops[0] != 7 {
+		t.Fatalf("docker stop timeouts = %v, want [7]", docker.stops)
+	}
+	intent, found, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load stop intent failed: %v", err)
+	}
+	if !found {
+		t.Fatal("stop intent not found after Stop")
+	}
+	wantExpiresAt := now.Add(7*time.Second + StopIntentBuffer)
+	if !intent.ExpiresAt.Equal(wantExpiresAt) {
+		t.Fatalf("intent.ExpiresAt = %v, want %v", intent.ExpiresAt, wantExpiresAt)
+	}
+}
+
+func TestServerStopPrefersEnvFileStopTimeoutOverProcessEnv(t *testing.T) {
+	t.Setenv("STOP_TIMEOUT_SECONDS", "7")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\nSTOP_TIMEOUT_SECONDS=5\n", "")
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	now := time.Date(2026, 5, 22, 4, 5, 0, 0, time.UTC)
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{
+		{Exists: true, Running: true, Status: "running"},
+		{Exists: true, Running: false, Status: "exited"},
+	}}
+
+	_, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if len(docker.stops) != 1 || docker.stops[0] != 5 {
+		t.Fatalf("docker stop timeouts = %v, want [5]", docker.stops)
+	}
+	intent, found, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load stop intent failed: %v", err)
+	}
+	if !found {
+		t.Fatal("stop intent not found after Stop")
+	}
+	wantExpiresAt := now.Add(5*time.Second + StopIntentBuffer)
+	if !intent.ExpiresAt.Equal(wantExpiresAt) {
+		t.Fatalf("intent.ExpiresAt = %v, want %v", intent.ExpiresAt, wantExpiresAt)
+	}
+}
+
+func TestServerStopUsesComposeStyleEnvFileStopTimeout(t *testing.T) {
+	t.Setenv("STOP_TIMEOUT_SECONDS", "7")
+	dir := t.TempDir()
+	paths := writeServerOpsFiles(t, dir, "MC_CONTAINER_NAME=snowy-mc\nSTOP_TIMEOUT_SECONDS=\"5\" # local timeout\n", "")
+	store := NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))
+	now := time.Date(2026, 5, 22, 4, 10, 0, 0, time.UTC)
+	docker := &fakeDocker{states: []*dockerctl.ContainerState{
+		{Exists: true, Running: true, Status: "running"},
+		{Exists: true, Running: false, Status: "exited"},
+	}}
+
+	_, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: store, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	if len(docker.stops) != 1 || docker.stops[0] != 5 {
+		t.Fatalf("docker stop timeouts = %v, want [5]", docker.stops)
+	}
+	intent, found, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load stop intent failed: %v", err)
+	}
+	if !found {
+		t.Fatal("stop intent not found after Stop")
+	}
+	wantExpiresAt := now.Add(5*time.Second + StopIntentBuffer)
+	if !intent.ExpiresAt.Equal(wantExpiresAt) {
+		t.Fatalf("intent.ExpiresAt = %v, want %v", intent.ExpiresAt, wantExpiresAt)
+	}
+}
+
+func TestServerStopDefaultsInvalidProcessEnvStopTimeout(t *testing.T) {
+	for _, value := range []string{"abc", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("STOP_TIMEOUT_SECONDS", value)
+			dir := t.TempDir()
+			paths := writeServerOpsFiles(t, dir, "", "")
+			docker := &fakeDocker{states: []*dockerctl.ContainerState{
+				{Exists: true, Running: true, Status: "running"},
+				{Exists: true, Running: false, Status: "exited"},
+			}}
+
+			_, err := Stop(context.Background(), Options{Paths: paths, Docker: docker, IntentStore: NewFileIntentStore(filepath.Join(dir, "data", "mcbot"))})
+			if err != nil {
+				t.Fatalf("Stop failed: %v", err)
+			}
+			if len(docker.stops) != 1 || docker.stops[0] != defaultStopTimeoutSeconds {
+				t.Fatalf("docker stop timeouts = %v, want [%d]", docker.stops, defaultStopTimeoutSeconds)
+			}
+		})
+	}
+}
