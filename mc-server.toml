@@ -13,3 +13,14 @@ restart_policy = "no"
 port_publish = "25565:25565"
 uid = 1000
 gid = 1000
+
+[backup]
+enabled = true
+directory = "backups"
+retention_count = 14
+retention_days = 0
+retention_max_bytes = 0
+daily_time = "04:00"
+timezone = "Local"
+quiesce_timeout_seconds = 30
+include_mc_server_toml = true

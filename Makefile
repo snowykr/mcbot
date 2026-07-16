@@ -2,7 +2,7 @@ MC_SERVICE=mc-server
 GO_DIR=mcbot
 MCBOT_CLI=cd $(GO_DIR) && go run ./cmd/mcbot
 
-.PHONY: stop status setup setup-env setup-config config-show config-get config-set config-init config-validate env-show env-get env-set env-unset env-init env-validate up up-all up-mc down nuke go-deps go-build logs
+.PHONY: stop status setup setup-env setup-config config-show config-get config-set config-init config-validate env-show env-get env-set env-unset env-init env-validate backup restore backup-create backup-list backup-validate backup-prune backup-restore up up-all up-mc down nuke go-deps go-build logs
 
 stop:
 	$(MCBOT_CLI) server stop
@@ -51,6 +51,27 @@ env-init:
 
 env-validate:
 	$(MCBOT_CLI) env validate
+
+backup:
+	$(MCBOT_CLI) $(GLOBAL_ARGS) backup create $(ARGS)
+
+restore:
+	$(MCBOT_CLI) $(GLOBAL_ARGS) backup restore --backup-id $(BACKUP) $(ARGS)
+
+backup-create:
+	$(MCBOT_CLI) $(GLOBAL_ARGS) backup create $(ARGS)
+
+backup-list:
+	$(MCBOT_CLI) $(GLOBAL_ARGS) backup list $(ARGS)
+
+backup-validate:
+	$(MCBOT_CLI) $(GLOBAL_ARGS) backup validate $(ARGS)
+
+backup-prune:
+	$(MCBOT_CLI) $(GLOBAL_ARGS) backup prune $(ARGS)
+
+backup-restore:
+	$(MCBOT_CLI) $(GLOBAL_ARGS) backup restore $(ARGS)
 
 go-deps:
 	cd $(GO_DIR) && go mod tidy

@@ -188,6 +188,9 @@ func TestLoadAppliesDefaultsForOmittedFields(t *testing.T) {
 	if cfg.Server.Type != defaults.Server.Type || cfg.Container.PortPublish != defaults.Container.PortPublish {
 		t.Fatalf("defaults not preserved: cfg=%+v defaults=%+v", cfg, defaults)
 	}
+	if cfg.Backup.Directory != defaults.Backup.Directory || cfg.Backup.RetentionCount != defaults.Backup.RetentionCount {
+		t.Fatalf("backup defaults not preserved: cfg=%+v defaults=%+v", cfg.Backup, defaults.Backup)
+	}
 }
 
 func TestLoadRejectsUnknownKey(t *testing.T) {
@@ -200,6 +203,87 @@ func TestLoadRejectsUnknownKey(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `unknown mc-server.toml key "server.seed"`) {
 		t.Fatalf("ValidateFile error = %v, want unknown key", err)
+	}
+}
+
+func TestBackupConfigKeysRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mc-server.toml")
+	if err := Init(path); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	updates := map[string]string{
+		"backup.enabled":                 "false",
+		"backup.directory":               "server-backups",
+		"backup.retention_count":         "7",
+		"backup.retention_days":          "30",
+		"backup.retention_max_bytes":     "1073741824",
+		"backup.daily_time":              "23:15",
+		"backup.timezone":                "UTC",
+		"backup.quiesce_timeout_seconds": "45",
+		"backup.include_mc_server_toml":  "false",
+	}
+	for key, value := range updates {
+		if err := Set(path, key, value); err != nil {
+			t.Fatalf("Set(%s, %s) failed: %v", key, value, err)
+		}
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Backup.Enabled || cfg.Backup.Directory != "server-backups" || cfg.Backup.RetentionCount != 7 ||
+		cfg.Backup.RetentionDays != 30 || cfg.Backup.RetentionMaxBytes != 1073741824 ||
+		cfg.Backup.DailyTime != "23:15" || cfg.Backup.Timezone != "UTC" ||
+		cfg.Backup.QuiesceTimeoutSeconds != 45 || cfg.Backup.IncludeMCServerTOML {
+		t.Fatalf("unexpected backup config: %+v", cfg.Backup)
+	}
+	value, err := Get(path, "backup.retention_count")
+	if err != nil {
+		t.Fatalf("Get backup.retention_count failed: %v", err)
+	}
+	if value != 7 {
+		t.Fatalf("backup.retention_count = %v, want 7", value)
+	}
+	assertFileContent(t, path, Render(cfg))
+}
+
+func TestBackupConfigValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{name: "absolute directory", edit: func(c *Config) { c.Backup.Directory = "/tmp/backups" }, want: "backup.directory"},
+		{name: "unclean directory", edit: func(c *Config) { c.Backup.Directory = "backups/../backups" }, want: "clean relative"},
+		{name: "data root", edit: func(c *Config) { c.Backup.Directory = "data" }, want: "data root"},
+		{name: "inside data subtree", edit: func(c *Config) { c.Backup.Directory = "data/backups" }, want: "protected path data"},
+		{name: "inside game data", edit: func(c *Config) { c.Backup.Directory = "data/minecraft/backups" }, want: "protected path data/minecraft"},
+		{name: "inside bot runtime", edit: func(c *Config) { c.Backup.Directory = "data/mcbot/backups" }, want: "protected path data/mcbot"},
+		{name: "inside git metadata", edit: func(c *Config) { c.Backup.Directory = ".git/backups" }, want: "protected path .git"},
+		{name: "inside omx metadata", edit: func(c *Config) { c.Backup.Directory = ".omx/backups" }, want: "protected path .omx"},
+		{name: "zero retention", edit: func(c *Config) { c.Backup.RetentionCount = 0 }, want: "backup.retention_count"},
+		{name: "negative retention days", edit: func(c *Config) { c.Backup.RetentionDays = -1 }, want: "backup.retention_days"},
+		{name: "negative bytes", edit: func(c *Config) { c.Backup.RetentionMaxBytes = -1 }, want: "backup.retention_max_bytes"},
+		{name: "bad daily time", edit: func(c *Config) { c.Backup.DailyTime = "4:00" }, want: "backup.daily_time"},
+		{name: "bad timezone", edit: func(c *Config) { c.Backup.Timezone = "Not/AZone" }, want: "backup.timezone"},
+		{name: "low quiesce timeout", edit: func(c *Config) { c.Backup.QuiesceTimeoutSeconds = 4 }, want: "backup.quiesce_timeout_seconds"},
+		{name: "high quiesce timeout", edit: func(c *Config) { c.Backup.QuiesceTimeoutSeconds = 301 }, want: "backup.quiesce_timeout_seconds"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Defaults()
+			tc.edit(&cfg)
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate succeeded, want error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate error = %v, want containing %q", err, tc.want)
+			}
+		})
 	}
 }
 

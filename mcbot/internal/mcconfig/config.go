@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -21,6 +22,7 @@ var memoryPattern = regexp.MustCompile(`^[1-9][0-9]*[MG]$`)
 type Config struct {
 	Server    ServerConfig    `json:"server" toml:"server"`
 	Container ContainerConfig `json:"container" toml:"container"`
+	Backup    BackupConfig    `json:"backup" toml:"backup"`
 }
 
 type InvalidFileError struct {
@@ -59,6 +61,18 @@ type ContainerConfig struct {
 	GID           int    `json:"gid" toml:"gid"`
 }
 
+type BackupConfig struct {
+	Enabled               bool   `json:"enabled" toml:"enabled"`
+	Directory             string `json:"directory" toml:"directory"`
+	RetentionCount        int    `json:"retention_count" toml:"retention_count"`
+	RetentionDays         int    `json:"retention_days" toml:"retention_days"`
+	RetentionMaxBytes     int64  `json:"retention_max_bytes" toml:"retention_max_bytes"`
+	DailyTime             string `json:"daily_time" toml:"daily_time"`
+	Timezone              string `json:"timezone" toml:"timezone"`
+	QuiesceTimeoutSeconds int    `json:"quiesce_timeout_seconds" toml:"quiesce_timeout_seconds"`
+	IncludeMCServerTOML   bool   `json:"include_mc_server_toml" toml:"include_mc_server_toml"`
+}
+
 func Defaults() Config {
 	return Config{
 		Server: ServerConfig{
@@ -76,6 +90,17 @@ func Defaults() Config {
 			PortPublish:   "25565:25565",
 			UID:           1000,
 			GID:           1000,
+		},
+		Backup: BackupConfig{
+			Enabled:               true,
+			Directory:             "backups",
+			RetentionCount:        14,
+			RetentionDays:         0,
+			RetentionMaxBytes:     0,
+			DailyTime:             "04:00",
+			Timezone:              "Local",
+			QuiesceTimeoutSeconds: 30,
+			IncludeMCServerTOML:   true,
 		},
 	}
 }
@@ -211,6 +236,16 @@ func Render(c Config) string {
 	fmt.Fprintf(&b, "port_publish = %s\n", quote(c.Container.PortPublish))
 	fmt.Fprintf(&b, "uid = %d\n", c.Container.UID)
 	fmt.Fprintf(&b, "gid = %d\n", c.Container.GID)
+	b.WriteString("\n[backup]\n")
+	fmt.Fprintf(&b, "enabled = %t\n", c.Backup.Enabled)
+	fmt.Fprintf(&b, "directory = %s\n", quote(c.Backup.Directory))
+	fmt.Fprintf(&b, "retention_count = %d\n", c.Backup.RetentionCount)
+	fmt.Fprintf(&b, "retention_days = %d\n", c.Backup.RetentionDays)
+	fmt.Fprintf(&b, "retention_max_bytes = %d\n", c.Backup.RetentionMaxBytes)
+	fmt.Fprintf(&b, "daily_time = %s\n", quote(c.Backup.DailyTime))
+	fmt.Fprintf(&b, "timezone = %s\n", quote(c.Backup.Timezone))
+	fmt.Fprintf(&b, "quiesce_timeout_seconds = %d\n", c.Backup.QuiesceTimeoutSeconds)
+	fmt.Fprintf(&b, "include_mc_server_toml = %t\n", c.Backup.IncludeMCServerTOML)
 	return b.String()
 }
 
@@ -248,7 +283,87 @@ func (c Config) Validate() error {
 	if c.Container.GID < 0 {
 		return fmt.Errorf("container.gid must be a non-negative integer")
 	}
+	if err := validateBackup(c.Backup); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateBackup(cfg BackupConfig) error {
+	if err := ValidateBackupDirectory(cfg.Directory); err != nil {
+		return err
+	}
+	if cfg.RetentionCount < 1 {
+		return fmt.Errorf("backup.retention_count must be at least 1")
+	}
+	if cfg.RetentionDays < 0 {
+		return fmt.Errorf("backup.retention_days must be a non-negative integer")
+	}
+	if cfg.RetentionMaxBytes < 0 {
+		return fmt.Errorf("backup.retention_max_bytes must be a non-negative integer")
+	}
+	if !validDailyTime(cfg.DailyTime) {
+		return fmt.Errorf("backup.daily_time must use strict HH:MM 24-hour format")
+	}
+	if !validTimezone(cfg.Timezone) {
+		return fmt.Errorf("backup.timezone must be Local or a valid IANA timezone")
+	}
+	if cfg.QuiesceTimeoutSeconds < 5 || cfg.QuiesceTimeoutSeconds > 300 {
+		return fmt.Errorf("backup.quiesce_timeout_seconds must be between 5 and 300")
+	}
+	return nil
+}
+
+func ValidateBackupDirectory(value string) error {
+	if value == "" {
+		return fmt.Errorf("backup.directory must not be empty")
+	}
+	if filepath.IsAbs(value) {
+		return fmt.Errorf("backup.directory must be a relative path under the repository root")
+	}
+	clean := filepath.Clean(value)
+	if clean != value {
+		return fmt.Errorf("backup.directory must be a clean relative path")
+	}
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("backup.directory must stay under the repository root")
+	}
+	slash := filepath.ToSlash(clean)
+	protected := []string{"data/minecraft", "data/mcbot", "mcbot", ".git", ".omx", ".env", "mc-server.toml"}
+	for _, path := range protected {
+		if slash == path || strings.HasPrefix(slash, path+"/") {
+			return fmt.Errorf("backup.directory must not be inside protected path %s", path)
+		}
+	}
+	if slash == "data" {
+		return fmt.Errorf("backup.directory must not be the data root")
+	}
+	if strings.HasPrefix(slash, "data/") {
+		return fmt.Errorf("backup.directory must not be inside protected path data")
+	}
+	return nil
+}
+
+func validDailyTime(value string) bool {
+	if len(value) != len("04:00") {
+		return false
+	}
+	if value[2] != ':' {
+		return false
+	}
+	_, err := time.Parse("15:04", value)
+	return err == nil
+}
+
+func validTimezone(value string) bool {
+	if value == "" {
+		return false
+	}
+	if value == "Local" {
+		return true
+	}
+	_, err := time.LoadLocation(value)
+	return err == nil
 }
 
 func (c Config) Value(path string) (any, error) {
@@ -277,6 +392,24 @@ func (c Config) Value(path string) (any, error) {
 		return c.Container.UID, nil
 	case "container.gid":
 		return c.Container.GID, nil
+	case "backup.enabled":
+		return c.Backup.Enabled, nil
+	case "backup.directory":
+		return c.Backup.Directory, nil
+	case "backup.retention_count":
+		return c.Backup.RetentionCount, nil
+	case "backup.retention_days":
+		return c.Backup.RetentionDays, nil
+	case "backup.retention_max_bytes":
+		return c.Backup.RetentionMaxBytes, nil
+	case "backup.daily_time":
+		return c.Backup.DailyTime, nil
+	case "backup.timezone":
+		return c.Backup.Timezone, nil
+	case "backup.quiesce_timeout_seconds":
+		return c.Backup.QuiesceTimeoutSeconds, nil
+	case "backup.include_mc_server_toml":
+		return c.Backup.IncludeMCServerTOML, nil
 	default:
 		return nil, ValidateOwnedKey(path)
 	}
@@ -324,6 +457,48 @@ func (c *Config) set(path, rawValue string) error {
 			return fmt.Errorf("container.gid must be an integer: %w", err)
 		}
 		c.Container.GID = value
+	case "backup.enabled":
+		value, err := parseBoolValue(rawValue)
+		if err != nil {
+			return fmt.Errorf("backup.enabled must be a boolean: %w", err)
+		}
+		c.Backup.Enabled = value
+	case "backup.directory":
+		c.Backup.Directory = parseStringValue(rawValue)
+	case "backup.retention_count":
+		value, err := parseIntValue(rawValue)
+		if err != nil {
+			return fmt.Errorf("backup.retention_count must be an integer: %w", err)
+		}
+		c.Backup.RetentionCount = value
+	case "backup.retention_days":
+		value, err := parseIntValue(rawValue)
+		if err != nil {
+			return fmt.Errorf("backup.retention_days must be an integer: %w", err)
+		}
+		c.Backup.RetentionDays = value
+	case "backup.retention_max_bytes":
+		value, err := parseInt64Value(rawValue)
+		if err != nil {
+			return fmt.Errorf("backup.retention_max_bytes must be an integer: %w", err)
+		}
+		c.Backup.RetentionMaxBytes = value
+	case "backup.daily_time":
+		c.Backup.DailyTime = parseStringValue(rawValue)
+	case "backup.timezone":
+		c.Backup.Timezone = parseStringValue(rawValue)
+	case "backup.quiesce_timeout_seconds":
+		value, err := parseIntValue(rawValue)
+		if err != nil {
+			return fmt.Errorf("backup.quiesce_timeout_seconds must be an integer: %w", err)
+		}
+		c.Backup.QuiesceTimeoutSeconds = value
+	case "backup.include_mc_server_toml":
+		value, err := parseBoolValue(rawValue)
+		if err != nil {
+			return fmt.Errorf("backup.include_mc_server_toml must be a boolean: %w", err)
+		}
+		c.Backup.IncludeMCServerTOML = value
 	default:
 		return ValidateOwnedKey(path)
 	}
@@ -335,6 +510,20 @@ func parseIntValue(raw string) (int, error) {
 		return 0, fmt.Errorf("quoted value %q is not an integer", raw)
 	}
 	return strconv.Atoi(raw)
+}
+
+func parseInt64Value(raw string) (int64, error) {
+	if strings.HasPrefix(raw, `"`) || strings.HasPrefix(raw, `'`) {
+		return 0, fmt.Errorf("quoted value %q is not an integer", raw)
+	}
+	return strconv.ParseInt(raw, 10, 64)
+}
+
+func parseBoolValue(raw string) (bool, error) {
+	if strings.HasPrefix(raw, `"`) || strings.HasPrefix(raw, `'`) {
+		return false, fmt.Errorf("quoted value %q is not a boolean", raw)
+	}
+	return strconv.ParseBool(raw)
 }
 
 func parseStringValue(raw string) string {

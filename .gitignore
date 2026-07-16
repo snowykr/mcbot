@@ -21,6 +21,7 @@
 /mcbot/vendor/
 
 # Backups
+/backups/
 *.tar.gz
 # Setup/env staging leftovers containing local secrets
 .setup-env-*.tmp

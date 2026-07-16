@@ -11,9 +11,12 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/snowy/mcbot/internal/backup"
 	"github.com/snowy/mcbot/internal/composectl"
 	"github.com/snowy/mcbot/internal/config"
+	"github.com/snowy/mcbot/internal/dockerctl"
 	"github.com/snowy/mcbot/internal/discord"
+	"github.com/snowy/mcbot/internal/mcconfig"
 	"github.com/snowy/mcbot/internal/mcserver"
 	"github.com/snowy/mcbot/internal/rcon"
 	"github.com/snowy/mcbot/internal/serverops"
@@ -25,6 +28,7 @@ var newRuntimeEmbedChannelStore = func() *config.RuntimeEmbedChannelStore {
 }
 
 var discoverRepoRootForExternalStopIntent = composectl.DiscoverRepoRoot
+var startBackupScheduler = startConfiguredBackupScheduler
 
 type ChannelConfiguratorStatusEmbed interface {
 	discord.StatusEmbedUpdater
@@ -101,6 +105,11 @@ func Run() error {
 	if cfg.RCONEnabled() {
 		rconClient = rcon.NewClient(cfg.RCONHost, cfg.RCONPort, cfg.RCONPassword, cfg.RCONTimeout)
 	}
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
+	if err := startBackupScheduler(appCtx, rconClient); err != nil {
+		log.Printf("[BACKUP] scheduler unavailable: %v", err)
+	}
 
 	handler := NewDiscordHandler(cfg, controller, statusEmbed, rconClient, runtimeEmbedChannelStore, defaultEmbedChannelID)
 
@@ -167,11 +176,42 @@ func Run() error {
 	<-stop
 
 	log.Println("마크봇을 종료합니다...")
+	appCancel()
 	monitorCancel()
 	<-monitorDone
 	controller.Shutdown()
 	log.Println("마크봇이 정상적으로 종료되었습니다.")
 	return nil
+}
+
+func startConfiguredBackupScheduler(ctx context.Context, quiescer backup.Quiescer) error {
+	cfg, err := mcconfig.Load("/app/mc-server.toml")
+	if err != nil {
+		return fmt.Errorf("load backup policy: %w", err)
+	}
+	defaultBackupDir := mcconfig.Defaults().Backup.Directory
+	if cfg.Backup.Enabled && cfg.Backup.Directory != defaultBackupDir {
+		return fmt.Errorf("container backup scheduler requires backup.directory=%q; configured %q; use host CLI/Make for non-default backup directories", defaultBackupDir, cfg.Backup.Directory)
+	}
+	opts := backup.ContainerSchedulerOptions(cfg.Backup, quiescer)
+	opts.ServerRunning = mcContainerRunning
+	_, err = backup.StartScheduler(ctx, opts)
+	return err
+}
+
+func mcContainerRunning(ctx context.Context) (bool, error) {
+	name := os.Getenv("MC_CONTAINER_NAME")
+	if name == "" {
+		name = composectl.MCServerService
+	}
+	state, err := dockerctl.InspectContainer(ctx, name)
+	if err != nil {
+		return false, fmt.Errorf("inspect container %s: %w", name, err)
+	}
+	if !state.Exists {
+		return false, nil
+	}
+	return state.Running, nil
 }
 
 func ResolveStartupEmbedChannelID(ctx context.Context, cfg *config.Config, store RuntimeEmbedChannelStore) string {
