@@ -67,6 +67,53 @@ func TestSetUpdatesLastDuplicateKey(t *testing.T) {
 	}
 }
 
+func TestSetPreservesComposeSensitiveValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "inline comment", value: "say #maintenance", want: `RCON_CMDS_STARTUP='say #maintenance'`},
+		{name: "apostrophe", value: "it's # ok", want: `RCON_CMDS_STARTUP='it\'s # ok'`},
+		{name: "newline", value: "say hi\nsay bye", want: "RCON_CMDS_STARTUP='say hi\nsay bye'"},
+		{name: "newline and dollar", value: "say $HOME\nsay done", want: "RCON_CMDS_STARTUP='say $HOME\nsay done'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeEnv(t, "")
+
+			if err := Set(path, "RCON_CMDS_STARTUP", tt.value); err != nil {
+				t.Fatalf("Set failed: %v", err)
+			}
+			if got := strings.TrimSpace(readEnv(t, path)); got != tt.want {
+				t.Fatalf("rendered value = %q, want %q", got, tt.want)
+			}
+			entry, err := Get(path, "RCON_CMDS_STARTUP", RevealPolicy{ShowSecrets: true})
+			if err != nil {
+				t.Fatalf("Get failed: %v", err)
+			}
+			if entry.Value != tt.value {
+				t.Fatalf("round-trip value = %q, want %q", entry.Value, tt.value)
+			}
+		})
+	}
+}
+
+func TestShowRejectsUnterminatedQuotedValueWithoutLeakingSecrets(t *testing.T) {
+	for _, quote := range []string{"'", `"`} {
+		path := writeEnv(t, "MC_CONTAINER_NAME="+quote+"unterminated\nDISCORD_TOKEN=secret-probe\n")
+
+		entries, err := Show(path, RevealPolicy{})
+		if err == nil {
+			t.Fatalf("Show entries = %#v, want unterminated quote error", entries)
+		}
+		if strings.Contains(err.Error(), "secret-probe") {
+			t.Fatalf("Show error leaked secret: %v", err)
+		}
+	}
+}
+
 func TestUnsetRemovesKey(t *testing.T) {
 	path := writeEnv(t, "# keep\nDISCORD_TOKEN=secret\nMC_CONTAINER_NAME=mc-server\n")
 

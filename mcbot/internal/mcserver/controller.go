@@ -64,6 +64,10 @@ type Controller struct {
 	onStateChange            StateChangeCallback
 	syncWatcherCancel        context.CancelFunc
 	syncWatcherMu            sync.Mutex
+	syncWatcherReplaceMu     sync.Mutex
+	syncStateMu              sync.Mutex
+	syncWatcherGeneration    atomic.Uint64
+	syncWatcherDone          chan struct{}
 	containerWatcherCancel   context.CancelFunc
 	runtimeLogSub            *Subscription
 	shutdownIntentFromInside atomic.Bool
@@ -99,6 +103,7 @@ type Controller struct {
 	runningLifecycleNanos atomic.Int64
 	externalStopIntentMu  sync.RWMutex
 	externalStopIntent    ExternalStopIntentStore
+	inspectContainer      func(context.Context, string) (*dockerctl.ContainerState, error)
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
@@ -130,6 +135,7 @@ func NewControllerWithLogger(cfg *config.Config, stateManager *state.Manager, lo
 		playerTracker:      playerTracker,
 		lifecycleLogger:    logger,
 		externalStopIntent: serverops.NewFileIntentStore(serverops.BotDataDir()),
+		inspectContainer:   dockerctl.InspectContainer,
 	}, nil
 }
 
@@ -517,7 +523,10 @@ func (c *Controller) GetPlayerTracker() *PlayerTracker {
 }
 
 func (c *Controller) SyncState(ctx context.Context) error {
-	containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
+	c.syncStateMu.Lock()
+	defer c.syncStateMu.Unlock()
+
+	containerState, err := c.inspectContainer(ctx, c.cfg.MCContainerName)
 	if err != nil {
 		return err
 	}
@@ -525,15 +534,23 @@ func (c *Controller) SyncState(ctx context.Context) error {
 	currentState := c.stateManager.GetState()
 
 	if containerState.Exists && containerState.Running {
+		lifecycleChanged := c.hasDifferentRunningLifecycle(containerState.StartedAt)
+		if lifecycleChanged {
+			c.stopSyncWatcher()
+		}
 		c.setRunningLifecycleStartedAt(containerState.StartedAt)
 		needsStartupSync := currentState == state.StateStopped ||
 			currentState == state.StateError ||
-			currentState == state.StateCrashed
+			currentState == state.StateCrashed ||
+			lifecycleChanged
 
 		if needsStartupSync {
 			c.applyStateTransition(state.StateStarting)
 		}
 
+		if lifecycleChanged {
+			c.logMux.Stop()
+		}
 		c.logMux.Start(containerState.StartedAt)
 
 		if needsStartupSync {
@@ -554,27 +571,63 @@ func (c *Controller) SyncState(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) startSyncWatcher(containerStartedAt time.Time) {
-	c.syncWatcherMu.Lock()
-	if c.syncWatcherCancel != nil {
-		c.syncWatcherCancel()
-	}
-
-	watchCtx, cancel := context.WithTimeout(context.Background(), c.cfg.ReadyTimeout)
-	c.syncWatcherCancel = cancel
-	c.syncWatcherMu.Unlock()
-
-	go c.syncWatcherLoop(watchCtx, containerStartedAt)
+func (c *Controller) hasDifferentRunningLifecycle(startedAt time.Time) bool {
+	currentStartedAt := c.runningLifecycleStartedAt()
+	return !startedAt.IsZero() && !currentStartedAt.IsZero() && !startedAt.Equal(currentStartedAt)
 }
 
-func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt time.Time) {
+func (c *Controller) startSyncWatcher(containerStartedAt time.Time) {
+	c.syncWatcherReplaceMu.Lock()
+	defer c.syncWatcherReplaceMu.Unlock()
+	c.stopSyncWatcherLocked()
+
+	watchCtx, cancel := context.WithTimeout(context.Background(), c.cfg.ReadyTimeout)
+	generation := c.syncWatcherGeneration.Add(1)
+	done := make(chan struct{})
+	c.syncWatcherMu.Lock()
+	c.syncWatcherCancel = cancel
+	c.syncWatcherDone = done
+	c.syncWatcherMu.Unlock()
+
+	go c.syncWatcherLoop(watchCtx, containerStartedAt, generation, done)
+}
+
+func (c *Controller) stopSyncWatcher() {
+	c.syncWatcherReplaceMu.Lock()
+	defer c.syncWatcherReplaceMu.Unlock()
+	c.stopSyncWatcherLocked()
+}
+
+func (c *Controller) stopSyncWatcherLocked() {
+	c.syncWatcherMu.Lock()
+	previousCancel := c.syncWatcherCancel
+	previousDone := c.syncWatcherDone
+	c.syncWatcherGeneration.Add(1)
+	c.syncWatcherMu.Unlock()
+	if previousCancel != nil {
+		previousCancel()
+	}
+	if previousDone != nil {
+		<-previousDone
+	}
+	c.syncWatcherMu.Lock()
+	if c.syncWatcherDone == previousDone {
+		c.syncWatcherCancel = nil
+		c.syncWatcherDone = nil
+	}
+	c.syncWatcherMu.Unlock()
+}
+
+func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt time.Time, generation uint64, done chan struct{}) {
 	defer func() {
 		c.syncWatcherMu.Lock()
-		if c.syncWatcherCancel != nil {
+		if c.syncWatcherGeneration.Load() == generation && c.syncWatcherCancel != nil {
 			c.syncWatcherCancel()
 			c.syncWatcherCancel = nil
+			c.syncWatcherDone = nil
 		}
 		c.syncWatcherMu.Unlock()
+		close(done)
 	}()
 
 	sub := c.logMux.Subscribe()
@@ -587,6 +640,9 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 	for {
 		select {
 		case logLine, ok := <-sub.Ch:
+			if c.syncWatcherGeneration.Load() != generation {
+				return
+			}
 			if !ok {
 				currentState := c.stateManager.GetState()
 				if currentState == state.StateStarting {
@@ -625,6 +681,9 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 			}
 
 		case <-containerCheckTicker.C:
+			if c.syncWatcherGeneration.Load() != generation {
+				return
+			}
 			currentState := c.stateManager.GetState()
 			if currentState != state.StateStarting {
 				continue
@@ -651,6 +710,9 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 			}
 
 		case <-ctx.Done():
+			if c.syncWatcherGeneration.Load() != generation {
+				return
+			}
 			currentState := c.stateManager.GetState()
 			if currentState == state.StateStarting {
 				c.handleReadyTimeoutFallback(containerStartedAt)
@@ -1079,7 +1141,7 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 		case <-ticker.C:
 			currentState := c.stateManager.GetState()
 
-			containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
+			containerState, err := c.inspectContainer(ctx, c.cfg.MCContainerName)
 			if err != nil {
 				consecutiveInspectFailures++
 				logutil.Debugf("[CONTAINER_WATCHER] 컨테이너 상태 확인 실패 (%d/%d): %v",
@@ -1107,7 +1169,19 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 			logutil.Debugf("[CONTAINER_WATCHER] tick - state=%s exists=%v running=%v shutdownIntent=%v",
 				currentState.Korean(), containerState.Exists, containerState.Running, shutdownIntent)
 
+			if containerState.Running && c.hasDifferentRunningLifecycle(containerState.StartedAt) {
+				if err := c.SyncState(ctx); err != nil {
+					logutil.Debugf("[CONTAINER_WATCHER] 새 컨테이너 lifecycle 동기화 실패: %v", err)
+				}
+				continue
+			}
+
 			if currentState != state.StateRunning {
+				if containerState.Running && (currentState == state.StateStopped || currentState == state.StateError || currentState == state.StateCrashed) {
+					if err := c.SyncState(ctx); err != nil {
+						logutil.Debugf("[CONTAINER_WATCHER] 외부 시작 상태 동기화 실패: %v", err)
+					}
+				}
 				continue
 			}
 
@@ -1115,7 +1189,7 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 				if c.hasShutdownIntent(ctx) {
 					logutil.Infof("[CONTAINER_WATCHER] 종료 의도 감지 (즉시) - 정상 종료로 처리")
 					c.handleNormalShutdown(currentState, containerState.Exists)
-					return
+					continue
 				}
 
 				logutil.Debugf("[CONTAINER_WATCHER] 컨테이너 종료 감지, 로그 워처 종료 또는 타임아웃 대기 (최대 %v)", ShutdownIntentGracePeriod)
@@ -1137,7 +1211,7 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 				if c.hasShutdownIntent(ctx) {
 					logutil.Infof("[CONTAINER_WATCHER] 종료 의도 감지 (대기 후) - 정상 종료로 처리")
 					c.handleNormalShutdown(currentState, containerState.Exists)
-					return
+					continue
 				}
 
 				// ctx 취소 + shutdownIntent=false: 보수적으로 비정상 종료(crash)로 처리
@@ -1166,15 +1240,9 @@ func (c *Controller) Shutdown() {
 	c.shutdownComplete.Store(true)
 
 	c.StopRuntimeWatchers()
-
-	c.syncWatcherMu.Lock()
-	cancel := c.syncWatcherCancel
-	c.syncWatcherCancel = nil
-	c.syncWatcherMu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
+	c.syncStateMu.Lock()
+	c.stopSyncWatcher()
+	c.syncStateMu.Unlock()
 
 	c.stopStateChangeWorker()
 	c.playerTracker.Close()

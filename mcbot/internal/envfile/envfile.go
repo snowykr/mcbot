@@ -122,15 +122,22 @@ func Set(path, key, value string) error {
 		}
 	}
 	if lastMatch >= 0 {
-		file.lines[lastMatch].raw = key + "=" + value
+		file.lines[lastMatch].raw = key + "=" + renderComposeEnvValue(value)
 		file.lines[lastMatch].value = value
 	} else {
 		if len(file.lines) > 0 && strings.TrimSpace(file.lines[len(file.lines)-1].raw) != "" {
 			file.lines = append(file.lines, line{})
 		}
-		file.lines = append(file.lines, line{raw: key + "=" + value, key: key, value: value, entry: true})
+		file.lines = append(file.lines, line{raw: key + "=" + renderComposeEnvValue(value), key: key, value: value, entry: true})
 	}
 	return atomicWrite(path, []byte(renderLines(file.lines)))
+}
+
+func renderComposeEnvValue(value string) string {
+	if value == "" || (!strings.ContainsAny(value, "#\n\r'\"\\$") && value == strings.TrimSpace(value)) {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `\'`) + "'"
 }
 
 func Unset(path, key string) error {
@@ -256,6 +263,29 @@ func parseFile(path string, strict bool) (File, error) {
 	scanner := bufio.NewScanner(data)
 	for scanner.Scan() {
 		raw := scanner.Text()
+		trimmed := strings.TrimSpace(raw)
+		key, value, hasValue := strings.Cut(trimmed, "=")
+		value = strings.TrimSpace(value)
+		for hasValue && strings.HasPrefix(value, "'") {
+			if _, complete := parseQuotedComposeEnvValue(value, '\''); complete {
+				break
+			}
+			if !scanner.Scan() {
+				if err := scanner.Err(); err != nil {
+					return File{}, fmt.Errorf("scan env file: %w", err)
+				}
+				return File{}, fmt.Errorf("unterminated single-quoted value for %s", strings.TrimSpace(key))
+			}
+			raw += "\n" + scanner.Text()
+			trimmed = strings.TrimSpace(raw)
+			key, value, hasValue = strings.Cut(trimmed, "=")
+			value = strings.TrimSpace(value)
+		}
+		if hasValue && (strings.HasPrefix(value, "'") || strings.HasPrefix(value, `"`)) {
+			if _, complete := parseQuotedComposeEnvValue(value, value[0]); !complete {
+				return File{}, fmt.Errorf("unterminated quoted value for %s", strings.TrimSpace(key))
+			}
+		}
 		parsed := parseLine(raw)
 		if parsed.entry {
 			if strict {
@@ -322,6 +352,8 @@ func parseQuotedComposeEnvValue(value string, quote byte) (string, bool) {
 				b.WriteByte('\t')
 			case '"', '\\':
 				b.WriteByte(next)
+			case '$':
+				b.WriteByte('$')
 			default:
 				b.WriteByte('\\')
 				b.WriteByte(next)
