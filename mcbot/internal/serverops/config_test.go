@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/snowy/mcbot/internal/mcconfig"
 )
 
 func TestOperationalSourceOwnership(t *testing.T) {
@@ -119,6 +121,43 @@ func TestComposeEnvBridgeUsesFileValues(t *testing.T) {
 	assertEnv(t, env, "MC_SERVER_PORT_PUBLISH", "25570:25565")
 	assertEnv(t, env, "UID", "1234")
 	assertEnv(t, env, "GID", "5678")
+}
+
+func TestLoadSourcesPreservesLegacyEnvOwnershipWithDefaultConfig(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	configPath := filepath.Join(dir, "mc-server.toml")
+
+	writeFile(t, envPath, "UID=1001\nGID=1001\n")
+	writeFile(t, configPath, mcconfig.Render(mcconfig.Defaults()))
+
+	cfg, err := LoadSources(Sources{EnvFile: envPath, ConfigFile: configPath})
+	if err != nil {
+		t.Fatalf("LoadSources failed: %v", err)
+	}
+	env := ComposeEnvironment(cfg)
+	assertEnv(t, env, "UID", "1001")
+	assertEnv(t, env, "GID", "1001")
+}
+
+func TestLoadSourcesKeepsExplicitConfigOwnershipOverLegacyEnv(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	configPath := filepath.Join(dir, "mc-server.toml")
+
+	writeFile(t, envPath, "UID=1001\nGID=1001\n")
+	cfg := mcconfig.Defaults()
+	cfg.Container.UID = 2000
+	cfg.Container.GID = 2000
+	writeFile(t, configPath, mcconfig.Render(cfg))
+
+	loaded, err := LoadSources(Sources{EnvFile: envPath, ConfigFile: configPath})
+	if err != nil {
+		t.Fatalf("LoadSources failed: %v", err)
+	}
+	env := ComposeEnvironment(loaded)
+	assertEnv(t, env, "UID", "2000")
+	assertEnv(t, env, "GID", "2000")
 }
 
 func TestMissingFilesFallBackToDefaults(t *testing.T) {

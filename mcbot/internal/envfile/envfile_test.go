@@ -67,6 +67,53 @@ func TestSetUpdatesLastDuplicateKey(t *testing.T) {
 	}
 }
 
+func TestSetPreservesComposeSensitiveValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "inline comment", value: "say #maintenance", want: `RCON_CMDS_STARTUP='say #maintenance'`},
+		{name: "apostrophe", value: "it's # ok", want: `RCON_CMDS_STARTUP='it\'s # ok'`},
+		{name: "newline", value: "say hi\nsay bye", want: "RCON_CMDS_STARTUP='say hi\nsay bye'"},
+		{name: "newline and dollar", value: "say $HOME\nsay done", want: "RCON_CMDS_STARTUP='say $HOME\nsay done'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeEnv(t, "")
+
+			if err := Set(path, "RCON_CMDS_STARTUP", tt.value); err != nil {
+				t.Fatalf("Set failed: %v", err)
+			}
+			if got := strings.TrimSpace(readEnv(t, path)); got != tt.want {
+				t.Fatalf("rendered value = %q, want %q", got, tt.want)
+			}
+			entry, err := Get(path, "RCON_CMDS_STARTUP", RevealPolicy{ShowSecrets: true})
+			if err != nil {
+				t.Fatalf("Get failed: %v", err)
+			}
+			if entry.Value != tt.value {
+				t.Fatalf("round-trip value = %q, want %q", entry.Value, tt.value)
+			}
+		})
+	}
+}
+
+func TestShowRejectsUnterminatedQuotedValueWithoutLeakingSecrets(t *testing.T) {
+	for _, quote := range []string{"'", `"`} {
+		path := writeEnv(t, "MC_CONTAINER_NAME="+quote+"unterminated\nDISCORD_TOKEN=secret-probe\n")
+
+		entries, err := Show(path, RevealPolicy{})
+		if err == nil {
+			t.Fatalf("Show entries = %#v, want unterminated quote error", entries)
+		}
+		if strings.Contains(err.Error(), "secret-probe") {
+			t.Fatalf("Show error leaked secret: %v", err)
+		}
+	}
+}
+
 func TestUnsetRemovesKey(t *testing.T) {
 	path := writeEnv(t, "# keep\nDISCORD_TOKEN=secret\nMC_CONTAINER_NAME=mc-server\n")
 
@@ -105,15 +152,19 @@ func TestValidateRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-func TestRejectsMcServerOwnedKeys(t *testing.T) {
+func TestLegacyMcServerKeysAreReadOnly(t *testing.T) {
 	if err := Set(writeEnv(t, ""), "VERSION", "1.20.1"); err == nil {
 		t.Fatal("Set VERSION error = nil, want ownership rejection")
 	}
 	path := writeEnv(t, "DISCORD_TOKEN=token\nMCBOT_TRUSTED_GUILD_ID=123456789012345678\nVERSION=1.20.1\n")
-	if err := ValidateFile(path); err == nil {
-		t.Fatal("ValidateFile with VERSION error = nil, want ownership rejection")
+	if err := ValidateFile(path); err != nil {
+		t.Fatalf("ValidateFile rejected read-only legacy VERSION: %v", err)
+	}
+	foreignPath := writeEnv(t, "FOREIGN_KEY=value\n")
+	if err := ValidateFile(foreignPath); err == nil {
+		t.Fatal("ValidateFile with FOREIGN_KEY error = nil, want ownership rejection")
 	} else {
-		assertContains(t, err.Error(), "VERSION is not owned by .env")
+		assertContains(t, err.Error(), "FOREIGN_KEY is not owned by .env")
 	}
 }
 
@@ -168,6 +219,17 @@ func TestValidateAllowsEmptyContainerNameAsDefault(t *testing.T) {
 
 	if err := ValidateFile(path); err != nil {
 		t.Fatalf("ValidateFile with empty MC_CONTAINER_NAME failed: %v", err)
+	}
+}
+
+func TestValidateFileRejectsInvalidLegacyOwnership(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("UID=invalid\nGID=1001\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	if err := ValidateFile(path); err == nil {
+		t.Fatal("ValidateFile accepted invalid legacy UID")
 	}
 }
 

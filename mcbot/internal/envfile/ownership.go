@@ -28,6 +28,21 @@ var ownedKeys = map[string]struct{}{
 	"RCON_CMDS_STARTUP":                {},
 }
 
+var legacyFileKeys = map[string]struct{}{
+	"MC_SERVER_RESTART_POLICY": {},
+	"MC_SERVER_PORT_PUBLISH":   {},
+	"UID":                      {},
+	"GID":                      {},
+	"VERSION":                  {},
+	"TYPE":                     {},
+	"DIFFICULTY":               {},
+	"MEMORY":                   {},
+	"INIT_MEMORY":              {},
+	"MOTD":                     {},
+	"VIEW_DISTANCE":            {},
+	"SIMULATION_DISTANCE":      {},
+}
+
 // IsOwned reports whether key belongs to the .env domain in the v1 operational contract.
 func IsOwned(key string) bool {
 	_, ok := ownedKeys[key]
@@ -37,6 +52,16 @@ func IsOwned(key string) bool {
 // ValidateOwnedKey rejects keys that env commands are not allowed to manage.
 func ValidateOwnedKey(key string) error {
 	if IsOwned(key) {
+		return nil
+	}
+	return fmt.Errorf("%s is not owned by .env", key)
+}
+
+func validateFileKey(key string) error {
+	if IsOwned(key) {
+		return nil
+	}
+	if _, ok := legacyFileKeys[key]; ok {
 		return nil
 	}
 	return fmt.Errorf("%s is not owned by .env", key)

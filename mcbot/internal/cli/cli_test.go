@@ -562,6 +562,35 @@ func TestSetupEnvFailureDoesNotPartiallyMutateOriginalFile(t *testing.T) {
 	}
 }
 
+func TestSetupEnvPreservesLegacyOwnershipKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	initial := setupInputLines(
+		"DISCORD_TOKEN=existing-discord-token",
+		"MCBOT_TRUSTED_GUILD_ID=123456789012345678",
+		"UID=1001",
+		"GID=1001",
+		"VERSION=1.20.1",
+		"TYPE=FORGE",
+		"MEMORY=14G",
+		"MC_SERVER_PORT_PUBLISH=25565:25565",
+	)
+	if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	defer SetEnvPathForTest(path)()
+
+	_, stderr, exitCode := runCLI(t, "--yes", "setup", "env")
+
+	if exitCode != ExitOK {
+		t.Fatalf("exit code = %d, want %d; stderr=%q", exitCode, ExitOK, stderr)
+	}
+	got := readTestFile(t, path)
+	assertContains(t, got, "UID=1001")
+	assertContains(t, got, "GID=1001")
+	assertContains(t, got, "VERSION=1.20.1")
+	assertContains(t, got, "MC_SERVER_PORT_PUBLISH=25565:25565")
+}
+
 func TestSetupEnvStageUsesPrivateTempDirOutsideEnvDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	if err := os.WriteFile(path, []byte("DISCORD_TOKEN=existing-discord-token\n"), 0o600); err != nil {

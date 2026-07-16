@@ -96,6 +96,8 @@ cp .env.example .env
 
 기본 UID/GID는 일반적인 첫 Linux 사용자와 맞는 `1000:1000`입니다. `mcbot setup config`는 가능하면 기존 `./data` 디렉터리 소유자 또는 현재 실행 사용자의 UID/GID를 감지해 추천합니다. 기존 Oracle Cloud/레거시 볼륨처럼 이미 `1001:1001`로 파일이 만들어진 환경에서는 setup의 `Custom UID/GID`에서 `1001:1001`을 선택하거나, 먼저 기존 `/data` 볼륨의 소유권을 새 UID/GID에 맞춰 조정하세요.
 
+이전 버전의 `.env`에 있던 mc-server 설정 키는 마이그레이션 중 읽기 전용으로 허용됩니다. 특히 UID/GID 한 쌍은 `mc-server.toml`이 기본 `1000:1000`인 동안 기존 볼륨 권한을 보호하기 위해 우선 적용됩니다. setup에서 값을 `mc-server.toml`로 옮긴 뒤에는 레거시 키를 `.env`에서 제거하세요.
+
 `mc-server.toml` 값을 바꾼 뒤 운영 반영은 기본적으로 canonical CLI 경로인 `mcbot server stop` 후 `mcbot server start`를 사용하세요. 아래 raw Compose 재생성 명령은 canonical CLI/TOML bridge를 우회하는 low-level/manual escape hatch입니다. CLI가 아닌 Compose 동작 자체를 직접 점검해야 할 때만 사용하세요:
 
 ```bash
@@ -141,7 +143,7 @@ TTY 터미널에서는 setup 헤더와 섹션이 ANSI 색상으로 강조됩니�
 | `unless-stopped` | 대부분 24/7로 켜두되, 수동 stop은 Docker daemon 재시작 뒤에도 유지하고 싶을 때 | Discord/CLI stop 뒤 Docker 정책은 대체로 정지를 유지하지만, 장애 복구는 Docker가 소유합니다. |
 | `always` | Docker가 항상 서버를 살려두는 상시 운영 | daemon 재시작 뒤 사용자가 꺼둔 서버도 다시 켜질 수 있어 Discord 버튼으로 끄는 UX와 가장 충돌하기 쉽습니다. |
 
-향후 Docker-managed restart(`on-failure`, `unless-stopped`)를 더 정교하게 지원하려면 bot runtime이 컨테이너 `StartedAt` 변경을 감지하고, log follow를 새 lifecycle 기준으로 다시 붙이며, Docker가 수행한 자동 재시작 이벤트를 bot 상태에 반영해야 합니다. 현재 기본 UX는 이 reconciliation이 없다는 전제로 `no`를 권장합니다.
+bot runtime은 컨테이너 `StartedAt` 변경을 감지해 log follow와 상태 감시를 새 lifecycle 기준으로 다시 연결합니다. 다만 Docker 정책과 bot의 자동 복구가 동시에 재시작을 결정하면 운영 의도가 복잡해질 수 있으므로 기본값은 여전히 `no`를 권장합니다.
 
 ### 3. CLI로 실행하고 운영하기
 

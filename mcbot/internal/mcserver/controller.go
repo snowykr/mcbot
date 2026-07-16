@@ -64,6 +64,12 @@ type Controller struct {
 	onStateChange            StateChangeCallback
 	syncWatcherCancel        context.CancelFunc
 	syncWatcherMu            sync.Mutex
+	syncWatcherReplaceMu     sync.Mutex
+	syncWatcherActionMu      sync.Mutex
+	syncStateMu              sync.Mutex
+	startupStopMu            sync.Mutex
+	syncWatcherGeneration    atomic.Uint64
+	syncWatcherDone          chan struct{}
 	containerWatcherCancel   context.CancelFunc
 	runtimeLogSub            *Subscription
 	shutdownIntentFromInside atomic.Bool
@@ -99,6 +105,8 @@ type Controller struct {
 	runningLifecycleNanos atomic.Int64
 	externalStopIntentMu  sync.RWMutex
 	externalStopIntent    ExternalStopIntentStore
+	inspectContainer      func(context.Context, string) (*dockerctl.ContainerState, error)
+	startContainer        func(context.Context, string) error
 }
 
 func NewController(cfg *config.Config, stateManager *state.Manager) (*Controller, error) {
@@ -130,6 +138,8 @@ func NewControllerWithLogger(cfg *config.Config, stateManager *state.Manager, lo
 		playerTracker:      playerTracker,
 		lifecycleLogger:    logger,
 		externalStopIntent: serverops.NewFileIntentStore(serverops.BotDataDir()),
+		inspectContainer:   dockerctl.InspectContainer,
+		startContainer:     dockerctl.StartContainer,
 	}, nil
 }
 
@@ -258,9 +268,15 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 
 		opCtx := context.Background()
 
-		containerState, err := dockerctl.InspectContainer(opCtx, c.cfg.MCContainerName)
+		containerState, err := c.inspectContainer(opCtx, c.cfg.MCContainerName)
 		if err != nil {
-			c.applyTransitionError("docker_inspect_failed", err)
+			committed := c.runStartupTransition(func() {
+				c.applyTransitionError("docker_inspect_failed", err)
+			})
+			if !committed {
+				resultCh <- interruptedStartResult()
+				return
+			}
 			resultCh <- StartResult{
 				Success:      false,
 				ErrorMessage: fmt.Sprintf("컨테이너 상태 확인 실패: %v", err),
@@ -269,7 +285,13 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 		}
 
 		if !containerState.Exists {
-			c.applyStoppedWithError("container_not_found", fmt.Errorf("container not found"))
+			committed := c.runStartupTransition(func() {
+				c.applyStoppedWithError("container_not_found", fmt.Errorf("container not found"))
+			})
+			if !committed {
+				resultCh <- interruptedStartResult()
+				return
+			}
 			resultCh <- StartResult{
 				Success: false,
 				ErrorMessage: fmt.Sprintf(
@@ -296,8 +318,14 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 				reason:           "already_running",
 				err:              nil,
 			})
-			c.applyReconcileResult(result, "already_running", nil, true)
-			c.lifecycleLogger.OnServerStartFailed("already_running", nil)
+			committed := c.runStartupTransition(func() {
+				c.applyReconcileResult(result, "already_running", nil, true)
+				c.lifecycleLogger.OnServerStartFailed("already_running", nil)
+			})
+			if !committed {
+				resultCh <- interruptedStartResult()
+				return
+			}
 			resultCh <- StartResult{
 				Success:      false,
 				ErrorMessage: "서버가 이미 실행 중입니다.",
@@ -307,19 +335,37 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 
 		startTime := time.Now()
 
-		if err := dockerctl.StartContainer(opCtx, c.cfg.MCContainerName); err != nil {
-			c.applyTransitionError("docker_start_failed", err)
+		if err := c.startContainer(opCtx, c.cfg.MCContainerName); err != nil {
+			committed := c.runStartupTransition(func() {
+				c.applyTransitionError("docker_start_failed", err)
+			})
+			if !committed {
+				resultCh <- interruptedStartResult()
+				return
+			}
 			resultCh <- StartResult{
 				Success:      false,
 				ErrorMessage: fmt.Sprintf("컨테이너 시작 실패: %v", err),
 			}
 			return
 		}
-		c.setRunningLifecycleStartedAt(startTime)
+		lifecycleCtx, lifecycleCancel := context.WithTimeout(opCtx, time.Second)
+		lifecycleStartedAt := c.observeRunningLifecycle(lifecycleCtx)
+		lifecycleCancel()
+		committed := c.runStartupTransition(func() {
+			c.setRunningLifecycleStartedAt(lifecycleStartedAt)
+			c.playerTracker.Clear()
 
-		c.playerTracker.Clear()
-
-		c.logMux.Start(startTime)
+			logStartTime := startTime
+			if !lifecycleStartedAt.IsZero() {
+				logStartTime = lifecycleStartedAt
+			}
+			c.logMux.Start(logStartTime)
+		})
+		if !committed {
+			resultCh <- interruptedStartResult()
+			return
+		}
 
 		logCtx, logCancel := context.WithTimeout(context.Background(), c.cfg.ReadyTimeout)
 		defer logCancel()
@@ -331,7 +377,13 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 			select {
 			case logLine, ok := <-sub.Ch:
 				if !ok {
-					c.applyTransitionError(ReasonLogStreamEndedUnexpectedly, fmt.Errorf("log stream ended unexpectedly"))
+					committed := c.runStartupTransition(func() {
+						c.applyTransitionError(ReasonLogStreamEndedUnexpectedly, fmt.Errorf("log stream ended unexpectedly"))
+					})
+					if !committed {
+						resultCh <- interruptedStartResult()
+						return
+					}
 					resultCh <- StartResult{
 						Success:      false,
 						ErrorMessage: "로그 스트림이 예기치 않게 종료되었습니다.",
@@ -346,7 +398,13 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 
 				if failure := checkFailurePatterns(logLine.Text); failure != nil {
 					failureErr := fmt.Errorf("startup failure: %s", failure.Message)
-					c.applyStartupFailure(failure.PatternName, failureErr)
+					committed := c.runStartupTransition(func() {
+						c.applyStartupFailure(failure.PatternName, failureErr)
+					})
+					if !committed {
+						resultCh <- interruptedStartResult()
+						return
+					}
 					resultCh <- StartResult{
 						Success:      false,
 						ErrorMessage: failure.Message,
@@ -364,7 +422,13 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 						}
 
 						readyDuration := time.Since(startTime)
-						c.applyStartupSuccess(readyDuration, loadSeconds, startTime)
+						committed := c.runStartupTransition(func() {
+							c.applyStartupSuccess(readyDuration, loadSeconds, lifecycleStartedAt)
+						})
+						if !committed {
+							resultCh <- interruptedStartResult()
+							return
+						}
 
 						logCancel()
 
@@ -378,7 +442,13 @@ func (c *Controller) Start(_ context.Context) <-chan StartResult {
 				}
 
 			case <-logCtx.Done():
-				c.applyTransitionError("ready_timeout", fmt.Errorf("ready timeout exceeded"))
+				committed := c.runStartupTransition(func() {
+					c.applyTransitionError("ready_timeout", fmt.Errorf("ready timeout exceeded"))
+				})
+				if !committed {
+					resultCh <- interruptedStartResult()
+					return
+				}
 				resultCh <- StartResult{
 					Success:      false,
 					ErrorMessage: fmt.Sprintf("서버 시작 시간이 %v을 초과했습니다. 서버 로그를 확인해주세요.", c.cfg.ReadyTimeout),
@@ -517,7 +587,10 @@ func (c *Controller) GetPlayerTracker() *PlayerTracker {
 }
 
 func (c *Controller) SyncState(ctx context.Context) error {
-	containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
+	c.syncStateMu.Lock()
+	defer c.syncStateMu.Unlock()
+
+	containerState, err := c.inspectContainer(ctx, c.cfg.MCContainerName)
 	if err != nil {
 		return err
 	}
@@ -525,19 +598,35 @@ func (c *Controller) SyncState(ctx context.Context) error {
 	currentState := c.stateManager.GetState()
 
 	if containerState.Exists && containerState.Running {
-		c.setRunningLifecycleStartedAt(containerState.StartedAt)
+		lifecycleChanged := c.hasDifferentRunningLifecycle(containerState.StartedAt)
+		if lifecycleChanged {
+			c.stopSyncWatcher()
+		}
 		needsStartupSync := currentState == state.StateStopped ||
 			currentState == state.StateError ||
-			currentState == state.StateCrashed
+			currentState == state.StateCrashed ||
+			lifecycleChanged
+		if !containerState.StartedAt.IsZero() {
+			c.setRunningLifecycleStartedAt(containerState.StartedAt)
+		} else if needsStartupSync {
+			c.setRunningLifecycleStartedAt(time.Time{})
+		}
 
 		if needsStartupSync {
 			c.applyStateTransition(state.StateStarting)
 		}
 
-		c.logMux.Start(containerState.StartedAt)
+		if lifecycleChanged {
+			c.logMux.Stop()
+		}
+		watchStartedAt := containerState.StartedAt
+		if watchStartedAt.IsZero() {
+			watchStartedAt = time.Now()
+		}
+		c.logMux.Start(watchStartedAt)
 
 		if needsStartupSync {
-			c.startSyncWatcher(containerState.StartedAt)
+			c.startSyncWatcher(watchStartedAt)
 		}
 	} else {
 		result := c.reconcileState(reconcileInput{
@@ -554,27 +643,80 @@ func (c *Controller) SyncState(ctx context.Context) error {
 	return nil
 }
 
-func (c *Controller) startSyncWatcher(containerStartedAt time.Time) {
-	c.syncWatcherMu.Lock()
-	if c.syncWatcherCancel != nil {
-		c.syncWatcherCancel()
-	}
-
-	watchCtx, cancel := context.WithTimeout(context.Background(), c.cfg.ReadyTimeout)
-	c.syncWatcherCancel = cancel
-	c.syncWatcherMu.Unlock()
-
-	go c.syncWatcherLoop(watchCtx, containerStartedAt)
+func (c *Controller) hasDifferentRunningLifecycle(startedAt time.Time) bool {
+	currentStartedAt := c.runningLifecycleStartedAt()
+	return !startedAt.IsZero() && !currentStartedAt.IsZero() && !startedAt.Equal(currentStartedAt)
 }
 
-func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt time.Time) {
+func (c *Controller) startSyncWatcher(containerStartedAt time.Time) {
+	c.syncWatcherReplaceMu.Lock()
+	defer c.syncWatcherReplaceMu.Unlock()
+	c.stopSyncWatcherLocked()
+
+	watchCtx, watchCancel := context.WithTimeout(context.Background(), c.cfg.ReadyTimeout)
+	inspectCtx, inspectCancel := context.WithCancel(context.Background())
+	cancel := func() {
+		watchCancel()
+		inspectCancel()
+	}
+	generation := c.syncWatcherGeneration.Add(1)
+	done := make(chan struct{})
+	c.syncWatcherMu.Lock()
+	c.syncWatcherCancel = cancel
+	c.syncWatcherDone = done
+	c.syncWatcherMu.Unlock()
+
+	go c.syncWatcherLoop(watchCtx, inspectCtx, containerStartedAt, generation, done)
+}
+
+func (c *Controller) stopSyncWatcher() {
+	c.syncWatcherReplaceMu.Lock()
+	defer c.syncWatcherReplaceMu.Unlock()
+	c.stopSyncWatcherLocked()
+}
+
+func (c *Controller) stopSyncWatcherLocked() {
+	c.syncWatcherMu.Lock()
+	previousCancel := c.syncWatcherCancel
+	previousDone := c.syncWatcherDone
+	c.syncWatcherMu.Unlock()
+	c.syncWatcherGeneration.Add(1)
+	if previousCancel != nil {
+		previousCancel()
+	}
+	c.syncWatcherActionMu.Lock()
+	c.syncWatcherActionMu.Unlock()
+	if previousDone != nil {
+		<-previousDone
+	}
+	c.syncWatcherMu.Lock()
+	if c.syncWatcherDone == previousDone {
+		c.syncWatcherCancel = nil
+		c.syncWatcherDone = nil
+	}
+	c.syncWatcherMu.Unlock()
+}
+
+func (c *Controller) runSyncWatcherAction(generation uint64, action func()) bool {
+	c.syncWatcherActionMu.Lock()
+	defer c.syncWatcherActionMu.Unlock()
+	if c.syncWatcherGeneration.Load() != generation {
+		return false
+	}
+	action()
+	return true
+}
+
+func (c *Controller) syncWatcherLoop(ctx, inspectCtx context.Context, containerStartedAt time.Time, generation uint64, done chan struct{}) {
 	defer func() {
 		c.syncWatcherMu.Lock()
-		if c.syncWatcherCancel != nil {
+		if c.syncWatcherGeneration.Load() == generation && c.syncWatcherCancel != nil {
 			c.syncWatcherCancel()
 			c.syncWatcherCancel = nil
+			c.syncWatcherDone = nil
 		}
 		c.syncWatcherMu.Unlock()
+		close(done)
 	}()
 
 	sub := c.logMux.Subscribe()
@@ -587,12 +729,16 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 	for {
 		select {
 		case logLine, ok := <-sub.Ch:
+			if c.syncWatcherGeneration.Load() != generation {
+				return
+			}
 			if !ok {
-				currentState := c.stateManager.GetState()
-				if currentState == state.StateStarting {
-					c.applyStartupFailure(ReasonSyncLogStreamEnded, fmt.Errorf("log stream ended during startup"))
-					logutil.Infof("[SYNC_WATCHER] 로그 스트림 종료 - 시작 실패로 처리")
-				}
+				c.runSyncWatcherAction(generation, func() {
+					c.runStartupTransition(func() {
+						c.applyStartupFailure(ReasonSyncLogStreamEnded, fmt.Errorf("log stream ended during startup"))
+						logutil.Infof("[SYNC_WATCHER] 로그 스트림 종료 - 시작 실패로 처리")
+					})
+				})
 				return
 			}
 
@@ -603,8 +749,12 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 
 			if failure := checkFailurePatterns(logLine.Text); failure != nil {
 				failureErr := fmt.Errorf("startup failure: %s", failure.Message)
-				c.applyStartupFailure(failure.PatternName, failureErr)
-				logutil.Infof("[SYNC_WATCHER] 실패 패턴 감지: %s - %s", failure.PatternName, failure.Message)
+				c.runSyncWatcherAction(generation, func() {
+					c.runStartupTransition(func() {
+						c.applyStartupFailure(failure.PatternName, failureErr)
+						logutil.Infof("[SYNC_WATCHER] 실패 패턴 감지: %s - %s", failure.PatternName, failure.Message)
+					})
+				})
 				return
 			}
 
@@ -618,50 +768,60 @@ func (c *Controller) syncWatcherLoop(ctx context.Context, containerStartedAt tim
 					}
 
 					readyDuration := time.Since(containerStartedAt)
-					c.applyStartupSuccess(readyDuration, loadSeconds, containerStartedAt)
-					logutil.Infof("[SYNC_WATCHER] 서버 준비 완료 (로딩: %.2fs, 총 소요: %v)", loadSeconds, readyDuration)
+					c.runSyncWatcherAction(generation, func() {
+						c.runStartupTransition(func() {
+							c.applyStartupSuccess(readyDuration, loadSeconds, c.runningLifecycleStartedAt())
+							logutil.Infof("[SYNC_WATCHER] 서버 준비 완료 (로딩: %.2fs, 총 소요: %v)", loadSeconds, readyDuration)
+						})
+					})
 					return
 				}
 			}
 
 		case <-containerCheckTicker.C:
+			if c.syncWatcherGeneration.Load() != generation {
+				return
+			}
 			currentState := c.stateManager.GetState()
 			if currentState != state.StateStarting {
 				continue
 			}
 
-			containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
+			containerState, err := c.inspectContainer(ctx, c.cfg.MCContainerName)
 			if err != nil {
 				logutil.Debugf("[SYNC_WATCHER] 컨테이너 상태 확인 실패: %v", err)
 				continue
 			}
 
 			if !containerState.Running {
-				logutil.Infof("[SYNC_WATCHER] Starting 중 컨테이너 종료 감지 - Crashed로 전환")
-				result := c.reconcileState(reconcileInput{
-					currentState:     currentState,
-					containerExists:  containerState.Exists,
-					containerRunning: containerState.Running,
-					shutdownIntent:   false,
-					reason:           ReasonSyncContainerStopped,
-					err:              fmt.Errorf("container stopped during startup"),
+				c.runSyncWatcherAction(generation, func() {
+					c.handleStoppedDuringStartup(ctx, containerState.Exists, ReasonSyncContainerStopped)
 				})
-				c.applyReconcileResult(result, ReasonSyncContainerStopped, fmt.Errorf("container stopped during startup"), containerState.Exists)
 				return
 			}
 
 		case <-ctx.Done():
-			currentState := c.stateManager.GetState()
-			if currentState == state.StateStarting {
-				c.handleReadyTimeoutFallback(containerStartedAt)
+			if c.syncWatcherGeneration.Load() != generation {
+				return
 			}
+			c.runSyncWatcherAction(generation, func() {
+				c.runStartupTransition(func() {
+					c.handleReadyTimeoutFallback(inspectCtx, containerStartedAt)
+				})
+			})
 			return
 		}
 	}
 }
 
-func (c *Controller) handleReadyTimeoutFallback(containerStartedAt time.Time) {
-	containerState, err := dockerctl.InspectContainer(context.Background(), c.cfg.MCContainerName)
+func (c *Controller) handleReadyTimeoutFallback(parent context.Context, containerStartedAt time.Time) {
+	inspectTimeout := c.cfg.CrashDetectionInterval
+	if inspectTimeout <= 0 || inspectTimeout > time.Second {
+		inspectTimeout = time.Second
+	}
+	inspectCtx, cancel := context.WithTimeout(parent, inspectTimeout)
+	defer cancel()
+	containerState, err := c.inspectContainer(inspectCtx, c.cfg.MCContainerName)
 	if err != nil {
 		c.applyStartupFailure(ReasonSyncContainerInspectFailed, fmt.Errorf("container inspect failed: %w", err))
 		logutil.Infof("[SYNC_WATCHER] 컨테이너 상태 확인 실패: %v", err)
@@ -679,6 +839,56 @@ func (c *Controller) handleReadyTimeoutFallback(containerStartedAt time.Time) {
 		err:                fmt.Errorf("ready timeout exceeded"),
 	})
 	c.applyReconcileResult(result, ReasonSyncTimeout, fmt.Errorf("ready timeout exceeded"), containerState.Exists)
+}
+
+func (c *Controller) runStartupTransition(action func()) bool {
+	c.startupStopMu.Lock()
+	defer c.startupStopMu.Unlock()
+	if c.stateManager.GetState() != state.StateStarting {
+		return false
+	}
+	action()
+	return true
+}
+
+func interruptedStartResult() StartResult {
+	return StartResult{Success: false, ErrorMessage: "서버 시작이 외부 종료로 중단되었습니다."}
+}
+
+func (c *Controller) handleStoppedDuringStartup(ctx context.Context, containerExists bool, reason string) {
+	c.startupStopMu.Lock()
+	defer c.startupStopMu.Unlock()
+
+	currentState := c.stateManager.GetState()
+	if currentState != state.StateStarting && currentState != state.StateRunning && currentState != state.StateCrashed {
+		return
+	}
+	if c.hasShutdownIntent(ctx) {
+		logutil.Infof("[STARTUP_WATCHER] 시작 중 외부 종료 의도 감지 - 정상 종료로 처리")
+		c.handleNormalShutdown(currentState, containerExists)
+		return
+	}
+	if currentState != state.StateStarting || c.stateManager.GetState() != state.StateStarting {
+		return
+	}
+	err := fmt.Errorf("container stopped during startup")
+	result := c.reconcileState(reconcileInput{
+		currentState:     currentState,
+		containerExists:  containerExists,
+		containerRunning: false,
+		shutdownIntent:   false,
+		reason:           reason,
+		err:              err,
+	})
+	c.applyReconcileResult(result, reason, err, containerExists)
+}
+
+func (c *Controller) observeRunningLifecycle(ctx context.Context) time.Time {
+	containerState, err := c.inspectContainer(ctx, c.cfg.MCContainerName)
+	if err != nil || !containerState.Running {
+		return time.Time{}
+	}
+	return containerState.StartedAt
 }
 
 type reconcileInput struct {
@@ -713,6 +923,15 @@ func (c *Controller) reconcileState(input reconcileInput) reconcileResult {
 		input.currentState.Korean(), input.containerExists, input.containerRunning, input.shutdownIntent, input.reason)
 
 	if input.currentState == state.StateCrashed {
+		if !input.containerRunning && input.shutdownIntent {
+			logutil.Infof("[RECONCILE] Crashed -> Stopped (late shutdown intent)")
+			return reconcileResult{
+				action:             reconcileTransitionToStopped,
+				newState:           state.StateStopped,
+				shouldStopMux:      true,
+				shouldClearPlayers: true,
+			}
+		}
 		logutil.Debugf("[RECONCILE] Already crashed, no action")
 		return reconcileResult{action: reconcileNoAction}
 	}
@@ -738,6 +957,15 @@ func (c *Controller) reconcileState(input reconcileInput) reconcileResult {
 			}
 
 		case state.StateStarting:
+			if input.shutdownIntent {
+				logutil.Infof("[RECONCILE] Starting -> Stopped (shutdown requested during startup)")
+				return reconcileResult{
+					action:             reconcileTransitionToStopped,
+					newState:           state.StateStopped,
+					shouldStopMux:      true,
+					shouldClearPlayers: true,
+				}
+			}
 			logutil.Infof("[RECONCILE] Starting -> Crashed (container stopped during startup)")
 			return reconcileResult{
 				action:             reconcileTransitionToCrashed,
@@ -776,8 +1004,10 @@ func (c *Controller) reconcileState(input reconcileInput) reconcileResult {
 }
 
 func (c *Controller) applyStartupSuccess(readyDuration time.Duration, loadSeconds float64, lifecycleStartedAt time.Time) {
-	c.setRunningLifecycleStartedAt(lifecycleStartedAt)
-	c.clearStaleExternalStopIntent(context.Background(), lifecycleStartedAt)
+	if !lifecycleStartedAt.IsZero() {
+		c.setRunningLifecycleStartedAt(lifecycleStartedAt)
+		c.clearStaleExternalStopIntent(context.Background(), lifecycleStartedAt)
+	}
 	c.stateManager.ClearFailureCandidate()
 	c.stateManager.SetRunning(readyDuration)
 	c.notifyStateChange(state.StateRunning)
@@ -1079,7 +1309,7 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 		case <-ticker.C:
 			currentState := c.stateManager.GetState()
 
-			containerState, err := dockerctl.InspectContainer(ctx, c.cfg.MCContainerName)
+			containerState, err := c.inspectContainer(ctx, c.cfg.MCContainerName)
 			if err != nil {
 				consecutiveInspectFailures++
 				logutil.Debugf("[CONTAINER_WATCHER] 컨테이너 상태 확인 실패 (%d/%d): %v",
@@ -1107,7 +1337,26 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 			logutil.Debugf("[CONTAINER_WATCHER] tick - state=%s exists=%v running=%v shutdownIntent=%v",
 				currentState.Korean(), containerState.Exists, containerState.Running, shutdownIntent)
 
+			if containerState.Running && c.runningLifecycleStartedAt().IsZero() && !containerState.StartedAt.IsZero() {
+				c.setRunningLifecycleStartedAt(containerState.StartedAt)
+			}
+			if containerState.Running && c.hasDifferentRunningLifecycle(containerState.StartedAt) {
+				if err := c.SyncState(ctx); err != nil {
+					logutil.Debugf("[CONTAINER_WATCHER] 새 컨테이너 lifecycle 동기화 실패: %v", err)
+				}
+				continue
+			}
+
 			if currentState != state.StateRunning {
+				if currentState == state.StateStarting && !containerState.Running {
+					c.handleStoppedDuringStartup(ctx, containerState.Exists, ReasonRuntimeContainerStopped)
+					continue
+				}
+				if containerState.Running && (currentState == state.StateStopped || currentState == state.StateError || currentState == state.StateCrashed) {
+					if err := c.SyncState(ctx); err != nil {
+						logutil.Debugf("[CONTAINER_WATCHER] 외부 시작 상태 동기화 실패: %v", err)
+					}
+				}
 				continue
 			}
 
@@ -1115,7 +1364,7 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 				if c.hasShutdownIntent(ctx) {
 					logutil.Infof("[CONTAINER_WATCHER] 종료 의도 감지 (즉시) - 정상 종료로 처리")
 					c.handleNormalShutdown(currentState, containerState.Exists)
-					return
+					continue
 				}
 
 				logutil.Debugf("[CONTAINER_WATCHER] 컨테이너 종료 감지, 로그 워처 종료 또는 타임아웃 대기 (최대 %v)", ShutdownIntentGracePeriod)
@@ -1137,7 +1386,7 @@ func (c *Controller) containerWatchLoop(ctx context.Context, logWatcherDoneCh <-
 				if c.hasShutdownIntent(ctx) {
 					logutil.Infof("[CONTAINER_WATCHER] 종료 의도 감지 (대기 후) - 정상 종료로 처리")
 					c.handleNormalShutdown(currentState, containerState.Exists)
-					return
+					continue
 				}
 
 				// ctx 취소 + shutdownIntent=false: 보수적으로 비정상 종료(crash)로 처리
@@ -1166,15 +1415,9 @@ func (c *Controller) Shutdown() {
 	c.shutdownComplete.Store(true)
 
 	c.StopRuntimeWatchers()
-
-	c.syncWatcherMu.Lock()
-	cancel := c.syncWatcherCancel
-	c.syncWatcherCancel = nil
-	c.syncWatcherMu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
+	c.syncStateMu.Lock()
+	c.stopSyncWatcher()
+	c.syncStateMu.Unlock()
 
 	c.stopStateChangeWorker()
 	c.playerTracker.Close()

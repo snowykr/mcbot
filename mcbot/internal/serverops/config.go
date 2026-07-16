@@ -3,6 +3,7 @@ package serverops
 import (
 	"fmt"
 	"maps"
+	"strconv"
 
 	"github.com/snowy/mcbot/internal/envfile"
 	"github.com/snowy/mcbot/internal/mcconfig"
@@ -27,7 +28,31 @@ func LoadSources(sources Sources) (OperationalConfig, error) {
 	if err != nil {
 		return OperationalConfig{}, err
 	}
+	if err := preserveLegacyOwnership(env, &mcCfg); err != nil {
+		return OperationalConfig{}, err
+	}
 	return OperationalConfig{Env: env, MCConfig: mcCfg}, nil
+}
+
+func preserveLegacyOwnership(env envfile.File, cfg *mcconfig.Config) error {
+	uidText, hasUID := env.Values["UID"]
+	gidText, hasGID := env.Values["GID"]
+	defaults := mcconfig.Defaults().Container
+	if !hasUID || !hasGID || cfg.Container.UID != defaults.UID || cfg.Container.GID != defaults.GID {
+		return nil
+	}
+
+	uid, err := strconv.Atoi(uidText)
+	if err != nil || uid < 0 {
+		return fmt.Errorf("invalid legacy .env UID %q", uidText)
+	}
+	gid, err := strconv.Atoi(gidText)
+	if err != nil || gid < 0 {
+		return fmt.Errorf("invalid legacy .env GID %q", gidText)
+	}
+	cfg.Container.UID = uid
+	cfg.Container.GID = gid
+	return nil
 }
 
 func ComposeEnvironment(cfg OperationalConfig) map[string]string {
