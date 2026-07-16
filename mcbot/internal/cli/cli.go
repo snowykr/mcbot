@@ -821,12 +821,23 @@ func runSetupCombined(opts Options, prompter Prompter, out Output) error {
 			return UsageError("setup cancelled before write")
 		}
 	}
+	envRollback, err := prepareSetupEnvRollback(envPath, envResult.stagedPath)
+	if err != nil {
+		return ValidationError("%v", err)
+	}
 	if err := commitSetupEnvStage(envResult.stagedPath, envPath); err != nil {
+		if restoreErr := envRollback.restoreAfterFailedCommit(); restoreErr != nil {
+			return ValidationError("%v; restore env after env write failure: %v", err, restoreErr)
+		}
 		return ValidationError("%v", err)
 	}
 	if err := writeSetupConfig(out, configPath, cfg); err != nil {
+		if restoreErr := envRollback.restore(); restoreErr != nil {
+			return ValidationError("%v; restore env after config write failure: %v", err, restoreErr)
+		}
 		return err
 	}
+	envRollback.cleanup()
 	if _, err := envfile.Validate(envPath); err != nil {
 		return ValidationError("%v", err)
 	}

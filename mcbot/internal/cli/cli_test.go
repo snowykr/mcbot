@@ -411,6 +411,138 @@ func TestSetupYesUsesDefaults(t *testing.T) {
 	assertFileDoesNotExist(t, missingConfigPath)
 }
 
+func TestSetupCombinedRestoresEnvWhenConfigWriteFails(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), ".env")
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "mc-server.toml")
+	initialEnv := setupInputLines(
+		"DISCORD_TOKEN=existing-discord-token",
+		"MCBOT_TRUSTED_GUILD_ID=123456789012345678",
+	)
+	if err := os.WriteFile(envPath, []byte(initialEnv), 0o600); err != nil {
+		t.Fatalf("Write env failed: %v", err)
+	}
+	if err := mcconfig.Write(configPath, mcconfig.Defaults()); err != nil {
+		t.Fatalf("Write config failed: %v", err)
+	}
+	if err := os.Chmod(configDir, 0o500); err != nil {
+		t.Fatalf("Make config directory read-only: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(configDir, 0o700); err != nil {
+			t.Fatalf("Restore config directory permissions: %v", err)
+		}
+	})
+	defer SetEnvPathForTest(envPath)()
+	defer SetConfigPathForTest(configPath)()
+
+	_, stderr, exitCode := runCLI(t, "--yes", "setup")
+
+	if exitCode != ExitValidation {
+		t.Fatalf("exit code = %d, want %d; stderr=%q", exitCode, ExitValidation, stderr)
+	}
+	if got := readTestFile(t, envPath); got != initialEnv {
+		t.Fatalf("failed combined setup mutated env: got %q want %q", got, initialEnv)
+	}
+	if info, err := os.Stat(envPath); err != nil {
+		t.Fatalf("Stat restored env failed: %v", err)
+	} else if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("restored env mode = %v, want 0600", got)
+	}
+	if matches, err := filepath.Glob(filepath.Join(filepath.Dir(envPath), ".env-backup-*.tmp")); err != nil {
+		t.Fatalf("Glob rollback files failed: %v", err)
+	} else if len(matches) != 0 {
+		t.Fatalf("rollback files left behind: %v", matches)
+	}
+}
+
+func TestSetupEnvRollbackPreservesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "shared.env")
+	envPath := filepath.Join(dir, ".env")
+	stagedPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(targetPath, []byte("DISCORD_TOKEN=original\n"), 0o600); err != nil {
+		t.Fatalf("Write target env failed: %v", err)
+	}
+	if err := os.Symlink("shared.env", envPath); err != nil {
+		t.Fatalf("Create env symlink failed: %v", err)
+	}
+	if err := os.WriteFile(stagedPath, []byte("DISCORD_TOKEN=updated\n"), 0o600); err != nil {
+		t.Fatalf("Write staged env failed: %v", err)
+	}
+
+	rollback, err := prepareSetupEnvRollback(envPath, stagedPath)
+	if err != nil {
+		t.Fatalf("prepare rollback failed: %v", err)
+	}
+	defer rollback.cleanup()
+	if err := commitSetupEnvStage(stagedPath, envPath); err != nil {
+		t.Fatalf("commit staged env failed: %v", err)
+	}
+	if err := rollback.restore(); err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+
+	if target, err := os.Readlink(envPath); err != nil {
+		t.Fatalf("restored env is not a symlink: %v", err)
+	} else if target != "shared.env" {
+		t.Fatalf("restored symlink target = %q, want shared.env", target)
+	}
+}
+
+func TestSetupEnvRollbackRefusesConcurrentChange(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	stagedPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envPath, []byte("DISCORD_TOKEN=original\n"), 0o600); err != nil {
+		t.Fatalf("Write original env failed: %v", err)
+	}
+	if err := os.WriteFile(stagedPath, []byte("DISCORD_TOKEN=setup\n"), 0o600); err != nil {
+		t.Fatalf("Write staged env failed: %v", err)
+	}
+
+	rollback, err := prepareSetupEnvRollback(envPath, stagedPath)
+	if err != nil {
+		t.Fatalf("prepare rollback failed: %v", err)
+	}
+	defer rollback.cleanup()
+	if err := commitSetupEnvStage(stagedPath, envPath); err != nil {
+		t.Fatalf("commit staged env failed: %v", err)
+	}
+	concurrent := "DISCORD_TOKEN=concurrent\n"
+	if err := os.WriteFile(envPath, []byte(concurrent), 0o600); err != nil {
+		t.Fatalf("Write concurrent env failed: %v", err)
+	}
+
+	if err := rollback.restore(); err == nil {
+		t.Fatal("restore accepted a concurrent env change")
+	}
+	if got := readTestFile(t, envPath); got != concurrent {
+		t.Fatalf("rollback overwrote concurrent env: got %q want %q", got, concurrent)
+	}
+}
+
+func TestSetupEnvRollbackRemovesNewFile(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), ".env")
+	stagedPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(stagedPath, []byte("DISCORD_TOKEN=setup\n"), 0o600); err != nil {
+		t.Fatalf("Write staged env failed: %v", err)
+	}
+	rollback, err := prepareSetupEnvRollback(envPath, stagedPath)
+	if err != nil {
+		t.Fatalf("prepare rollback failed: %v", err)
+	}
+	defer rollback.cleanup()
+	if err := commitSetupEnvStage(stagedPath, envPath); err != nil {
+		t.Fatalf("commit staged env failed: %v", err)
+	}
+
+	if err := rollback.restore(); err != nil {
+		t.Fatalf("restore failed: %v", err)
+	}
+	assertFileDoesNotExist(t, envPath)
+}
+
 func TestSetupOverwriteConfirmationProtectsExistingEnv(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
 	initial := setupInputLines(

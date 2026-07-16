@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -263,6 +265,152 @@ func commitSetupEnvStage(stagedPath, path string) error {
 		return fmt.Errorf("replace env file: %w", err)
 	}
 	return nil
+}
+
+type setupEnvRollback struct {
+	path           string
+	backupPath     string
+	originalExists bool
+	expectedData   []byte
+	expectedMode   os.FileMode
+}
+
+func prepareSetupEnvRollback(path, stagedPath string) (*setupEnvRollback, error) {
+	expectedData, expectedMode, _, err := readSetupEnvFile(stagedPath)
+	if err != nil {
+		return nil, fmt.Errorf("read staged env before combined setup: %w", err)
+	}
+	backupPath, err := unusedSetupEnvPath(filepath.Dir(path), ".env-backup-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	rollback := &setupEnvRollback{path: path, backupPath: backupPath, expectedData: expectedData, expectedMode: expectedMode}
+	if err := os.Link(path, backupPath); err != nil {
+		if os.IsNotExist(err) {
+			placeholder, createErr := os.OpenFile(backupPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if createErr != nil {
+				return nil, fmt.Errorf("create env rollback placeholder: %w", createErr)
+			}
+			if closeErr := placeholder.Close(); closeErr != nil {
+				_ = os.Remove(backupPath)
+				return nil, fmt.Errorf("close env rollback placeholder: %w", closeErr)
+			}
+			return rollback, nil
+		}
+		if copyErr := copySetupEnvBackup(path, backupPath); copyErr != nil {
+			_ = os.Remove(backupPath)
+			return nil, copyErr
+		}
+	}
+	rollback.originalExists = true
+	return rollback, nil
+}
+
+func (r *setupEnvRollback) restore() error {
+	if err := atomicfile.Exchange(r.backupPath, r.path); err != nil {
+		return fmt.Errorf("exchange env with rollback backup: %w", err)
+	}
+	data, mode, _, err := readSetupEnvFile(r.backupPath)
+	if err != nil {
+		_ = atomicfile.Exchange(r.backupPath, r.path)
+		return err
+	}
+	if mode != r.expectedMode || !bytes.Equal(data, r.expectedData) {
+		if exchangeErr := atomicfile.Exchange(r.backupPath, r.path); exchangeErr != nil {
+			return fmt.Errorf("env changed concurrently and exchange-back failed: %w", exchangeErr)
+		}
+		return fmt.Errorf("env changed concurrently; refusing rollback")
+	}
+	if !r.originalExists {
+		if err := os.Remove(r.path); err != nil {
+			return fmt.Errorf("remove env rollback placeholder: %w", err)
+		}
+	}
+	if err := os.Remove(r.backupPath); err != nil {
+		return fmt.Errorf("remove rolled-back env: %w", err)
+	}
+	r.backupPath = ""
+	return nil
+}
+
+func (r *setupEnvRollback) restoreAfterFailedCommit() error {
+	r.cleanup()
+	return nil
+}
+
+func (r *setupEnvRollback) cleanup() {
+	if r.backupPath != "" {
+		_ = os.Remove(r.backupPath)
+	}
+}
+
+func readSetupEnvFile(path string) ([]byte, os.FileMode, os.FileInfo, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return data, info.Mode().Perm(), info, nil
+}
+
+func copySetupEnvBackup(path, backupPath string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect original env for rollback: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(path)
+		if err != nil {
+			return fmt.Errorf("read original env symlink for rollback: %w", err)
+		}
+		if err := os.Symlink(target, backupPath); err != nil {
+			return fmt.Errorf("copy original env symlink for rollback: %w", err)
+		}
+		return nil
+	}
+	data, mode, _, err := readSetupEnvFile(path)
+	if err != nil {
+		return fmt.Errorf("read original env for rollback: %w", err)
+	}
+	file, err := os.OpenFile(backupPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if err != nil {
+		return fmt.Errorf("create original env rollback copy: %w", err)
+	}
+	defer file.Close()
+	if err := file.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod original env rollback copy: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		return fmt.Errorf("write original env rollback copy: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync original env rollback copy: %w", err)
+	}
+	return nil
+}
+
+func unusedSetupEnvPath(dir, pattern string) (string, error) {
+	file, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return "", fmt.Errorf("create env rollback path: %w", err)
+	}
+	path := file.Name()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close env rollback placeholder: %w", err)
+	}
+	if err := os.Remove(path); err != nil {
+		return "", fmt.Errorf("remove env rollback placeholder: %w", err)
+	}
+	return path, nil
 }
 
 func atomicReplaceSetupEnv(path string, data []byte, mode os.FileMode) error {
