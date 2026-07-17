@@ -105,7 +105,9 @@ func TestDocsDescribeSetupWorkflow(t *testing.T) {
 	makefile := readRepoFile(t, repo, "Makefile")
 
 	for _, want := range []string{
-		"Guided onboarding starts with `mcbot setup` or `make setup`",
+		"Make is the recommended onboarding and operations interface.",
+		"canonical operational source of truth",
+		"Guided onboarding starts with `make setup`",
 		"mcbot setup",
 		"mcbot setup env",
 		"mcbot setup config",
@@ -114,7 +116,14 @@ func TestDocsDescribeSetupWorkflow(t *testing.T) {
 		"make setup-config",
 		"make up-all",
 		"make up-mc",
-		"direct `config ...` and `env ...` commands stay available",
+		"make status",
+		"make stop",
+		"`make up`은 Discord bot 컨테이너만 빌드하고 실행하며, `mc-server`를 생성하거나 준비 상태로 만들지 않습니다.",
+		"go run ./cmd/mcbot help",
+		"make go-build",
+		"./mcbot help",
+		"수동 Docker Compose escape hatch",
+		"direct Go CLI `config ...` and `env ...` commands stay available",
 		"--yes",
 		"--force",
 		"--no-input",
@@ -145,6 +154,14 @@ func TestDocsDescribeSetupWorkflow(t *testing.T) {
 	} {
 		assertContains(t, makefile, want)
 	}
+
+	install := strings.Index(readme, "## 설치 및 실행")
+	advancedCLI := strings.Index(readme, "## 고급 CLI 사용법")
+	manualCompose := strings.Index(readme, "### 수동 Docker Compose escape hatch")
+	firstRawCompose := strings.Index(readme, "docker compose create mc-server")
+	if install < 0 || advancedCLI < install || manualCompose < advancedCLI || firstRawCompose < manualCompose {
+		t.Fatal("README must present Make-first setup before advanced CLI and raw Compose escape-hatch commands")
+	}
 }
 
 func TestControllerMissingContainerGuidancePrefersCanonicalCLI(t *testing.T) {
@@ -158,7 +175,7 @@ func TestControllerMissingContainerGuidancePrefersCanonicalCLI(t *testing.T) {
 	}
 }
 
-func TestDocsDescribeCLIFirstWorkflow(t *testing.T) {
+func TestDocsDescribeUnderlyingCLIWorkflow(t *testing.T) {
 	repo := repoRoot(t)
 	readme := readRepoFile(t, repo, "docs", "README.md")
 	testingDoc := readRepoFile(t, repo, "docs", "TESTING.md")

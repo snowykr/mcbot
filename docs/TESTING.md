@@ -34,14 +34,14 @@ go test -v ./...
 
 ## CLI 회귀 테스트
 
-운영 기준은 `mcbot` CLI입니다. 서버 명령은 Discord 비밀값 없이 동작해야 하고, `server status`는 Docker inspection 결과를 읽어야 합니다.
+사용자 온보딩과 운영의 권장 인터페이스는 Make이며, 내부 동작의 기준은 `mcbot` CLI입니다. 서버 명령은 Discord 비밀값 없이 동작해야 하고, `server status`는 Docker inspection 결과를 읽어야 합니다.
 
 ```bash
 # 전체 회귀
 cd mcbot && go test ./...
 
 # CLI 계약만 빠르게 확인
-cd mcbot && go test ./internal/cli/... -run 'TestRuntimeWiringUsesBotRunEntryPoint|TestMakeOperationalTargetsAreDeduplicated|TestDocsDescribeCLIFirstWorkflow'
+cd mcbot && go test ./internal/cli/... -run 'TestRuntimeWiringUsesBotRunEntryPoint|TestMakeOperationalTargetsAreDeduplicated|TestDocsDescribeUnderlyingCLIWorkflow'
 
 # guided setup 문서와 래퍼 회귀
 cd mcbot && go test ./internal/cli/... -run 'TestDocsDescribeSetupWorkflow|TestMakeOperationalTargetsAreDeduplicated'
