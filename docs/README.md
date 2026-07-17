@@ -4,10 +4,10 @@
 
 ## 운영 기준
 
-- CLI is the canonical operational source of truth.
-- `mcbot bot run` starts the Discord bot runtime.
-- Guided onboarding starts with `mcbot setup` or `make setup`; direct `config ...` and `env ...` commands stay available for surgical edits and automation.
-- `mcbot server start|stop|status` do not require Discord credentials.
+- Make is the recommended onboarding and operations interface.
+- The Go CLI owns the underlying operational logic and is the internal canonical operational source of truth beneath Make.
+- Guided onboarding starts with `make setup`; direct Go CLI `config ...` and `env ...` commands stay available for surgical edits and automation.
+- `make up-mc|stop|status` do not require Discord credentials.
 - server status is Docker-derived.
 - Secret values are masked by default, and `--show-secrets` only applies to `env show|get`.
 - `--no-input` makes prompt-capable paths fail with exit code 2.
@@ -51,6 +51,29 @@
 
 ## 사전 요구사항
 
+### 시스템 요구사항
+
+- Linux
+- Git
+- Go 1.25.9 이상
+- GNU Make
+- Docker Engine
+- Docker Compose v2 (`docker compose`)
+
+다음 명령으로 설치 여부와 버전을 확인합니다.
+
+```bash
+git --version
+go version
+make --version
+docker --version
+docker compose version
+```
+
+Make 타겟은 Go CLI를 `go run`으로 호출합니다. 따라서 Go 1.25.9 이상은 필요하지만, `mcbot` 바이너리를 PATH에 별도로 설치할 필요는 없습니다.
+
+### Discord 준비
+
 1. Discord 봇 생성 및 토큰 발급
    - [Discord Developer Portal](https://discord.com/developers/applications)에서 애플리케이션 생성
    - Bot 섹션에서 토큰 발급
@@ -71,7 +94,20 @@
 
 ## 설치 및 실행
 
-### 1. 환경 변수 설정
+저장소 루트에서 다음 두 명령으로 설정하고 Discord bot을 실행합니다.
+
+```bash
+make setup
+make up
+```
+
+`make setup`은 `.env`와 `mc-server.toml`을 순서대로 안내하는 기본 설정 경로입니다. `make up`은 Discord bot 컨테이너만 빌드하고 실행하며, `mc-server`를 생성하거나 준비 상태로 만들지 않습니다. Minecraft 서버는 Discord 상시 임베드의 `서버 열기` 버튼으로 시작하거나, 저장소 루트에서 `make up-mc`로 시작합니다. 처음부터 bot과 Minecraft 서버를 모두 시작하려면 `make up-all`을 사용합니다.
+
+Make는 얇은 편의 래퍼이며 실제 설정 및 서버 제어 로직은 Go CLI가 담당합니다. 처음 사용하는 사용자의 기본 경로는 Make이고, CLI 직접 실행은 아래 `고급 CLI 사용법`에서 설명합니다.
+
+### 수동 설정 (guided setup을 사용하지 않는 경우)
+
+`make setup` 대신 파일을 직접 준비하고 편집하려는 경우에만 다음 경로를 사용합니다.
 
 ```bash
 cp .env.example .env
@@ -94,35 +130,24 @@ cp .env.example .env
 
 `mc-server.toml`은 mc-server 관련 설정의 기준 파일입니다. `.env.example`은 봇/배포/비밀값만 다룹니다.
 
-기본 UID/GID는 일반적인 첫 Linux 사용자와 맞는 `1000:1000`입니다. `mcbot setup config`는 가능하면 기존 `./data` 디렉터리 소유자 또는 현재 실행 사용자의 UID/GID를 감지해 추천합니다. 기존 Oracle Cloud/레거시 볼륨처럼 이미 `1001:1001`로 파일이 만들어진 환경에서는 setup의 `Custom UID/GID`에서 `1001:1001`을 선택하거나, 먼저 기존 `/data` 볼륨의 소유권을 새 UID/GID에 맞춰 조정하세요.
+기본 UID/GID는 일반적인 첫 Linux 사용자와 맞는 `1000:1000`입니다. `make setup-config`는 가능하면 기존 `./data` 디렉터리 소유자 또는 현재 실행 사용자의 UID/GID를 감지해 추천합니다. 기존 Oracle Cloud/레거시 볼륨처럼 이미 `1001:1001`로 파일이 만들어진 환경에서는 setup의 `Custom UID/GID`에서 `1001:1001`을 선택하거나, 먼저 기존 `/data` 볼륨의 소유권을 새 UID/GID에 맞춰 조정하세요.
 
 이전 버전의 `.env`에 있던 mc-server 설정 키는 마이그레이션 중 읽기 전용으로 허용됩니다. 특히 UID/GID 한 쌍은 `mc-server.toml`이 기본 `1000:1000`인 동안 기존 볼륨 권한을 보호하기 위해 우선 적용됩니다. setup에서 값을 `mc-server.toml`로 옮긴 뒤에는 레거시 키를 `.env`에서 제거하세요.
 
-`mc-server.toml` 값을 바꾼 뒤 운영 반영은 기본적으로 canonical CLI 경로인 `mcbot server stop` 후 `mcbot server start`를 사용하세요. 아래 raw Compose 재생성 명령은 canonical CLI/TOML bridge를 우회하는 low-level/manual escape hatch입니다. CLI가 아닌 Compose 동작 자체를 직접 점검해야 할 때만 사용하세요:
+`mc-server.toml` 값을 바꾼 뒤에는 `make stop` 후 `make up-mc`로 운영에 반영하세요. Compose 자체를 직접 점검해야 하는 예외적인 경우에는 아래 `수동 Docker Compose escape hatch`를 참고합니다.
 
-```bash
-docker compose stop mc-server
-docker compose rm -sf mc-server && docker compose create mc-server
-```
-
-### 2. 추천 시작 경로: guided setup
+### Guided setup 세부 동작
 
 처음 설치한 뒤에는 `setup` 흐름으로 시작하는 것이 권장됩니다. 이 경로는 `.env`와 `mc-server.toml`을 순서대로 안내하고, 직접 `config ...` 나 `env ...` 명령을 써서 한 파일씩 바꾸는 경로는 그대로 남겨 둡니다.
 
 ```bash
-cd mcbot && ./mcbot setup
-cd mcbot && ./mcbot setup env
-cd mcbot && ./mcbot setup config
-
-# Make는 얇은 래퍼만 제공합니다.
-make setup
 make setup-env
 make setup-config
 ```
 
-`setup`은 안내형 워크플로우입니다. `--yes`는 현재값이나 기본값만으로 진행 가능한 단계에서만 빠르게 통과합니다. 새 `mc-server.toml`의 UID/GID는 기존 `./data` 소유자, 현재 non-root 사용자, `1000:1000` fallback 순서로 자동 선택합니다. 기존 유효한 config가 있으면 그 값을 유지합니다. `DISCORD_TOKEN` 같은 필수 값이 없으면 config 단계 전에 검증 실패로 멈춥니다. `--force`는 setup에서도 허용되지만, 실제 프롬프트 입력이 필요한 경로가 비대화식이면 여전히 실패합니다. `--no-input`은 자동화용으로만 쓰고, 프롬프트가 필요해지는 순간 exit code 2로 중단됩니다. `--json`과 `--show-secrets`는 setup에서 지원하지 않습니다.
+`setup`은 안내형 워크플로우입니다. `--yes`는 현재값이나 기본값만으로 진행 가능한 단계에서만 빠르게 통과합니다. 새 `mc-server.toml`의 UID/GID는 기존 `./data` 소유자, 현재 non-root 사용자, `1000:1000` fallback 순서로 자동 선택합니다. 기존 유효한 config가 있으면 그 값을 유지합니다. `DISCORD_TOKEN` 같은 필수 값이 없으면 config 단계 전에 검증 실패로 멈춥니다. `--force`는 setup에서도 허용되지만, 실제 프롬프트 입력이 필요한 경로가 비대화식이면 여전히 실패합니다. `--no-input`은 자동화용으로만 쓰고, 프롬프트가 필요해지는 순간 CLI 자체는 exit code 2로 중단됩니다. `go run`은 이 종료 코드를 자체 exit code 1로 감싸고 `exit status 2`를 출력하므로, 종료 코드를 직접 판별하는 자동화에서는 `make go-build`로 만든 `./mcbot`을 사용하세요. `--json`과 `--show-secrets`는 setup에서 지원하지 않습니다.
 
-`mcbot setup`은 터미널에서 섹션 단위로 다음 항목을 안내합니다:
+`make setup`은 터미널에서 섹션 단위로 다음 항목을 안내합니다:
 
 1. **Discord bot**: Discord token, trusted guild, embed channel
 2. **Runtime features**: bot runtime/RCON 기본값과 고급 RCON 설정
@@ -130,7 +155,7 @@ make setup-config
 4. **Container behavior**: Docker restart policy, 포트 매핑, 고급 `container.uid`/`container.gid` ownership 선택
 5. **Review & write**: `.env`와 `mc-server.toml` 요약, 최종 쓰기 확인, 검증 결과 및 다음 실행 명령
 
-`mcbot setup config`만 실행하면 config 전용 흐름인 **Minecraft server**, **Container behavior**, 선택형 **Container ownership**, **Review & write**를 보여줍니다.
+`make setup-config`만 실행하면 config 전용 흐름인 **Minecraft server**, **Container behavior**, 선택형 **Container ownership**, **Review & write**를 보여줍니다.
 
 TTY 터미널에서는 setup 헤더와 섹션이 ANSI 색상으로 강조됩니다. 파이프/파일 출력이나 `NO_COLOR=1` 환경에서는 색상을 끄고 순수 텍스트만 출력합니다.
 
@@ -145,55 +170,27 @@ TTY 터미널에서는 setup 헤더와 섹션이 ANSI 색상으로 강조됩니�
 
 bot runtime은 컨테이너 `StartedAt` 변경을 감지해 log follow와 상태 감시를 새 lifecycle 기준으로 다시 연결합니다. 다만 Docker 정책과 bot의 자동 복구가 동시에 재시작을 결정하면 운영 의도가 복잡해질 수 있으므로 기본값은 여전히 `no`를 권장합니다.
 
-### 3. CLI로 실행하고 운영하기
-
-운영의 기준은 CLI입니다. Make는 편의 래퍼입니다.
+### 일상 운영
 
 ```bash
-# 봇 실행
-cd mcbot && go run ./cmd/mcbot bot run
-
-# 도움말 / 버전
-cd mcbot && ./mcbot help
-cd mcbot && ./mcbot version
-
-# 이미 빌드한 경우
-cd mcbot && ./mcbot bot run
-
-# 서버 운영
-cd mcbot && ./mcbot server status
-cd mcbot && ./mcbot server start
-cd mcbot && ./mcbot server stop
-
-# 설정 확인
-cd mcbot && ./mcbot config validate
-cd mcbot && ./mcbot env validate
-
-# 파일 내용 확인/수정
-cd mcbot && ./mcbot config show
-cd mcbot && ./mcbot config get server.version
-cd mcbot && ./mcbot config set server.version 1.21.4
-cd mcbot && ./mcbot config init
-cd mcbot && ./mcbot env show
-cd mcbot && ./mcbot env get DISCORD_TOKEN
-cd mcbot && ./mcbot env set MCBOT_DEBUG true
-cd mcbot && ./mcbot env unset MCBOT_DEBUG
-cd mcbot && ./mcbot env init
+make status
+make up-mc
+make stop
+make logs
+make down
 ```
 
-`mcbot server start|stop|status`는 Discord 비밀값이 없어도 동작합니다. `server status`는 Docker inspection만 읽습니다. 외부 CLI stop과 실행 중인 봇은 의도적으로 공존할 수 있고, CLI는 operator-intent 파일로 false crash recovery를 막습니다.
+`make status`, `make up-mc`, `make stop`은 각각 Go CLI의 서버 상태 확인, 시작, 종료를 호출합니다. 이 서버 명령은 Discord 비밀값이 없어도 동작하며 상태 확인은 Docker inspection만 읽습니다. `make logs`는 Compose 로그를 따라가고, `make down`은 Compose 서비스를 중지하고 제거합니다.
 
-`mcbot config set`과 `mcbot env set`도 같은 CLI 계약의 일부입니다.
+`make nuke`는 컨테이너뿐 아니라 볼륨과 네트워크까지 제거하는 파괴적 초기화 명령입니다. 데이터 손실을 의도한 고급 복구 상황에서만 사용하세요.
 
-전역 옵션은 항상 명령 앞에 둡니다. 형식은 `mcbot [global options] <command> [args]` 입니다.
+### 설정용 Make 타겟
 
-`config` 명령은 `mc-server.toml`만, `env` 명령은 `.env`만 다룹니다. `config show|get|validate`와 `env show|get|validate`는 `--json` 출력을 지원합니다. `env show|get`는 기본적으로 secret value를 `***MASKED***`로 가리고, 실제 값을 보려면 `--show-secrets`를 사용하세요.
+`make config-show`, `make config-get ARGS='<key>'`, `make config-init`, `make config-validate`는 `mc-server.toml`을 다룹니다. `make env-show`, `make env-get ARGS='<key>'`, `make env-unset ARGS='<key>'`, `make env-init`, `make env-validate`는 `.env`를 다룹니다. 값 변경은 셸에서 `ARGS`로 비밀값이나 신뢰할 수 없는 값을 전달하지 말고 대화형 `make setup`을 사용하세요.
 
-`config init`과 `env init`은 기존 파일을 덮어쓸 수 있으므로, 비대화식 경로에서는 `--yes` 또는 `--force`를 명시해야 합니다. `--no-input`이 켜진 prompt-capable 경로는 exit code 2로 실패합니다. `config ... --file <path>`와 `env ... --file <path>`를 사용하면 기본 경로 대신 다른 파일을 대상으로 실행할 수 있습니다. `--quiet`는 성공 메시지 같은 비필수 출력을 숨깁니다.
+Go CLI의 `config set`과 `env set`도 같은 CLI 계약의 일부입니다. 직접 호출법과 전역 옵션은 `고급 CLI 사용법`을 참고합니다.
 
-`make setup`, `make setup-env`, `make setup-config`, `make up`, `make up-all`, `make up-mc`, `make stop`, `make status`, `make config-validate`, `make env-validate`는 같은 CLI/Compose 운영 경로를 감싼 편의 래퍼입니다.
-
-### 3. 디스코드에서 사용
+### 디스코드에서 사용
 
 - 상시 임베드 메시지에 표시되는 버튼으로 서버 시작/종료를 제어합니다.
 - 임베드 메시지가 삭제된 경우 자동으로 복구되므로 따로 조치할 필요가 없습니다.
@@ -204,20 +201,47 @@ cd mcbot && ./mcbot env init
 
 ---
 
+## 고급 CLI 사용법
+
+Make 없이 CLI를 직접 호출해야 하는 자동화나 디버깅에서는 바이너리를 설치하지 않고 `go run`을 사용할 수 있습니다.
+
+```bash
+cd mcbot && go run ./cmd/mcbot help
+cd mcbot && go run ./cmd/mcbot setup
+cd mcbot && go run ./cmd/mcbot server status
+cd mcbot && go run ./cmd/mcbot server start
+cd mcbot && go run ./cmd/mcbot server stop
+cd mcbot && go run ./cmd/mcbot config validate
+cd mcbot && go run ./cmd/mcbot env validate
+```
+
+반복 실행을 위해 저장소 로컬 바이너리가 필요하면 먼저 빌드한 뒤 해당 파일을 직접 실행합니다. 이 흐름도 PATH 설치를 요구하지 않습니다.
+
+```bash
+make go-build
+cd mcbot && ./mcbot help
+cd mcbot && ./mcbot bot run
+cd mcbot && ./mcbot config show
+cd mcbot && ./mcbot config get server.version
+cd mcbot && ./mcbot config set server.version 1.21.4
+cd mcbot && ./mcbot env show
+cd mcbot && ./mcbot env get DISCORD_TOKEN
+cd mcbot && ./mcbot env set MCBOT_DEBUG true
+```
+
+전역 옵션은 항상 명령 앞에 둡니다. 형식은 `go run ./cmd/mcbot [global options] <command> [args]` 또는 `./mcbot [global options] <command> [args]`입니다. `config` 명령은 `mc-server.toml`만, `env` 명령은 `.env`만 다룹니다. `config show|get|validate`와 `env show|get|validate`는 `--json` 출력을 지원합니다. `env show|get`는 기본적으로 secret value를 `***MASKED***`로 가리고, 실제 값을 보려면 `--show-secrets`를 사용하세요.
+
+`config init`과 `env init`은 기존 파일을 덮어쓸 수 있으므로, 비대화식 경로에서는 `--yes` 또는 `--force`를 명시해야 합니다. `--no-input`이 켜진 prompt-capable 경로에서 CLI 자체는 exit code 2로 실패하며, `go run`으로 실행하면 셸에서는 exit code 1과 `exit status 2`로 관찰됩니다. `config ... --file <path>`와 `env ... --file <path>`를 사용하면 기본 경로 대신 다른 파일을 대상으로 실행할 수 있습니다. `--quiet`는 성공 메시지 같은 비필수 출력을 숨깁니다.
+
 ## 고급 설정
 
-### 수동으로 컨테이너 생성 및 봇 실행 (manual escape hatch)
+### 수동 Docker Compose escape hatch
 
-세부적인 제어가 필요한 경우, 단계별로 실행할 수 있습니다. 이 절의 raw Docker Compose 흐름은 canonical CLI/TOML bridge를 우회하는 low-level/manual escape hatch이며, 일반 운영 경로는 `mcbot server start|stop|status`입니다.
+세부적인 제어가 필요한 경우, 단계별로 실행할 수 있습니다. 이 절의 raw Docker Compose 흐름은 Go CLI/TOML bridge를 우회하는 low-level/manual escape hatch이며, 일반 운영 경로는 `make up-mc`, `make stop`, `make status`입니다.
 
 #### 1) 마인크래프트 서버 컨테이너 생성 (최초 1회)
 
 mc-server 컨테이너를 **생성만 하고 실행하지 않습니다**.
-
-**Canonical CLI:**
-```bash
-mcbot server start
-```
 
 **Docker Compose v2 (manual escape hatch):**
 ```bash
@@ -255,7 +279,7 @@ docker compose up -d mcbot
 
 ## Make 명령어 레퍼런스
 
-프로젝트는 CLI를 감싼 편의 래퍼만 제공합니다. 운영의 기준은 항상 `mcbot ...` 입니다.
+프로젝트의 Make 타겟은 Go CLI를 감싼 얇은 편의 래퍼입니다. 일반 운영에는 아래 Make 명령을 우선 사용하고, 세밀한 자동화가 필요할 때만 Go CLI를 직접 호출합니다.
 
 ### CLI 래퍼
 
@@ -282,7 +306,7 @@ docker compose up -d mcbot
 
 | 명령어 | 설명 |
 |--------|------|
-| `make up` | Discord bot 컨테이너만 빌드 및 실행합니다. Minecraft 서버 컨테이너는 나중에 bot/CLI가 시작할 수 있는 준비 상태로 둡니다. |
+| `make up` | Discord bot 컨테이너만 빌드 및 실행합니다. Minecraft 서버 컨테이너를 생성하거나 시작하지 않습니다. |
 | `make up-all` | `mcbot server start`로 `mc-server.toml` 설정을 반영해 Minecraft 서버를 먼저 시작한 뒤 Discord bot 컨테이너를 실행합니다. |
 | `make up-mc` | Minecraft 서버만 시작합니다. 내부적으로 `mcbot server start`를 사용해 `mc-server.toml` 설정을 Compose 생성 환경에 반영합니다. |
 | `make down` | 모든 컨테이너 중지 및 제거 |
@@ -355,7 +379,7 @@ docker compose up -d mcbot
 
 ### Compose 서비스 이름과 컨테이너 이름
 
-`MC_CONTAINER_NAME`은 런타임 컨테이너의 이름만 바꿉니다. Compose의 서비스 키는 계속 `mc-server`이며, 이 이름을 기준으로 CLI와 Make 래퍼가 동작합니다. Minecraft 서버만 켤 때는 `make up-mc`를 사용하고, 운영의 기준은 `mcbot server ...` 입니다.
+`MC_CONTAINER_NAME`은 런타임 컨테이너의 이름만 바꿉니다. Compose의 서비스 키는 계속 `mc-server`이며, 이 이름을 기준으로 CLI와 Make 래퍼가 동작합니다. 일반 운영은 Make를 기준으로 하며, Minecraft 서버만 켤 때는 `make up-mc`를 사용합니다.
 
 `RCON_HOST`의 기본값이 `mc-server`인 이유도 동일합니다. Compose 네트워크에서 서비스 DNS는 서비스 키로 고정되므로, 컨테이너 이름을 바꿔도 `mc-server`가 기본입니다.
 
@@ -453,7 +477,7 @@ RCON_CMDS_STARTUP=gamerule keepInventory true
 **컨테이너 미존재 (인프라 미준비)**:
 - 상태: `StateStopped`
 - `lastError`에 상세 메시지 기록
-- 사용자에게 canonical CLI 경로인 `mcbot server start` 또는 Make 래퍼 `make up-mc` 안내
+- 사용자에게 `make up-mc`를 안내합니다. 이 Make 타겟은 내부적으로 Go CLI의 `server start`를 호출합니다.
 
 **실제 런타임 예외**:
 - 상태: `StateError`
