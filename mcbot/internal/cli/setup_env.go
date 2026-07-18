@@ -214,6 +214,11 @@ func collectSetupEnv(opts Options, prompter Prompter, out Output, path string, d
 }
 
 func createSetupEnvStage(path string) (string, func(), error) {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", nil, fmt.Errorf("refusing to replace symlinked env file: %s", path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", nil, fmt.Errorf("inspect env file: %w", err)
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", nil, fmt.Errorf("create env staging directory: %w", err)
@@ -230,10 +235,6 @@ func createSetupEnvStage(path string) (string, func(), error) {
 		return "", nil, fmt.Errorf("secure env staging directory: %w", err)
 	}
 	stagedPath := filepath.Join(stageDir, ".env")
-	mode := os.FileMode(0o600)
-	if info, statErr := os.Stat(path); statErr == nil {
-		mode = info.Mode().Perm()
-	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -242,7 +243,7 @@ func createSetupEnvStage(path string) (string, func(), error) {
 		}
 		data = nil
 	}
-	if err := os.WriteFile(stagedPath, data, mode); err != nil {
+	if err := os.WriteFile(stagedPath, data, 0o600); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("seed env staging file: %w", err)
 	}

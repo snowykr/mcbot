@@ -1,0 +1,60 @@
+name: Go 검증
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} 빌드 및 테스트
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            run_tests: true
+          - os: macos-latest
+            run_tests: false
+          - os: windows-latest
+            run_tests: false
+    defaults:
+      run:
+        working-directory: mcbot
+    steps:
+      - name: 저장소 가져오기
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Go 설치
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: mcbot/go.mod
+          cache-dependency-path: mcbot/go.sum
+      - name: 빌드
+        run: go build ./...
+      - name: 테스트
+        if: matrix.run_tests
+        run: go test -shuffle=on -count=1 ./...
+      - name: 테스트 패키지 컴파일
+        if: ${{ !matrix.run_tests }}
+        run: go test -run '^$' ./...
+
+  race:
+    name: Linux 경쟁 상태 검사
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcbot
+    steps:
+      - name: 저장소 가져오기
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Go 설치
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: mcbot/go.mod
+          cache-dependency-path: mcbot/go.sum
+      - name: 경쟁 상태 테스트
+        run: go test -race -shuffle=on -count=1 ./...

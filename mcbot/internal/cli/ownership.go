@@ -128,12 +128,12 @@ func applyAutomaticOwnership(cfg *mcconfig.Config, detection ownershipDetection,
 	if existingConfig {
 		return
 	}
-	if detection.dataDir != nil {
+	if detection.dataDir != nil && detection.dataDir.UID != 0 {
 		cfg.Container.UID = detection.dataDir.UID
 		cfg.Container.GID = detection.dataDir.GID
 		return
 	}
-	if detection.currentUser != nil && (detection.currentUser.UID != 0 || detection.currentUser.GID != 0) {
+	if detection.currentUser != nil && detection.currentUser.UID != 0 {
 		cfg.Container.UID = detection.currentUser.UID
 		cfg.Container.GID = detection.currentUser.GID
 		return
@@ -178,7 +178,7 @@ func ownershipCandidates(cfg *mcconfig.Config, detection ownershipDetection, exi
 			label:       "Use existing ./data owner",
 			pair:        *detection.dataDir,
 			description: "best when reusing existing Minecraft data",
-			recommended: !existingConfig,
+			recommended: !existingConfig && detection.dataDir.UID != 0,
 		})
 	}
 	if detection.currentUser != nil {
@@ -186,14 +186,14 @@ func ownershipCandidates(cfg *mcconfig.Config, detection ownershipDetection, exi
 			label:       "Use current user",
 			pair:        *detection.currentUser,
 			description: "matches the account running setup",
-			recommended: !existingConfig && detection.dataDir == nil && (detection.currentUser.UID != 0 || detection.currentUser.GID != 0),
+			recommended: !existingConfig && (detection.dataDir == nil || detection.dataDir.UID == 0) && detection.currentUser.UID != 0,
 		})
 	}
 	add(ownershipCandidate{
 		label:       "Use standard Linux default",
 		pair:        detection.fallback,
 		description: "common first user on Linux hosts",
-		recommended: !existingConfig && detection.dataDir == nil && (detection.currentUser == nil || (detection.currentUser.UID == 0 && detection.currentUser.GID == 0)),
+		recommended: !existingConfig && (detection.dataDir == nil || detection.dataDir.UID == 0) && (detection.currentUser == nil || detection.currentUser.UID == 0),
 	})
 	add(ownershipCandidate{
 		label:       "Custom UID/GID",
