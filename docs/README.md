@@ -63,7 +63,7 @@
 ### 지원 환경
 
 - **Linux**: 공식 지원 환경입니다. Docker Engine과 Docker Compose v2를 사용합니다.
-- **macOS**: 실험적 지원 환경입니다. Docker Desktop에서 기본 Docker 소켓(`/var/run/docker.sock`) 사용을 허용해야 합니다. CI에서 Go 빌드와 테스트를 수행하지만 실제 Minecraft 서버 운영은 별도 확인이 필요합니다.
+- **macOS**: 실험적 지원 환경입니다. Docker Desktop에서 기본 Docker 소켓(`/var/run/docker.sock`) 사용을 허용해야 합니다. CI에서는 Go 빌드와 테스트 패키지 컴파일만 확인하며, 실제 테스트와 Minecraft 서버 운영은 Docker Desktop 환경에서 별도 확인이 필요합니다.
 - **Windows**: WSL2의 Linux 환경에서 사용하는 방식만 지원 대상으로 봅니다. 네이티브 PowerShell 또는 명령 프롬프트에서의 Make 실행은 지원하지 않습니다.
 
 다음 명령으로 설치 여부와 버전을 확인합니다.

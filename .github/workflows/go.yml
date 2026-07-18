@@ -19,7 +19,7 @@ jobs:
           - os: ubuntu-latest
             run_tests: true
           - os: macos-latest
-            run_tests: true
+            run_tests: false
           - os: windows-latest
             run_tests: false
     defaults:
@@ -38,7 +38,7 @@ jobs:
       - name: 테스트
         if: matrix.run_tests
         run: go test -shuffle=on -count=1 ./...
-      - name: Windows 테스트 패키지 컴파일
+      - name: 테스트 패키지 컴파일
         if: ${{ !matrix.run_tests }}
         run: go test -run '^$' ./...
 
