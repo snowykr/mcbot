@@ -43,7 +43,7 @@ cd mcbot && go test ./...
 # CLI 계약만 빠르게 확인
 cd mcbot && go test ./internal/cli/... -run 'TestRuntimeWiringUsesBotRunEntryPoint|TestMakeOperationalTargetsAreDeduplicated|TestDocsDescribeUnderlyingCLIWorkflow'
 
-# guided setup 문서와 래퍼 회귀
+# 안내형 setup 문서와 래퍼 회귀
 cd mcbot && go test ./internal/cli/... -run 'TestDocsDescribeSetupWorkflow|TestMakeOperationalTargetsAreDeduplicated'
 
 # setup UX / restart policy / UID-GID ownership 회귀
@@ -66,9 +66,9 @@ cd mcbot && ./mcbot env get --file /tmp/test.env DISCORD_TOKEN
 cd mcbot && ./mcbot env validate
 ```
 
-`setup` 스모크 체크는 먼저 `mcbot setup`으로 시작 경로가 열리는지 보고, `mcbot --yes setup`으로 현재값과 기본값만으로 진행되는 비대화식 경로를 확인합니다. `mcbot --no-input setup`은 프롬프트가 필요한 순간 exit code 2로 실패해야 하고, `mcbot --force setup`은 플래그가 허용되더라도 비대화식 입력이 없으면 계속 실패해야 합니다.
+`setup` 간이 검증은 먼저 `mcbot setup`으로 시작 경로가 열리는지 보고, `mcbot --yes setup`으로 현재값과 기본값만으로 진행되는 비대화식 경로를 확인합니다. `mcbot --no-input setup`은 입력이 필요한 순간 종료 코드 2로 실패해야 하고, `mcbot --force setup`은 플래그가 허용되더라도 비대화식 입력이 없으면 계속 실패해야 합니다.
 
-`--json`은 `server status`, `config show|get|validate`, `env show|get|validate`에서만 허용됩니다. `--show-secrets`는 `env show|get`에서만 허용되고, setup에서는 둘 다 거부되어야 합니다. `--yes`, `--force`, `--quiet`, `--no-input` 같은 전역 옵션은 항상 명령 앞(`mcbot [global options] <command>`)에 둡니다. `config init`과 `env init`은 기존 파일이 있을 때 `--yes` 또는 `--force` 없이 덮어쓰면 안 되고, `--no-input`이 걸린 prompt-capable 경로는 exit code 2로 실패해야 합니다. `--quiet`는 성공 메시지를 숨기되 에러는 계속 stderr로 남겨야 합니다.
+`--json`은 `server status`, `config show|get|validate`, `env show|get|validate`에서만 허용됩니다. `--show-secrets`는 `env show|get`에서만 허용되고, setup에서는 둘 다 거부되어야 합니다. `--yes`, `--force`, `--quiet`, `--no-input` 같은 전역 옵션은 항상 명령 앞(`mcbot [global options] <command>`)에 둡니다. `config init`과 `env init`은 기존 파일이 있을 때 `--yes` 또는 `--force` 없이 덮어쓰면 안 되고, `--no-input`이 걸린 입력 가능 경로는 종료 코드 2로 실패해야 합니다. `--quiet`는 성공 메시지를 숨기되 에러는 계속 stderr로 남겨야 합니다.
 
 ## 수동 QA 체크리스트
 

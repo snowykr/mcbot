@@ -105,9 +105,9 @@ func TestDocsDescribeSetupWorkflow(t *testing.T) {
 	makefile := readRepoFile(t, repo, "Makefile")
 
 	for _, want := range []string{
-		"Make is the recommended onboarding and operations interface.",
-		"canonical operational source of truth",
-		"Guided onboarding starts with `make setup`",
+		"처음 설정하고 운영할 때는 Make 명령 사용을 권장합니다.",
+		"Go CLI가 내부 동작의 기준입니다.",
+		"처음 설정할 때는 `make setup`으로 시작합니다.",
 		"mcbot setup",
 		"mcbot setup env",
 		"mcbot setup config",
@@ -118,12 +118,12 @@ func TestDocsDescribeSetupWorkflow(t *testing.T) {
 		"make up-mc",
 		"make status",
 		"make stop",
-		"`make up`은 Discord bot 컨테이너만 빌드하고 실행하며, `mc-server`를 생성하거나 준비 상태로 만들지 않습니다.",
+		"`make up`은 Discord 봇 컨테이너만 빌드하고 실행하며, `mc-server`를 생성하거나 준비 상태로 만들지 않습니다.",
 		"go run ./cmd/mcbot help",
 		"make go-build",
 		"./mcbot help",
-		"수동 Docker Compose escape hatch",
-		"direct Go CLI `config ...` and `env ...` commands stay available",
+		"수동 Docker Compose 우회 경로",
+		"Go CLI의 `config ...`, `env ...` 명령도 계속 사용할 수 있습니다.",
 		"--yes",
 		"--force",
 		"--no-input",
@@ -134,7 +134,7 @@ func TestDocsDescribeSetupWorkflow(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"guided setup 문서와 래퍼 회귀",
+		"안내형 setup 문서와 래퍼 회귀",
 		"mcbot setup",
 		"mcbot --yes setup",
 		"mcbot --no-input setup",
@@ -157,7 +157,7 @@ func TestDocsDescribeSetupWorkflow(t *testing.T) {
 
 	install := strings.Index(readme, "## 설치 및 실행")
 	advancedCLI := strings.Index(readme, "## 고급 CLI 사용법")
-	manualCompose := strings.Index(readme, "### 수동 Docker Compose escape hatch")
+	manualCompose := strings.Index(readme, "### 수동 Docker Compose 우회 경로")
 	firstRawCompose := strings.Index(readme, "docker compose create mc-server")
 	if install < 0 || advancedCLI < install || manualCompose < advancedCLI || firstRawCompose < manualCompose {
 		t.Fatal("README must present Make-first setup before advanced CLI and raw Compose escape-hatch commands")
@@ -181,18 +181,18 @@ func TestDocsDescribeUnderlyingCLIWorkflow(t *testing.T) {
 	testingDoc := readRepoFile(t, repo, "docs", "TESTING.md")
 
 	for _, want := range []string{
-		"canonical operational source of truth",
+		"Go CLI가 내부 동작의 기준입니다.",
 		"mcbot bot run",
 		"mcbot server start",
 		"mcbot server stop",
 		"mcbot server status",
-		"do not require Discord credentials",
-		"server status is Docker-derived",
+		"Discord 인증 정보 없이 동작합니다.",
+		"서버 상태는 Docker 조회 결과를 기준으로 판단합니다.",
 		"mc-server.toml",
 		"***MASKED***",
 		"--show-secrets",
 		"--no-input",
-		"exit code 2",
+		"종료 코드 2",
 	} {
 		assertContains(t, readme, want)
 	}
