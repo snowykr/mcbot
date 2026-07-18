@@ -411,6 +411,19 @@ func TestSetupYesUsesDefaults(t *testing.T) {
 	assertFileDoesNotExist(t, missingConfigPath)
 }
 
+func TestAutomaticOwnershipNeverUsesRootUID(t *testing.T) {
+	for _, detection := range []ownershipDetection{
+		{currentUser: &ownershipPair{UID: 0, GID: 2345}, fallback: ownershipPair{UID: 1000, GID: 1000}},
+		{dataDir: &ownershipPair{UID: 0, GID: 3456}, currentUser: &ownershipPair{UID: 1234, GID: 2345}, fallback: ownershipPair{UID: 1000, GID: 1000}},
+	} {
+		cfg := mcconfig.Defaults()
+		applyAutomaticOwnership(&cfg, detection, false)
+		if cfg.Container.UID == 0 {
+			t.Fatalf("root ownership candidate was selected: %+v", cfg.Container)
+		}
+	}
+}
+
 func TestSetupCombinedRestoresEnvWhenConfigWriteFails(t *testing.T) {
 	envPath := filepath.Join(t.TempDir(), ".env")
 	configDir := t.TempDir()
@@ -456,37 +469,59 @@ func TestSetupCombinedRestoresEnvWhenConfigWriteFails(t *testing.T) {
 	}
 }
 
-func TestSetupEnvRollbackPreservesSymlink(t *testing.T) {
+func TestSetupEnvSecuresExistingFilePermissions(t *testing.T) {
+	envPath := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(envPath, []byte("DISCORD_TOKEN=existing-token\n"), 0o755); err != nil {
+		t.Fatalf("Write env failed: %v", err)
+	}
+
+	stagedPath, cleanup, err := createSetupEnvStage(envPath)
+	if err != nil {
+		t.Fatalf("Create setup env stage failed: %v", err)
+	}
+	defer cleanup()
+	if err := commitSetupEnvStage(stagedPath, envPath); err != nil {
+		t.Fatalf("Commit setup env stage failed: %v", err)
+	}
+
+	info, err := os.Stat(envPath)
+	if err != nil {
+		t.Fatalf("Stat env failed: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("setup env mode = %v, want 0600", got)
+	}
+}
+
+func TestSetupEnvRejectsSymlink(t *testing.T) {
 	dir := t.TempDir()
 	targetPath := filepath.Join(dir, "shared.env")
 	envPath := filepath.Join(dir, ".env")
-	stagedPath := filepath.Join(t.TempDir(), ".env")
-	if err := os.WriteFile(targetPath, []byte("DISCORD_TOKEN=original\n"), 0o600); err != nil {
+	const original = "DISCORD_TOKEN=original\n"
+	if err := os.WriteFile(targetPath, []byte(original), 0o644); err != nil {
 		t.Fatalf("Write target env failed: %v", err)
 	}
 	if err := os.Symlink("shared.env", envPath); err != nil {
 		t.Fatalf("Create env symlink failed: %v", err)
 	}
-	if err := os.WriteFile(stagedPath, []byte("DISCORD_TOKEN=updated\n"), 0o600); err != nil {
-		t.Fatalf("Write staged env failed: %v", err)
-	}
 
-	rollback, err := prepareSetupEnvRollback(envPath, stagedPath)
-	if err != nil {
-		t.Fatalf("prepare rollback failed: %v", err)
-	}
-	defer rollback.cleanup()
-	if err := commitSetupEnvStage(stagedPath, envPath); err != nil {
-		t.Fatalf("commit staged env failed: %v", err)
-	}
-	if err := rollback.restore(); err != nil {
-		t.Fatalf("restore failed: %v", err)
+	_, _, err := createSetupEnvStage(envPath)
+	if err == nil || !strings.Contains(err.Error(), "refusing to replace symlinked env file") {
+		t.Fatalf("createSetupEnvStage error = %v, want symlink rejection", err)
 	}
 
 	if target, err := os.Readlink(envPath); err != nil {
-		t.Fatalf("restored env is not a symlink: %v", err)
+		t.Fatalf("env is not a symlink after rejection: %v", err)
 	} else if target != "shared.env" {
-		t.Fatalf("restored symlink target = %q, want shared.env", target)
+		t.Fatalf("symlink target = %q, want shared.env", target)
+	}
+	if got := readTestFile(t, targetPath); got != original {
+		t.Fatalf("symlink target changed: got %q want %q", got, original)
+	}
+	if info, err := os.Stat(targetPath); err != nil {
+		t.Fatalf("Stat target env failed: %v", err)
+	} else if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("target env mode = %v, want unchanged 0644", got)
 	}
 }
 
